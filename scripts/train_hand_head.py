@@ -8,11 +8,11 @@ from diffsynth.utils.auxiliary import load_video
 from torchvision.transforms import functional as TVF
 import argparse
 
-# Importiamo la classe WorldMirror dal tuo progetto
+# Import the WorldMirror class from the project
 from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
 
 # ------------------------------------------------------------------
-# 1. Dataset per HOT3D (Parsing dei file .jsonl di MANO)
+# 1. Dataset for HOT3D (Parsing MANO .jsonl files)
 # ------------------------------------------------------------------
 class HOT3DHandDataset(Dataset):
     def __init__(self, seq_path, num_frames=16, res=(224, 224)):
@@ -20,15 +20,15 @@ class HOT3DHandDataset(Dataset):
         self.jsonl_path = os.path.join(seq_path, "hand_data/mano_hand_pose_trajectory.jsonl")
         self.res = res
         self.num_frames = num_frames
-        
+
         self.gt_data = []
         if not os.path.exists(self.jsonl_path):
-            raise FileNotFoundError(f"❌ Errore: Non trovo il file annotazioni in {self.jsonl_path}")
+            raise FileNotFoundError(f"❌ Error: Cannot find annotations file at {self.jsonl_path}")
 
-        print(f"📖 Caricamento annotazioni da: {self.jsonl_path}")
+        print(f"📖 Loading annotations from: {self.jsonl_path}")
         with open(self.jsonl_path, 'r') as f:
             lines = f.readlines()
-            # Leggiamo i primi 'num_frames' per questo test di overfitting
+            # Read the first 'num_frames' for this overfitting test
             for i in range(min(len(lines), self.num_frames)):
                 data = json.loads(lines[i])
                 hand0 = data["hand_poses"].get("0", {})
@@ -37,17 +37,17 @@ class HOT3DHandDataset(Dataset):
                     rot = torch.tensor(hand0["wrist_xform"]["q_wxyz"]) # 4
                     pose = torch.tensor(hand0["pose"]) # 15
                     vec = torch.cat([pos, rot, pose])
-                    # Padding a 63 per matchare l'output della hand_head
+                    # Padding to 63 to match the hand_head output
                     padding = torch.zeros(63 - vec.shape[0])
                     self.gt_data.append(torch.cat([vec, padding]))
                 else:
                     self.gt_data.append(torch.zeros(63))
 
     def __len__(self):
-        return 1 
+        return 1
 
     def __getitem__(self, idx):
-        # Caricamento video tramite utility interna
+        # Load video using internal utility
         pil_images = load_video(self.video_path, num_frames=self.num_frames, resolution=self.res)
         img_tensor = torch.stack([TVF.to_tensor(img) for img in pil_images], dim=0) # [S, 3, H, W]
         gt_joints = torch.stack(self.gt_data) # [S, 63]
@@ -55,12 +55,12 @@ class HOT3DHandDataset(Dataset):
 
 
 # ------------------------------------------------------------------
-# 2. Funzione Principale di Training
+# 2. Main Training Function
 # ------------------------------------------------------------------
 def train():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seq_path", required=True, help="Percorso alla sequenza HOT3D")
-    parser.add_argument("--checkpoint", default="models/reconstructor.ckpt", help="Checkpoint originale")
+    parser.add_argument("--seq_path", required=True, help="Path to the HOT3D sequence")
+    parser.add_argument("--checkpoint", default="models/reconstructor.ckpt", help="Original checkpoint")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--num_frames", type=int, default=16)
@@ -68,24 +68,24 @@ def train():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # --- INIZIALIZZAZIONE MODELLO ---
-    print(f"📦 Inizializzazione WorldMirror con Hand Head...")
-    # Il freeze_backbone=True è gestito nel tuo __init__ modificato
+    # --- MODEL INITIALIZATION ---
+    print(f"📦 Initializing WorldMirror with Hand Head...")
+    # freeze_backbone=True is handled in the modified __init__
     model = WorldMirror(enable_hand=True, freeze_backbone=True)
-    
-    print(f"📂 Caricamento pesi (Strict=False per ignorare la nuova testa)...")
+
+    print(f"📂 Loading weights (Strict=False to ignore the new head)...")
     checkpoint = torch.load(args.checkpoint, map_location=device)
     state_dict = checkpoint.get("state_dict", checkpoint.get("reconstructor", checkpoint))
-    
+
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    print(f"✅ Modello pronto. Parametri mancanti (Hand Head): {len(missing)}")
+    print(f"✅ Model ready. Missing parameters (Hand Head): {len(missing)}")
 
-    # Lasciamo il modello in Float32 per la stabilità delle LayerNorm
+    # Keep the model in Float32 for LayerNorm stability
     model.to(device)
-    model.train() 
+    model.train()
 
-    # --- OTTIMIZZATORE ---
-    # Ottimizziamo solo i parametri che richiedono gradienti (Hand Head)
+    # --- OPTIMIZER ---
+    # Only optimize parameters that require gradients (Hand Head)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = Adam(trainable_params, lr=args.lr)
 
@@ -93,14 +93,14 @@ def train():
     dataset = HOT3DHandDataset(args.seq_path, num_frames=args.num_frames)
     dataloader = DataLoader(dataset, batch_size=1)
 
-    print(f"🚀 Inizio Training su {device} con Automatic Mixed Precision (AMP)...")
+    print(f"🚀 Starting training on {device} with Automatic Mixed Precision (AMP)...")
 
     for epoch in range(args.epochs):
         for batch in dataloader:
             optimizer.zero_grad()
             
-            # Dati in Float32 (AMP gestirà la conversione interna)
-            imgs = batch["img"].to(device) 
+            # Data in Float32 (AMP will handle internal conversion)
+            imgs = batch["img"].to(device)
             gt = batch["gt_joints"].to(device)
 
             views = {
@@ -110,13 +110,10 @@ def train():
             }
 
             # --- MIXED PRECISION FORWARD PASS ---
-            # Risolve l'errore: expected scalar type Float but found BFloat16
+            # Resolves error: expected scalar type Float but found BFloat16
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-               # --- FIX TEMPORANEO (VERSIONE AGGIORNATA v3) ---
-                # --- FIX TEMPORANEO (VERSIONE AGGIORNATA v4 - Boolean Fix) ---
-               # --- FIX TEMPORANEO (VERSIONE AGGIORNATA v5 - No Conflict) ---
-                primo_t = next(iter(views.values()))
-                curr_b = primo_t.shape[0] if isinstance(primo_t, torch.Tensor) else 1
+                first_t = next(iter(views.values()))
+                curr_b = first_t.shape[0] if isinstance(first_t, torch.Tensor) else 1
                 curr_f = args.num_frames
                 
                 h_val, w_val = 512, 512
@@ -133,10 +130,10 @@ def train():
                 # --------------------------------------------------------
                 # --------------------------------------------------------
                 preds = model(views, is_inference=False, use_motion=False)
-                # Calcolo della Loss (MSE) tra i 63 valori predetti e il GT
+                # Compute MSE loss between the 63 predicted values and the GT
                 loss = F.mse_loss(preds["hand_joints"], gt)
-            
-            # Backpropagation (fuori dall'autocast)
+
+            # Backpropagation (outside autocast)
             loss.backward()
             optimizer.step()
 
