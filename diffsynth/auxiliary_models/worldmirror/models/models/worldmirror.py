@@ -200,10 +200,10 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         # hand tracking head
         if self.enable_hand:
             self.hand_head = DPTHead(
-                dim_in=2 * dim,     
-                output_dim=63,       # 21 joint * 3 coordinates (x,y,z)
+                dim_in=2 * dim,
+                output_dim=44,       # 2 hands * (3 t_xyz + 4 q_wxyz + 15 pose)
                 patch_size=patch_size,
-                activation="linear+none"   
+                activation="linear+none",
             )
 
     def forward(self, views: Dict[str, torch.Tensor], cond_flags: List[int]=[0, 0, 0], is_inference=True, use_motion=True):

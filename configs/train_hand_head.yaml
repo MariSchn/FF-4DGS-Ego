@@ -1,7 +1,10 @@
 data:
-  seq_path: "/home/marian/3dv/data/hot3d_aria/raw_data/P0001_4bf4e21a"
+  data_root: "/home/marian/3dv/data/hot3d_aria/raw_data"
   num_frames: 16
   resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.1
+  num_workers: 4
 
 model:
   checkpoint: "models/NeoVerse/reconstructor.ckpt"
@@ -10,6 +13,11 @@ model:
 
 training:
   lr: 1e-4
+  min_lr: 1e-6
   epochs: 100
-  log_every: 5
+  batch_size: 1
+  log_every: 1
+  save_every: 10
+  seed: 42
+  output_dir: "checkpoints"
   output_weights: "hand_head_weights.pt"
