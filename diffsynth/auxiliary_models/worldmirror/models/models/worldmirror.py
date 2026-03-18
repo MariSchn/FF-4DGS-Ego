@@ -56,6 +56,8 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         self.enable_motion = enable_motion
         self.enable_gs = enable_gs
         self.enable_dynamic_gs_attr = enable_dynamic_gs_attr
+        self.enable_hand = kwargs.get("enable_hand", True)
+        
         self.life_span_gamma = life_span_gamma
         self.dynamic_threshold = dynamic_threshold
         self.enable_global_motion_tracking = enable_global_motion_tracking
@@ -81,6 +83,12 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             condition_strategy=condition_strategy
         )
 
+        # freeze backbone
+        if kwargs.get("freeze_backbone", True):
+            for param in self.visual_geometry_transformer.parameters():
+                param.requires_grad = False
+            print("backbone frozen")
+
         # Initialize prediction heads
         self._init_heads(embed_dim, patch_size, gs_dim)
 
@@ -96,6 +104,7 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             "enable_depth": self.enable_depth,
             "enable_norm": self.enable_norm,
             "enable_gs": self.enable_gs,
+            "enable_hand": self.enable_hand,
             "patch_embed": self.patch_embed,
             "sampling_strategy": self.sampling,
             "dpt_checkpoint": self.dpt_checkpoint,
@@ -188,6 +197,15 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
                     activation="rotation+none", # use 'none' to disable confidence prediction
                 )
 
+        # hand tracking head
+        if self.enable_hand:
+            self.hand_head = DPTHead(
+                dim_in=2 * dim,     
+                output_dim=63,       # 21 joint * 3 coordinates (x,y,z)
+                patch_size=patch_size,
+                activation="linear+none"   
+            )
+
     def forward(self, views: Dict[str, torch.Tensor], cond_flags: List[int]=[0, 0, 0], is_inference=True, use_motion=True):
         """
         Execute forward pass through the WorldMirror model.
@@ -218,7 +236,7 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         # Generate all predictions
         preds = self._gen_all_preds(
             token_list, imgs, patch_start_idx, views, cond_flags, is_inference, use_motion,
-            fwd_token_list, bwd_token_list
+            fwd_token_list, bwd_token_list, 
         )
 
         for key, value in preds.items():
@@ -261,6 +279,17 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             preds["pts3d"] = pts
             preds["pts3d_conf"] = pts_conf
 
+        # tracking hand 
+        if self.enable_hand:
+            hand_joints, hand_conf = self.hand_head(
+                token_list, 
+                images=imgs, 
+                patch_start_idx=patch_start_idx,
+            )
+            hand_joints = hand_joints.mean(dim=(2, 3))
+            preds["hand_joints"] = hand_joints
+            preds["hand_conf"] = hand_conf
+            
         # Normal prediction
         if self.enable_norm:
             normals, norm_conf = self.norm_head(
@@ -305,6 +334,7 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             )
             preds["gs_depth"] = gs_depth
             preds["gs_depth_conf"] = gs_depth_conf
+
 
             # Dynamic GS attributes
             if self.enable_dynamic_gs_attr and use_motion:
