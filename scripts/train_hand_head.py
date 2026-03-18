@@ -1,5 +1,6 @@
 import os
 import json
+import yaml
 import torch
 import torch.nn.functional as F
 from torch.optim import Adam
@@ -10,6 +11,7 @@ import argparse
 
 # Import the WorldMirror class from the project
 from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
+
 
 # ------------------------------------------------------------------
 # 1. Dataset for HOT3D (Parsing MANO .jsonl files)
@@ -59,22 +61,25 @@ class HOT3DHandDataset(Dataset):
 # ------------------------------------------------------------------
 def train():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seq_path", required=True, help="Path to the HOT3D sequence")
-    parser.add_argument("--checkpoint", default="models/reconstructor.ckpt", help="Original checkpoint")
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--num_frames", type=int, default=16)
+    parser.add_argument("--config", default="configs/train_hand_head.yaml", help="Path to YAML config file")
     args = parser.parse_args()
 
+    with open(args.config, 'r') as f:
+        cfg = yaml.safe_load(f)
+
+    data_cfg     = cfg["data"]
+    model_cfg    = cfg["model"]
+    training_cfg = cfg["training"]
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
+
     # --- MODEL INITIALIZATION ---
     print(f"📦 Initializing WorldMirror with Hand Head...")
     # freeze_backbone=True is handled in the modified __init__
-    model = WorldMirror(enable_hand=True, freeze_backbone=True)
+    model = WorldMirror(enable_hand=model_cfg["enable_hand"], freeze_backbone=model_cfg["freeze_backbone"])
 
     print(f"📂 Loading weights (Strict=False to ignore the new head)...")
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint = torch.load(model_cfg["checkpoint"], map_location=device)
     state_dict = checkpoint.get("state_dict", checkpoint.get("reconstructor", checkpoint))
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
@@ -87,26 +92,31 @@ def train():
     # --- OPTIMIZER ---
     # Only optimize parameters that require gradients (Hand Head)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = Adam(trainable_params, lr=args.lr)
+    optimizer = Adam(trainable_params, lr=float(training_cfg["lr"]))
 
     # --- DATALOADER ---
-    dataset = HOT3DHandDataset(args.seq_path, num_frames=args.num_frames)
+    res = tuple(data_cfg["resolution"])
+    dataset = HOT3DHandDataset(data_cfg["seq_path"], num_frames=data_cfg["num_frames"], res=res)
     dataloader = DataLoader(dataset, batch_size=1)
+
+    num_frames = data_cfg["num_frames"]
+    epochs     = training_cfg["epochs"]
+    log_every  = training_cfg["log_every"]
 
     print(f"🚀 Starting training on {device} with Automatic Mixed Precision (AMP)...")
 
-    for epoch in range(args.epochs):
+    for epoch in range(epochs):
         for batch in dataloader:
             optimizer.zero_grad()
-            
+
             # Data in Float32 (AMP will handle internal conversion)
             imgs = batch["img"].to(device)
             gt = batch["gt_joints"].to(device)
 
             views = {
                 "img": imgs, # [1, S, 3, H, W]
-                "is_target": torch.zeros((1, args.num_frames), dtype=torch.bool, device=device),
-                "timestamp": torch.arange(0, args.num_frames, device=device).unsqueeze(0)
+                "is_target": torch.zeros((1, num_frames), dtype=torch.bool, device=device),
+                "timestamp": torch.arange(0, num_frames, device=device).unsqueeze(0)
             }
 
             # --- MIXED PRECISION FORWARD PASS ---
@@ -114,21 +124,18 @@ def train():
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 first_t = next(iter(views.values()))
                 curr_b = first_t.shape[0] if isinstance(first_t, torch.Tensor) else 1
-                curr_f = args.num_frames
-                
+                curr_f = num_frames
+
                 h_val, w_val = 512, 512
                 if "images" in views:
                     h_val, w_val = views["images"].shape[-2:]
-                
+
                 views["is_static"] = torch.zeros((curr_b, curr_f), dtype=torch.bool, device=device)
                 views["valid_mask"] = torch.ones((curr_b, curr_f, h_val, w_val), dtype=torch.bool, device=device)
                 views["camera_poses"] = torch.eye(4).view(1, 1, 4, 4).expand(curr_b, curr_f, 4, 4).to(device)
                 views["camera_intrs"] = torch.eye(3).view(1, 1, 3, 3).expand(curr_b, curr_f, 3, 3).to(device)
                 views["depthmap"] = torch.ones((curr_b, curr_f, h_val, w_val), dtype=torch.float32, device=device)
-                # -------------------------------------------------------------
-                # -------------------------------------------------------------
-                # --------------------------------------------------------
-                # --------------------------------------------------------
+
                 preds = model(views, is_inference=False, use_motion=False)
                 # Compute MSE loss between the 63 predicted values and the GT
                 loss = F.mse_loss(preds["hand_joints"], gt)
@@ -137,13 +144,13 @@ def train():
             loss.backward()
             optimizer.step()
 
-            if epoch % 5 == 0:
-                print(f"🔥 Epoch {epoch:03d}/{args.epochs} | Loss: {loss.item():.6f}")
+            if epoch % log_every == 0:
+                print(f"🔥 Epoch {epoch:03d}/{epochs} | Loss: {loss.item():.6f}")
 
-    # --- SALVATAGGIO FINALE ---
-    output_weights = "hand_head_weights.pt"
+    # --- SAVE FINAL WEIGHTS ---
+    output_weights = training_cfg["output_weights"]
     torch.save(model.hand_head.state_dict(), output_weights)
-    print(f"💾 Successo! Pesi della Hand Head salvati in: {output_weights}")
+    print(f"💾 Hand Head weights saved to: {output_weights}")
 
 if __name__ == "__main__":
     train()

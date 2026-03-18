@@ -1,0 +1,15 @@
+data:
+  seq_path: "/home/marian/3dv/data/hot3d_aria/raw_data/P0001_4bf4e21a"
+  num_frames: 16
+  resolution: [224, 224]
+
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  enable_hand: true
+  freeze_backbone: true
+
+training:
+  lr: 1e-4
+  epochs: 100
+  log_every: 5
+  output_weights: "hand_head_weights.pt"
