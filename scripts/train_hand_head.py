@@ -129,6 +129,7 @@ def train():
     model_cfg    = cfg["model"]
     training_cfg = cfg["training"]
     wandb_cfg    = cfg.get("wandb", {})
+    debug_cfg    = cfg.get("debug", {})
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -148,6 +149,11 @@ def train():
     if not all_seqs:
         raise RuntimeError(f"No sequences found in {data_cfg['data_root']}")
     print(f"Found {len(all_seqs)} sequences")
+
+    if debug_cfg.get("enabled", False):
+        max_seqs = debug_cfg.get("max_sequences", 5)
+        all_seqs = all_seqs[:max_seqs]
+        print(f"[DEBUG] Limited to {len(all_seqs)} sequences")
 
     random.seed(training_cfg.get("seed", 42))
     random.shuffle(all_seqs)

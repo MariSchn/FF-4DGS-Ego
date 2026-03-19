@@ -20,14 +20,18 @@ model:
 training:
   lr: 1e-4
   min_lr: 1e-6
-  epochs: 100
+  epochs: 10
   batch_size: 1
-  log_every: 100    # steps between train loss logs
-  val_every: 100   # steps between validation runs
+  log_every: 250    # steps between train loss logs
+  val_every: 250    # steps between validation runs
   save_every: 10    # epochs between checkpoint saves
   seed: 42
   output_dir: "checkpoints"
   output_weights: "hand_head_weights.pt"
+
+debug:
+  enabled: true
+  max_sequences: 10
 
 wandb:
   enabled: true
