@@ -1,32 +1,43 @@
-import os
+"""
+Train MANO hand parameter prediction head on Hot3D Aria data.
+
+Example:
+    python -m scripts.train_hand_head --config configs/train_hand_head.yaml
+"""
+
+import argparse
 import json
+import os
 import random
-import yaml
+
 import torch
 import torch.nn.functional as F
+import wandb
+import yaml
+from decord import VideoReader
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import Dataset, DataLoader
-from decord import VideoReader
-from diffsynth.utils.auxiliary import load_video
+from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import functional as TVF
-import argparse
 from tqdm import tqdm
-import wandb
 
 from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
+from diffsynth.utils.auxiliary import load_video
+
+HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
 
 
 # ------------------------------------------------------------------
 # Dataset
 # ------------------------------------------------------------------
+
 class HOT3DHandDataset(Dataset):
     """Sliding-window clips over a list of sequences."""
 
     def __init__(self, seq_dirs, num_frames=16, res=(224, 224), clip_stride=None):
         self.num_frames = num_frames
         self.res = res
-        self.clips = []  # list of {video_path, gt_frames, frame_offset}
+        self.clips = []
 
         if clip_stride is None:
             clip_stride = num_frames
@@ -54,14 +65,15 @@ class HOT3DHandDataset(Dataset):
                 for hand_id in ["0", "1"]:
                     hand = data["hand_poses"].get(hand_id, {})
                     if hand:
-                        pos   = torch.tensor(hand["wrist_xform"]["t_xyz"],  dtype=torch.float32)  # 3
-                        rot   = torch.tensor(hand["wrist_xform"]["q_wxyz"], dtype=torch.float32)  # 4
-                        pose  = torch.tensor(hand["pose"],                  dtype=torch.float32)  # 15
-                        betas = torch.tensor(hand["betas"],                 dtype=torch.float32)  # 10
-                        vecs.append(torch.cat([pos, rot, pose, betas]))
+                        vecs.append(torch.cat([
+                            torch.tensor(hand["wrist_xform"]["t_xyz"],  dtype=torch.float32),
+                            torch.tensor(hand["wrist_xform"]["q_wxyz"], dtype=torch.float32),
+                            torch.tensor(hand["pose"],                  dtype=torch.float32),
+                            torch.tensor(hand["betas"],                 dtype=torch.float32),
+                        ]))
                     else:
-                        vecs.append(torch.zeros(32))
-                gt_per_frame.append(torch.cat(vecs))  # 64
+                        vecs.append(torch.zeros(HAND_PARAM_DIM))
+                gt_per_frame.append(torch.cat(vecs))
 
             for start in range(0, total - num_frames + 1, clip_stride):
                 self.clips.append({
@@ -83,8 +95,8 @@ class HOT3DHandDataset(Dataset):
             sampling="first",
             frame_offset=clip["frame_offset"],
         )
-        imgs = torch.stack([TVF.to_tensor(img) for img in pil_images])  # [S, 3, H, W]
-        gt   = torch.stack(clip["gt_frames"])                            # [S, 64]
+        imgs = torch.stack([TVF.to_tensor(img) for img in pil_images])
+        gt = torch.stack(clip["gt_frames"])
         return {"img": imgs, "gt": gt}
 
 
@@ -100,6 +112,10 @@ def discover_sequences(data_root):
     return seqs
 
 
+# ------------------------------------------------------------------
+# Model helpers
+# ------------------------------------------------------------------
+
 def build_views(imgs, num_frames, device):
     B, _, _, H, W = imgs.shape
     return {
@@ -114,15 +130,72 @@ def build_views(imgs, num_frames, device):
     }
 
 
-def run_validation(model, val_loader, num_frames, device, vis_clip_indices=None):
-    """Run validation and optionally capture gt/pred at specific clip indices.
+# ------------------------------------------------------------------
+# Visualization helpers
+# ------------------------------------------------------------------
+
+def setup_vis_items(dataset, num_vis_frames, seq_cache, mano_model, preload=False):
+    """Set up visualization entries for a dataset.
 
     Args:
-        vis_clip_indices: set of clip indices to capture data for (or None)
+        dataset: HOT3DHandDataset
+        preload: if True, also load img/gt tensors (for train vis)
 
     Returns:
-        avg_loss, captured_data (dict: clip_idx -> {gt, pred}) if vis_clip_indices else avg_loss
+        List of dicts with 'clip_idx', 'ctx', and optionally 'img'/'gt'.
     """
+    from scripts.hand_vis_utils import setup_vis_context
+
+    n = len(dataset.clips)
+    step = max(1, n // num_vis_frames)
+    items = []
+    for clip_idx in torch.arange(0, n, step).tolist()[:num_vis_frames]:
+        clip = dataset.clips[clip_idx]
+        seq_path = clip["seq_path"]
+        if seq_path not in seq_cache:
+            seq_cache[seq_path] = setup_vis_context(seq_path, mano_model=mano_model)
+        ctx = seq_cache[seq_path]
+        if ctx is None:
+            continue
+
+        entry = {
+            "clip_idx": clip_idx,
+            "ctx": {**ctx, "frame_offset": clip["frame_offset"]},
+        }
+        if preload:
+            data = dataset[clip_idx]
+            entry["img"] = data["img"]
+            entry["gt"] = data["gt"]
+        items.append(entry)
+    return items
+
+
+def render_vis_list(vis_items, gt_pred_pairs, render_fn):
+    """Render visualization images from gt/pred pairs.
+
+    Args:
+        vis_items: list of dicts with 'ctx' (containing frame_offset)
+        gt_pred_pairs: list of (gt_tensor, pred_tensor) aligned with vis_items
+        render_fn: render_hand_comparison function
+
+    Returns:
+        List of wandb.Image objects.
+    """
+    images = []
+    for i, (item, (gt, pred)) in enumerate(zip(vis_items, gt_pred_pairs)):
+        ctx = item["ctx"]
+        vis_img = render_fn(ctx, ctx["frame_offset"], gt, pred)
+        if vis_img is not None:
+            images.append(wandb.Image(vis_img, caption=f"Frame {i}: Solid=GT, Wireframe=Pred"))
+    return images
+
+
+# ------------------------------------------------------------------
+# Validation
+# ------------------------------------------------------------------
+
+def run_validation(model, val_loader, num_frames, device, vis_clip_indices=None):
+    """Run validation and optionally capture gt/pred at specific clip indices."""
     model.eval()
     val_loss = 0.0
     captured = {}
@@ -130,7 +203,7 @@ def run_validation(model, val_loader, num_frames, device, vis_clip_indices=None)
     with torch.no_grad():
         for batch_idx, vbatch in enumerate(tqdm(val_loader, desc="Val", leave=False)):
             imgs = vbatch["img"].to(device)
-            gt   = vbatch["gt"].to(device)
+            gt = vbatch["gt"].to(device)
             preds = model(build_views(imgs, num_frames, device), is_inference=False, use_motion=False)
             val_loss += F.mse_loss(preds["hand_joints"], gt).item()
 
@@ -143,15 +216,26 @@ def run_validation(model, val_loader, num_frames, device, vis_clip_indices=None)
                             "pred": preds["hand_joints"][item_idx, 0].cpu(),
                         }
 
-    avg_loss = val_loss / max(len(val_loader), 1)
-    if vis_clip_indices is not None:
-        return avg_loss, captured
-    return avg_loss
+    return val_loss / max(len(val_loader), 1), captured
+
+
+def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
+    """Forward-pass fixed train clips and render visualizations."""
+    model.eval()
+    with torch.no_grad():
+        imgs = torch.stack([it["img"] for it in train_vis_items]).to(device)
+        preds = model(build_views(imgs, num_frames, device), is_inference=False, use_motion=False)
+        pairs = [
+            (item["gt"][0], preds["hand_joints"][i, 0].cpu())
+            for i, item in enumerate(train_vis_items)
+        ]
+    return render_vis_list(train_vis_items, pairs, render_fn)
 
 
 # ------------------------------------------------------------------
 # Training
 # ------------------------------------------------------------------
+
 def train():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/train_hand_head.yaml")
@@ -168,7 +252,7 @@ def train():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # --- MODEL ---
+    # --- Model ---
     model = WorldMirror(**{k: v for k, v in model_cfg.items() if k != "checkpoint"})
     checkpoint = torch.load(model_cfg["checkpoint"], map_location=device)
     state_dict = checkpoint.get("state_dict", checkpoint.get("reconstructor", checkpoint))
@@ -179,7 +263,7 @@ def train():
     hand_params = list(model.hand_head.parameters())
     print(f"Hand head parameters: {sum(p.numel() for p in hand_params):,}")
 
-    # --- DATA ---
+    # --- Data ---
     all_seqs = discover_sequences(data_cfg["data_root"])
     if not all_seqs:
         raise RuntimeError(f"No sequences found in {data_cfg['data_root']}")
@@ -192,9 +276,8 @@ def train():
 
     random.seed(training_cfg.get("seed", 42))
     random.shuffle(all_seqs)
-    n_val      = max(1, int(len(all_seqs) * float(data_cfg.get("val_split", 0.1))))
-    val_seqs   = all_seqs[:n_val]
-    train_seqs = all_seqs[n_val:]
+    n_val = max(1, int(len(all_seqs) * float(data_cfg.get("val_split", 0.1))))
+    val_seqs, train_seqs = all_seqs[:n_val], all_seqs[n_val:]
 
     num_frames       = data_cfg["num_frames"]
     res              = tuple(data_cfg["resolution"])
@@ -212,68 +295,42 @@ def train():
     val_loader   = DataLoader(val_set,   batch_size=batch_size, shuffle=False,
                               num_workers=num_workers, pin_memory=True, drop_last=False)
 
-    # --- VISUALIZATION SETUP ---
-    vis_entries = []       # val: list of (clip_idx, vis_context)
-    train_vis_items = []   # train: list of {img, gt, ctx}
+    # --- Visualization setup ---
     vis_cfg = cfg.get("visualization", {})
     mano_folder = vis_cfg.get("mano_model_folder")
     num_vis_frames = vis_cfg.get("num_vis_frames", 4)
+    render_fn = None
+    val_vis_items = []
+    train_vis_items = []
+
     if mano_folder and (len(val_set.clips) > 0 or len(train_set.clips) > 0):
-        from scripts.hand_vis_utils import setup_vis_context, render_hand_comparison, MANOModel
+        from scripts.hand_vis_utils import MANOModel, render_hand_comparison
+        render_fn = render_hand_comparison
         mano_model = MANOModel(mano_folder)
         seq_cache = {}
 
-        # Val vis clips (equally spaced)
-        if len(val_set.clips) > 0:
-            n_clips = len(val_set.clips)
-            val_vis_indices = [int(i * (n_clips - 1) / max(num_vis_frames - 1, 1)) for i in range(num_vis_frames)]
-            val_vis_indices = sorted(set(val_vis_indices))
-            for clip_idx in val_vis_indices:
-                clip = val_set.clips[clip_idx]
-                seq_path = clip["seq_path"]
-                if seq_path not in seq_cache:
-                    seq_cache[seq_path] = setup_vis_context(seq_path, mano_model=mano_model)
-                ctx = seq_cache[seq_path]
-                if ctx is not None:
-                    vis_entries.append((clip_idx, {**ctx, "frame_offset": clip["frame_offset"]}))
+        val_vis_items = setup_vis_items(val_set, num_vis_frames, seq_cache, mano_model)
+        train_vis_items = setup_vis_items(train_set, num_vis_frames, seq_cache, mano_model, preload=True)
 
-        # Train vis clips (equally spaced, pre-loaded)
-        if len(train_set.clips) > 0:
-            n_clips = len(train_set.clips)
-            train_vis_indices = [int(i * (n_clips - 1) / max(num_vis_frames - 1, 1)) for i in range(num_vis_frames)]
-            train_vis_indices = sorted(set(train_vis_indices))
-            for clip_idx in train_vis_indices:
-                clip = train_set.clips[clip_idx]
-                seq_path = clip["seq_path"]
-                if seq_path not in seq_cache:
-                    seq_cache[seq_path] = setup_vis_context(seq_path, mano_model=mano_model)
-                ctx = seq_cache[seq_path]
-                if ctx is not None:
-                    item = train_set[clip_idx]
-                    train_vis_items.append({
-                        "img": item["img"],
-                        "gt": item["gt"],
-                        "ctx": {**ctx, "frame_offset": clip["frame_offset"]},
-                    })
+        if val_vis_items or train_vis_items:
+            print(f"[VIS] {len(val_vis_items)} val + {len(train_vis_items)} train frames across {len(seq_cache)} sequences")
 
-        if vis_entries or train_vis_items:
-            print(f"[VIS] Enabled: {len(vis_entries)} val + {len(train_vis_items)} train frames across {len(seq_cache)} sequences")
-    vis_clip_indices = {idx for idx, _ in vis_entries} if vis_entries else None
+    val_vis_clip_indices = {it["clip_idx"] for it in val_vis_items} or None
 
-    # --- OPTIMIZER & SCHEDULER ---
+    # --- Optimizer & scheduler ---
     epochs     = training_cfg["epochs"]
     optimizer  = Adam(hand_params, lr=float(training_cfg["lr"]))
     scheduler  = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=float(training_cfg.get("min_lr", 1e-6)))
 
-    log_every  = training_cfg.get("log_every", 500)   # steps
-    val_every  = training_cfg.get("val_every", 2000)  # steps
-    save_every = training_cfg.get("save_every", 10)   # epochs
+    log_every  = training_cfg.get("log_every", 500)
+    val_every  = training_cfg.get("val_every", 2000)
+    save_every = training_cfg.get("save_every", 10)
     output_dir = training_cfg.get("output_dir", "checkpoints")
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"Training on {device} | {epochs} epochs | batch_size={batch_size} | grad_accum_steps={grad_accum_steps}")
 
-    # --- WANDB ---
+    # --- W&B ---
     use_wandb = wandb_cfg.get("enabled", False)
     if use_wandb:
         wandb.init(
@@ -288,39 +345,16 @@ def train():
     best_val_loss = float("inf")
     global_step = 0
 
-    def log_validation(step):
-        """Run validation, render vis frames, and log to wandb."""
-        if vis_entries:
-            val_loss, captured = run_validation(model, val_loader, num_frames, device, vis_clip_indices=vis_clip_indices)
-        else:
-            val_loss = run_validation(model, val_loader, num_frames, device)
-            captured = {}
-        tqdm.write(f"  step {step} | val_loss={val_loss:.6f}")
-        if use_wandb:
-            log_dict = {"val/loss": val_loss}
-            val_images = []
-            for i, (clip_idx, ctx) in enumerate(vis_entries):
-                if clip_idx in captured:
-                    vis_img = render_hand_comparison(
-                        ctx, ctx["frame_offset"],
-                        captured[clip_idx]["gt"], captured[clip_idx]["pred"],
-                    )
-                    if vis_img is not None:
-                        val_images.append(wandb.Image(vis_img, caption=f"Frame {i}: Solid=GT, Wireframe=Pred"))
-            if val_images:
-                log_dict["val/hand_overlay"] = val_images
-            wandb.log(log_dict, step=step)
-        return val_loss
-
+    # --- Training loop ---
     for epoch in tqdm(range(1, epochs + 1), desc="Epochs"):
-        # --- TRAIN ---
         model.train()
         optimizer.zero_grad()
+
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
             imgs = batch["img"].to(device)
-            gt   = batch["gt"].to(device)
+            gt = batch["gt"].to(device)
             preds = model(build_views(imgs, num_frames, device), is_inference=False, use_motion=False)
-            loss  = F.mse_loss(preds["hand_joints"], gt)
+            loss = F.mse_loss(preds["hand_joints"], gt)
             (loss / grad_accum_steps).backward()
 
             if (batch_idx + 1) % grad_accum_steps == 0:
@@ -328,31 +362,36 @@ def train():
                 optimizer.zero_grad()
                 global_step += 1
 
+                # --- Train logging ---
                 if global_step % log_every == 0 or global_step == 1:
                     lr = scheduler.get_last_lr()[0]
                     tqdm.write(f"  step {global_step} | train_loss={loss.item():.6f} | lr={lr:.2e}")
                     if use_wandb:
                         log_dict = {"train/loss": loss.item(), "lr": lr}
                         if train_vis_items:
-                            model.eval()
-                            train_images = []
-                            with torch.no_grad():
-                                vis_imgs = torch.stack([it["img"] for it in train_vis_items]).to(device)
-                                vis_preds = model(build_views(vis_imgs, num_frames, device), is_inference=False, use_motion=False)
-                                for i, item in enumerate(train_vis_items):
-                                    vis_img = render_hand_comparison(
-                                        item["ctx"], item["ctx"]["frame_offset"],
-                                        item["gt"][0], vis_preds["hand_joints"][i, 0].cpu(),
-                                    )
-                                    if vis_img is not None:
-                                        train_images.append(wandb.Image(vis_img, caption=f"Train {i}: Solid=GT, Wireframe=Pred"))
+                            train_images = render_train_vis(model, train_vis_items, num_frames, device, render_fn)
                             if train_images:
                                 log_dict["train/hand_overlay"] = train_images
                             model.train()
                         wandb.log(log_dict, step=global_step)
 
+                # --- Validation ---
                 if global_step % val_every == 0 or global_step == 1:
-                    val_loss = log_validation(global_step)
+                    val_loss, captured = run_validation(model, val_loader, num_frames, device, val_vis_clip_indices)
+                    tqdm.write(f"  step {global_step} | val_loss={val_loss:.6f}")
+
+                    if use_wandb:
+                        log_dict = {"val/loss": val_loss}
+                        if val_vis_items:
+                            pairs = [
+                                (captured[it["clip_idx"]]["gt"], captured[it["clip_idx"]]["pred"])
+                                for it in val_vis_items if it["clip_idx"] in captured
+                            ]
+                            val_images = render_vis_list(val_vis_items, pairs, render_fn)
+                            if val_images:
+                                log_dict["val/hand_overlay"] = val_images
+                        wandb.log(log_dict, step=global_step)
+
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         torch.save(model.hand_head.state_dict(), os.path.join(output_dir, "hand_head_best.pt"))
@@ -360,11 +399,10 @@ def train():
                     model.train()
 
         scheduler.step()
-
         if epoch % save_every == 0:
             torch.save(model.hand_head.state_dict(), os.path.join(output_dir, f"hand_head_epoch{epoch:04d}.pt"))
 
-    # --- SAVE FINAL ---
+    # --- Save final ---
     final = training_cfg.get("output_weights", os.path.join(output_dir, "hand_head_final.pt"))
     torch.save(model.hand_head.state_dict(), final)
     print(f"Final weights saved to: {final}")
