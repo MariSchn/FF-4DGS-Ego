@@ -1,9 +1,8 @@
 """
 Visualization utilities for MANO hand mesh overlay on Hot3D Aria RGB frames.
 
-Provides functions to generate MANO meshes from the 44-dim parameter vectors
-used in training, project them onto fisheye camera images, and render overlays
-comparing ground truth vs predicted hand poses.
+Uses the same frame-to-timecode mapping and projection logic as the standalone
+visualize_mano_hands.py script to ensure correct alignment.
 """
 
 import bisect
@@ -15,7 +14,6 @@ import cv2
 import numpy as np
 import smplx
 import torch
-from decord import VideoReader
 from projectaria_tools.core.calibration import CameraCalibration, FISHEYE624
 from projectaria_tools.core.sophus import SE3
 from scipy.spatial.transform import Rotation
@@ -52,28 +50,29 @@ class MANOModel:
         ):
             self.left.shapedirs[:, 0, :] *= -1
 
-    def get_mesh_from_params(self, params_32, is_right):
-        """Generate mesh from the flat 32-dim training parameter vector.
+    def get_mesh(self, hand_data, is_right):
+        """Generate mesh from raw JSONL hand data dict.
 
         Args:
-            params_32: tensor [32] = [pos(3), rot_qwxyz(4), pose(15), betas(10)]
+            hand_data: dict with 'pose', 'wrist_xform' (t_xyz, q_wxyz), 'betas'
             is_right: bool
 
         Returns:
             vertices: (778, 3) numpy array in world coordinates
             faces: (F, 3) numpy int array
         """
-        params = params_32.detach().cpu().float()
-        pos = params[:3].numpy()
-        q_wxyz = params[3:7].numpy()
-        pose = params[7:22].unsqueeze(0)
-        betas = params[22:32].unsqueeze(0)
+        betas = torch.tensor([hand_data["betas"]], dtype=torch.float32)
+        pose = torch.tensor([hand_data["pose"]], dtype=torch.float32)
+
+        wrist = hand_data["wrist_xform"]
+        t_xyz = np.array(wrist["t_xyz"])
+        q_wxyz = np.array(wrist["q_wxyz"])
 
         q_xyzw = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
         rotvec = Rotation.from_quat(q_xyzw).as_rotvec().astype(np.float32)
 
         global_orient = torch.from_numpy(rotvec).unsqueeze(0)
-        transl = torch.tensor(pos, dtype=torch.float32).unsqueeze(0)
+        transl = torch.tensor(t_xyz, dtype=torch.float32).unsqueeze(0)
 
         layer = self.right if is_right else self.left
         output = layer(
@@ -87,6 +86,28 @@ class MANOModel:
         vertices = output.vertices[0].detach().numpy()
         faces = layer.faces.astype(np.int32)
         return vertices, faces
+
+    def get_mesh_from_params(self, params_32, is_right):
+        """Generate mesh from the flat 32-dim training parameter vector.
+
+        Args:
+            params_32: tensor [32] = [pos(3), rot_qwxyz(4), pose(15), betas(10)]
+            is_right: bool
+
+        Returns:
+            vertices: (778, 3) numpy array in world coordinates
+            faces: (F, 3) numpy int array
+        """
+        params = params_32.detach().cpu().float()
+        hand_data = {
+            "wrist_xform": {
+                "t_xyz": params[:3].tolist(),
+                "q_wxyz": params[3:7].tolist(),
+            },
+            "pose": params[7:22].tolist(),
+            "betas": params[22:32].tolist(),
+        }
+        return self.get_mesh(hand_data, is_right)
 
 
 # ---------------------------------------------------------------------------
@@ -137,16 +158,14 @@ def load_headset_trajectory(csv_path):
     return poses
 
 
-def load_jsonl_timestamps(jsonl_path, max_entries=None):
-    """Load just the timestamp_ns from each JSONL line."""
-    timestamps = []
+def load_hand_poses(jsonl_path):
+    """Load MANO hand poses from JSONL. Returns dict: timecode_ns -> hand_data."""
+    hand_poses = {}
     with open(jsonl_path) as f:
-        for i, line in enumerate(f):
-            if max_entries is not None and i >= max_entries:
-                break
+        for line in f:
             entry = json.loads(line)
-            timestamps.append(entry["timestamp_ns"])
-    return timestamps
+            hand_poses[entry["timestamp_ns"]] = entry["hand_poses"]
+    return hand_poses
 
 
 def find_closest(sorted_keys, query):
@@ -244,9 +263,9 @@ PRED_RIGHT_COLOR = (50, 165, 255) # orange (BGR)
 
 
 def setup_vis_context(seq_path, mano_model_folder=None, mano_model=None):
-    """One-time setup: load camera calibration, headset trajectory.
+    """One-time setup: load camera calibration, headset trajectory, hand poses.
 
-    Provide either mano_model_folder (creates new model) or mano_model (reuses existing).
+    Uses the same data as the standalone visualize_mano_hands.py script.
     Returns a context dict, or None if required files are missing.
     """
     video_path = os.path.join(seq_path, "video_main_rgb.mp4")
@@ -265,8 +284,12 @@ def setup_vis_context(seq_path, mano_model_folder=None, mano_model=None):
     headset_poses = load_headset_trajectory(headset_path)
     headset_ts_sorted = sorted(headset_poses.keys())
 
-    n_video = len(VideoReader(video_path))
-    jsonl_timestamps = load_jsonl_timestamps(jsonl_path, max_entries=n_video)
+    hand_poses = load_hand_poses(jsonl_path)
+    hand_ts_sorted = sorted(hand_poses.keys())
+
+    cap = cv2.VideoCapture(video_path)
+    n_video = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
 
     return {
         "mano_model": mano_model,
@@ -274,61 +297,88 @@ def setup_vis_context(seq_path, mano_model_folder=None, mano_model=None):
         "cam_calib": cam_calib,
         "headset_poses": headset_poses,
         "headset_ts_sorted": headset_ts_sorted,
-        "jsonl_timestamps": jsonl_timestamps,
+        "hand_poses": hand_poses,
+        "hand_ts_sorted": hand_ts_sorted,
+        "n_video": n_video,
         "video_path": video_path,
     }
 
 
-def render_hand_comparison(vis_context, frame_idx, gt_params_44, pred_params_44):
+def _frame_to_timecode(frame_idx, n_video, hand_ts_sorted):
+    """Map video frame index to timecode via linear interpolation.
+
+    Same approach as the standalone visualize_mano_hands.py script.
+    """
+    ts_start = hand_ts_sorted[0]
+    ts_end = hand_ts_sorted[-1]
+    frac = frame_idx / max(n_video - 1, 1)
+    return int(ts_start + frac * (ts_end - ts_start))
+
+
+def render_hand_comparison(vis_context, frame_idx, gt_params, pred_params):
     """Render GT and predicted MANO hands overlaid on a full-resolution frame.
+
+    GT hands are rendered from the raw JSONL data (matching the standalone script's
+    approach for correct alignment). Predicted hands use the model output vector.
 
     Args:
         vis_context: dict from setup_vis_context
-        frame_idx: video frame index (matches JSONL line index)
-        gt_params_44: tensor [64] ground truth (2 hands x 32)
-        pred_params_44: tensor [64] predicted (2 hands x 32)
+        frame_idx: video frame index
+        gt_params: tensor [64] ground truth (unused for GT mesh, used only as fallback)
+        pred_params: tensor [64] predicted (2 hands x 32)
 
     Returns:
         RGB numpy image (H, W, 3) uint8 for wandb.Image, or None on failure.
     """
     try:
-        vr = VideoReader(vis_context["video_path"])
-        frame_rgb = vr[frame_idx].asnumpy()
-        image = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        cap = cv2.VideoCapture(vis_context["video_path"])
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, image = cap.read()
+        cap.release()
+        if not ret:
+            print(f"[VIS] Failed to read frame {frame_idx}")
+            return None
     except Exception as e:
         print(f"[VIS] Failed to read frame {frame_idx}: {e}")
         return None
 
-    # Get device pose for this frame via headset trajectory
-    tc_ns = vis_context["jsonl_timestamps"][frame_idx]
-    closest_ts = find_closest(vis_context["headset_ts_sorted"], tc_ns)
-    t_wd, q_wd_wxyz = vis_context["headset_poses"][closest_ts]
+    # Map frame to timecode using linear interpolation (same as standalone script)
+    query_tc = _frame_to_timecode(
+        frame_idx, vis_context["n_video"], vis_context["hand_ts_sorted"]
+    )
+
+    # Find closest headset pose
+    closest_headset_ts = find_closest(vis_context["headset_ts_sorted"], query_tc)
+    t_wd, q_wd_wxyz = vis_context["headset_poses"][closest_headset_ts]
     T_world_device = SE3.from_quat_and_translation(
         q_wd_wxyz[0], q_wd_wxyz[1:], t_wd
     )[0]
+
+    # Find closest hand pose from raw JSONL data
+    closest_hand_ts = find_closest(vis_context["hand_ts_sorted"], query_tc)
+    hand_data = vis_context["hand_poses"][closest_hand_ts]
 
     mano = vis_context["mano_model"]
     T_dev_cam = vis_context["T_device_camera"]
     cam_calib = vis_context["cam_calib"]
 
-    # Render GT hands (solid fill)
+    # Render GT hands from raw JSONL data (solid fill)
     for is_right, color in [(False, GT_LEFT_COLOR), (True, GT_RIGHT_COLOR)]:
-        offset = 32 if is_right else 0
-        params = gt_params_44[offset:offset + 32]
-        if params.abs().sum() < 1e-6:
+        hand_key = str(1 if is_right else 0)
+        if hand_key not in hand_data:
             continue
         try:
-            verts, faces = mano.get_mesh_from_params(params, is_right)
+            verts, faces = mano.get_mesh(hand_data[hand_key], is_right)
             pixels, depths, valid = project_vertices(verts, T_world_device, T_dev_cam, cam_calib)
             if valid.sum() >= 10:
                 image = render_mesh_overlay(image, pixels, faces, depths, valid, color, 0.35, False)
         except Exception as e:
             print(f"[VIS] GT {'right' if is_right else 'left'} failed: {e}")
 
-    # Render predicted hands (wireframe)
+    # Render predicted hands from model output (wireframe)
     for is_right, color in [(False, PRED_LEFT_COLOR), (True, PRED_RIGHT_COLOR)]:
         offset = 32 if is_right else 0
-        params = pred_params_44[offset:offset + 32]
+        params = pred_params[offset:offset + 32]
         if params.abs().sum() < 1e-6:
             continue
         try:
