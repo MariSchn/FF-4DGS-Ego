@@ -25,10 +25,9 @@ training:
   grad_accum_steps: 4
   log_every: 250    # steps between train loss logs
   val_every: 250    # steps between validation runs
-  save_every: 10    # epochs between checkpoint saves
+  save_every: 1000  # steps between checkpoint saves
   seed: 42
-  output_dir: "checkpoints"
-  output_weights: "vis_test.pt"
+  output_dir: "checkpoints/full_epoch"
 
 visualization:
   mano_model_folder: "models/MANO"

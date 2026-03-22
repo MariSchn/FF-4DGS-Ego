@@ -341,7 +341,7 @@ def train():
 
     log_every  = training_cfg.get("log_every", 500)
     val_every  = training_cfg.get("val_every", 2000)
-    save_every = training_cfg.get("save_every", 10)
+    save_every = training_cfg.get("save_every", 2000)
     output_dir = training_cfg.get("output_dir", "checkpoints")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -411,18 +411,18 @@ def train():
 
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
-                        torch.save(model.hand_head.state_dict(), os.path.join(output_dir, "hand_head_best.pt"))
+                        torch.save(model.hand_head.state_dict(), os.path.join(output_dir, "best_val_loss.pt"))
                         tqdm.write("  -> New best. Saved.")
                     model.train()
 
+                if global_step % save_every == 0:
+                    torch.save(model.hand_head.state_dict(), os.path.join(output_dir, f"checkpoint_{global_step}.pt"))
+
         scheduler.step()
-        if epoch % save_every == 0:
-            torch.save(model.hand_head.state_dict(), os.path.join(output_dir, f"hand_head_epoch{epoch:04d}.pt"))
 
     # --- Save final ---
-    final = training_cfg.get("output_weights", os.path.join(output_dir, "hand_head_final.pt"))
-    torch.save(model.hand_head.state_dict(), final)
-    print(f"Final weights saved to: {final}")
+    torch.save(model.hand_head.state_dict(), os.path.join(output_dir, "hand_head_final.pt"))
+    print(f"Final weights saved to: {os.path.join(output_dir, 'hand_head_final.pt')}")
 
     if use_wandb:
         wandb.finish()
