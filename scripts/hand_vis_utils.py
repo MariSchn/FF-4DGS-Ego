@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import smplx
 import torch
+from decord import VideoReader
 from projectaria_tools.core.calibration import CameraCalibration, FISHEYE624
 from projectaria_tools.core.sophus import SE3
 from scipy.spatial.transform import Rotation
@@ -287,9 +288,7 @@ def setup_vis_context(seq_path, mano_model_folder=None, mano_model=None):
     hand_poses = load_hand_poses(jsonl_path)
     hand_ts_sorted = sorted(hand_poses.keys())
 
-    cap = cv2.VideoCapture(video_path)
-    n_video = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.release()
+    n_video = len(VideoReader(video_path))
 
     return {
         "mano_model": mano_model,

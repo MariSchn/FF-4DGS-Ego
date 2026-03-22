@@ -6,6 +6,7 @@ Example:
 """
 
 import argparse
+import bisect
 import json
 import os
 import random
@@ -50,20 +51,39 @@ class HOT3DHandDataset(Dataset):
                 print(f"Skipping {seq_path} because it doesn't have a video or jsonl file")
                 continue
 
+            # Load all JSONL entries keyed by timestamp
+            hand_entries = {}  # timestamp_ns -> hand_poses dict
             with open(jsonl_path) as f:
-                lines = list(f)
+                for line in f:
+                    entry = json.loads(line)
+                    hand_entries[entry["timestamp_ns"]] = entry["hand_poses"]
+            hand_ts_sorted = sorted(hand_entries.keys())
 
-            n_video = len(VideoReader(video_path))
-            total = min(len(lines), n_video)
-            if total < num_frames:
+            if len(hand_ts_sorted) < 2:
                 continue
 
-            gt_per_frame = []
-            for line in lines[:total]:
-                data = json.loads(line)
+            n_video = len(VideoReader(video_path))
+            if n_video < num_frames:
+                continue
+
+            # Map each video frame to the closest JSONL entry via linear interpolation
+            ts_start, ts_end = hand_ts_sorted[0], hand_ts_sorted[-1]
+
+            def _closest_ts(frame_i):
+                frac = frame_i / max(n_video - 1, 1)
+                query = int(ts_start + frac * (ts_end - ts_start))
+                idx = bisect.bisect_left(hand_ts_sorted, query)
+                if idx == 0:
+                    return hand_ts_sorted[0]
+                if idx >= len(hand_ts_sorted):
+                    return hand_ts_sorted[-1]
+                before, after = hand_ts_sorted[idx - 1], hand_ts_sorted[idx]
+                return before if (query - before) <= (after - query) else after
+
+            def _hand_to_vec(hand_poses):
                 vecs = []
                 for hand_id in ["0", "1"]:
-                    hand = data["hand_poses"].get(hand_id, {})
+                    hand = hand_poses.get(hand_id, {})
                     if hand:
                         vecs.append(torch.cat([
                             torch.tensor(hand["wrist_xform"]["t_xyz"],  dtype=torch.float32),
@@ -73,9 +93,14 @@ class HOT3DHandDataset(Dataset):
                         ]))
                     else:
                         vecs.append(torch.zeros(HAND_PARAM_DIM))
-                gt_per_frame.append(torch.cat(vecs))
+                return torch.cat(vecs)
 
-            for start in range(0, total - num_frames + 1, clip_stride):
+            gt_per_frame = []
+            for frame_i in range(n_video):
+                ts = _closest_ts(frame_i)
+                gt_per_frame.append(_hand_to_vec(hand_entries[ts]))
+
+            for start in range(0, n_video - num_frames + 1, clip_stride):
                 self.clips.append({
                     "video_path":   video_path,
                     "gt_frames":    gt_per_frame[start : start + num_frames],
