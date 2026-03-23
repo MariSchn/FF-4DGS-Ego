@@ -112,11 +112,21 @@ def splats_to_viser(gaussian_list: list, timestamp: int, opacity_thresh: float):
     if not all_centers:
         return None
 
+    centers = np.concatenate(all_centers, axis=0).astype(np.float32)
+    covs    = np.concatenate(all_covs,    axis=0).astype(np.float32)
+
+    # Reconstruction world frame: X=right, Y=forward, Z=up.
+    # Viser world frame:          X=right, Y=up,      Z=backward.
+    # Fix: rotate -90° around X  →  Xv=Xo, Yv=Zo, Zv=-Yo.
+    R = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=np.float32)
+    centers = centers @ R.T
+    covs = np.einsum("ij,njk,lk->nil", R, covs, R)
+
     opacities = np.concatenate(all_opacities, axis=0).astype(np.float32)
     return dict(
-        centers    = np.concatenate(all_centers,   axis=0).astype(np.float32),
-        covariances= np.concatenate(all_covs,      axis=0).astype(np.float32),
-        rgbs       = np.concatenate(all_rgbs,      axis=0).astype(np.float32),
+        centers    = centers,
+        covariances= covs,
+        rgbs       = np.concatenate(all_rgbs, axis=0).astype(np.float32),
         opacities  = opacities.reshape(-1, 1),   # viser requires shape (N, 1)
     )
 
