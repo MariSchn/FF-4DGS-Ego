@@ -81,6 +81,16 @@ def main():
     reconstructor = model_manager.fetch_model("reconstructor")
     reconstructor.eval()
     print("Reconstructor loaded.")
+    # --- CARICA I TUOI PESI ADDESTRATI ---
+    hand_weights_path = "hand_head_weights.pt"
+    if os.path.exists(hand_weights_path):
+        print(f"🔥 Caricamento pesi custom della Hand Head da {hand_weights_path}...")
+        custom_hand_weights = torch.load(hand_weights_path, map_location=device)
+        # Carichiamo i pesi dentro la testa del modello
+        reconstructor.load_state_dict(custom_hand_weights, strict=False)
+    else:
+        print("⚠️ Attenzione: hand_head_weights.pt non trovato. Uso pesi originali.")
+    # -------------------------------------
 
     # ------------------------------------------------------------------
     # 2. Load and preprocess video frames
@@ -189,7 +199,12 @@ def main():
         print("Rendering input views from reconstructed Gaussians ...")
         timestamps = predictions["rendered_timestamps"][0]   # [S]
         world2cam = homo_matrix_inverse(cam2world.unsqueeze(0))  # [1, S, 4, 4]
-
+        # --- FIX EMERGENZA PER MATRICI SINGOLARI ---
+        # Se le matrici sono nulle o "rotte", usiamo l'identità
+        if torch.any(torch.isnan(world2cam)) or world2cam.abs().sum() < 1e-3:
+            print("⚠️ Attenzione: Pose della camera invalide rilevate. Uso matrici identità per il render.")
+            world2cam = torch.eye(4, device=device).view(1, 1, 4, 4).expand(1, S, 4, 4)
+        # -------------------------------------------
         target_rgb, _depth, _alpha = reconstructor.gs_renderer.rasterizer.forward(
             gaussian_list,
             render_viewmats=[world2cam[0]],

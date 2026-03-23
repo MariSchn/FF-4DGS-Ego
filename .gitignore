@@ -6,4 +6,6 @@ __pycache__
 
 /outputs
 /models/NeoVerse
+/wandb
+/checkpoints
 /venv
