@@ -8,3 +8,5 @@ __pycache__
 /models/NeoVerse
 /wandb
 /checkpoints
+/venv/*
+!venv/lib/python3.10/site-packages/chumpy/*

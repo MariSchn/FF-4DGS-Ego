@@ -38,6 +38,7 @@ deepspeed==0.16.7
 omegaconf
 peft
 tensorboard
+wandb
 
 # Text processing
 ftfy
