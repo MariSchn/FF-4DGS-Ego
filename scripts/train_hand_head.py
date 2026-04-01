@@ -25,6 +25,9 @@ from tqdm import tqdm
 from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
 from diffsynth.utils.auxiliary import load_video
 
+from scripts.hamer_loss import Keypoint3DLoss, ParameterLoss
+
+
 HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
 NUM_HANDS = 2
 
@@ -360,7 +363,7 @@ def render_vis_list(vis_items, gt_pred_pairs, render_fn):
 # Validation
 # ------------------------------------------------------------------
 
-def run_validation(model, val_loader, num_frames, device, vis_clip_indices=None):
+def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_param, vis_clip_indices=None):
     """Run validation and optionally capture gt/pred at specific clip indices."""
     model.eval()
     val_loss = 0.0
@@ -373,7 +376,11 @@ def run_validation(model, val_loader, num_frames, device, vis_clip_indices=None)
             hb = vbatch["hand_bboxes"].to(device) if "hand_bboxes" in vbatch else None
             hv = vbatch["hand_valid"].to(device)  if "hand_valid"  in vbatch else None
             preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
-            val_loss += F.mse_loss(preds["hand_joints"], gt).item()
+            
+            has_param = (gt.abs().sum(dim=-1) > 1e-6)
+            loss_param = criterion_param(preds["hand_joints"], gt, has_param)
+            val_loss += loss_param.item()
+
 
             if vis_clip_indices:
                 for item_idx in range(imgs.shape[0]):
@@ -429,6 +436,9 @@ def train():
     missing, _ = model.load_state_dict(state_dict, strict=False)
     print(f"Loaded checkpoint. New (hand head) keys: {len(missing)}")
     model.to(device)
+
+    criterion_kp3d = Keypoint3DLoss(loss_type='l1').to(device)
+    criterion_param = ParameterLoss().to(device)
 
     hand_params = list(model.hand_head.parameters())
     print(f"Hand head parameters: {sum(p.numel() for p in hand_params):,}")
@@ -552,7 +562,16 @@ def train():
             hb = batch["hand_bboxes"].to(device) if "hand_bboxes" in batch else None
             hv = batch["hand_valid"].to(device)  if "hand_valid"  in batch else None
             preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
-            loss = F.mse_loss(preds["hand_joints"], gt)
+            
+            # loss = F.mse_loss(preds["hand_joints"], gt)
+            gt_kp3d = preds["gt_keypoints_3d"]          # [B, S, N, 4] — coords + confidence
+            gt_param = gt                                # [B, S, hand_param_dim]
+            has_param = (gt.abs().sum(dim=-1) > 1e-6)   # [B, S] — True where GT is non-zero
+
+            loss_kp3d  = criterion_kp3d(preds["hand_keypoints_3d"], gt_kp3d)
+            loss_param = criterion_param(preds["hand_joints"], gt_param, has_param)
+            loss = loss_kp3d + loss_param
+
             (loss / grad_accum_steps).backward()
 
             if (batch_idx + 1) % grad_accum_steps == 0:
@@ -575,7 +594,7 @@ def train():
 
                 # --- Validation ---
                 if val_loader and (global_step % val_every == 0 or global_step == 1):
-                    val_loss, captured = run_validation(model, val_loader, num_frames, device, val_vis_clip_indices)
+                    val_loss, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_param, val_vis_clip_indices)
                     tqdm.write(f"  step {global_step} | val_loss={val_loss:.6f}")
 
                     if use_wandb:
