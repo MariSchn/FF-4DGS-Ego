@@ -10,3 +10,9 @@ __pycache__
 /checkpoints
 /venv/*
 !venv/lib/python3.10/site-packages/chumpy/*
+
+*.pt
+*.mp4
+checkpoints/
+P0001_*/
+hand_data/

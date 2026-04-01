@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from .visual_transformer import VisualGeometryTransformer
 from ..heads.camera_head import CameraHead
 from ..heads.dense_head import DPTHead
+from ..heads.hamer_head import HamerManoHead
 from .rasterization import GaussianSplatRenderer
 from ..utils.camera_utils import vector_to_camera_matrices, extrinsics_to_vector
 from ..utils.priors import normalize_depth, normalize_poses
@@ -57,7 +58,10 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         self.enable_gs = enable_gs
         self.enable_dynamic_gs_attr = enable_dynamic_gs_attr
         self.enable_hand = kwargs.get("enable_hand", True)
-        
+        self.hand_head_type = kwargs.get("hand_head_type", "hamer")
+        self.use_hand_crop = kwargs.get("use_hand_crop", False)
+        self.hand_crop_size = kwargs.get("hand_crop_size", 8)
+
         self.life_span_gamma = life_span_gamma
         self.dynamic_threshold = dynamic_threshold
         self.enable_global_motion_tracking = enable_global_motion_tracking
@@ -105,6 +109,9 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             "enable_norm": self.enable_norm,
             "enable_gs": self.enable_gs,
             "enable_hand": self.enable_hand,
+            "hand_head_type": self.hand_head_type,
+            "use_hand_crop": self.use_hand_crop,
+            "hand_crop_size": self.hand_crop_size,
             "patch_embed": self.patch_embed,
             "sampling_strategy": self.sampling,
             "dpt_checkpoint": self.dpt_checkpoint,
@@ -199,12 +206,31 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
 
         # hand tracking head
         if self.enable_hand:
-            self.hand_head = DPTHead(
-                dim_in=2 * dim,
-                output_dim=64,       # 2 hands * (3 t_xyz + 4 q_wxyz + 15 pose + 10 betas)
-                patch_size=patch_size,
-                activation="linear+none",
-            )
+            if self.hand_head_type == "hamer":
+                self.hand_head = HamerManoHead(
+                    context_dim=2 * dim,
+                    use_crop=self.use_hand_crop,
+                    crop_size=self.hand_crop_size,
+                    patch_size=patch_size,
+                )
+            elif self.hand_head_type == "hand_crop":
+                from ..heads.hand_crop_head import HandCropHead
+                self.hand_head = HandCropHead(
+                    dim_in=2 * dim,
+                    patch_size=patch_size,
+                    hand_param_dim=32,   # per hand: 3 pos + 4 quat + 15 pose + 10 betas
+                    num_hands=2,
+                    crop_size=self.hand_crop_size,
+                )
+            elif self.hand_head_type == "dpt":
+                self.hand_head = DPTHead(
+                    dim_in=2 * dim,
+                    output_dim=64,       # 2 hands * (3 t_xyz + 4 q_wxyz + 15 pose + 10 betas)
+                    patch_size=patch_size,
+                    activation="linear+none",
+                )
+            else:
+                raise ValueError(f"Unknown hand_head_type: {self.hand_head_type}")
 
     def forward(self, views: Dict[str, torch.Tensor], cond_flags: List[int]=[0, 0, 0], is_inference=True, use_motion=True):
         """
@@ -281,16 +307,41 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             preds["pts3d"] = pts
             preds["pts3d_conf"] = pts_conf
 
-        # tracking hand 
+        # tracking hand
         if self.enable_hand:
-            hand_joints, hand_conf = self.hand_head(
-                token_list, 
-                images=imgs, 
-                patch_start_idx=patch_start_idx,
-            )
-            hand_joints = hand_joints.mean(dim=(2, 3))
-            preds["hand_joints"] = hand_joints
-            preds["hand_conf"] = hand_conf
+            if self.hand_head_type == "hamer":
+                hamer_kwargs = {}
+                if self.use_hand_crop:
+                    hamer_kwargs["hand_bboxes"] = views.get("hand_bboxes")
+                    hamer_kwargs["hand_valid"] = views.get("hand_valid")
+                hand_params, hand_conf = self.hand_head(
+                    token_list,
+                    images=imgs,
+                    patch_start_idx=patch_start_idx,
+                    **hamer_kwargs,
+                )
+                preds["hand_joints"] = hand_params
+                preds["hand_conf"] = hand_conf
+            elif self.hand_head_type == "hand_crop":
+                hand_bboxes = views.get("hand_bboxes", None)
+                hand_valid = views.get("hand_valid", None)
+                hand_joints = self.hand_head(
+                    token_list,
+                    images=imgs,
+                    patch_start_idx=patch_start_idx,
+                    hand_bboxes=hand_bboxes,
+                    hand_valid=hand_valid,
+                )
+                preds["hand_joints"] = hand_joints
+            elif self.hand_head_type == "dpt":
+                hand_joints, hand_conf = self.hand_head(
+                    token_list,
+                    images=imgs,
+                    patch_start_idx=patch_start_idx,
+                )
+                hand_joints = hand_joints.mean(dim=(2, 3))
+                preds["hand_joints"] = hand_joints
+                preds["hand_conf"] = hand_conf
             
         # Normal prediction
         if self.enable_norm:
