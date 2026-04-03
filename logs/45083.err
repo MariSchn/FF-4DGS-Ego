@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/miliev/FF-4DGS-Ego/scripts/train_hand_head.py", line 28, in <module>
+    from scripts.hamer_loss import Keypoint3DLoss, ParameterLoss
+ModuleNotFoundError: No module named 'scripts.hamer_loss'
