@@ -25,7 +25,7 @@ from tqdm import tqdm
 from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
 from diffsynth.utils.auxiliary import load_video
 
-from scripts.hamer_loss import Keypoint3DLoss, ParameterLoss
+from scripts.hamer_losses import Keypoint3DLoss, ParameterLoss
 
 
 HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
