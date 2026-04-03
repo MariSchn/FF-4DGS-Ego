@@ -40,30 +40,29 @@
 - tag = 3dv
 
 ### Running
-
-Simple commands:
+**squeue**
+- squeue
+	- to see current usage of clusters
+- squeue -u miliev
+	- show only own jobs
+- watch -n 5 squeue -u miliev
+	- refresh each 5 secs
+**scancel**
+- scancel {jobid}
+- scancel -u miliev
+	- for all jobs of user
+**srun single run**
 - srun -A 3dv -t 00:10 -o nvidia-smi.out nvidia-smi
-
-Interactive jobs, for 60 minutes
+**srun interactive**
+- srun --gpus 5060ti:1 --pty -A 3dv -t 60 bash --login
+	- request 5060 GPU
 - srun --pty -A 3dv -t 60 bash --login
+	- Interactive jobs, for 60 minutes
+**sbatch**
+- sbatch batch.sh
+- good for long term jobs, unaffected from network disconnections
+**sinfo -o "%n %G %P"**
+- to get overview of accs
 
-Sbatch
-
-batch.sh:
-```bash
-#!/bin/bash
-
-#SBATCH --time=00:10
-#SBATCH --account={tag}
-#SBATCH --output=nvidia-smi.out
-
-# run stuff, ex.:
-ls
-nvidia-smi
-
-```
-
-type into cmd:
-```
-sbatch batch.sh
-```
+- source venv/bin/activate
+- srun -A 3dv -t 1:00 -o runs/train_hand_head.out python3 -m scripts.train_hand_head --config configs/train_hand_head.yaml
