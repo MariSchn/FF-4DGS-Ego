@@ -14,8 +14,7 @@ data:
   # Fraction of sequences used for validation (0.0 = no validation; 0.1 = 10% held out)
   val_split: 0.05
   # DataLoader workers for loading video clips
-  num_workers: 4
-
+  num_workers: 2
 # ------------------------------------------------------------------
 # Model
 # ------------------------------------------------------------------
@@ -66,7 +65,7 @@ visualization:
 debug:
   enabled: false         # When true, apply max_sequences limit to limit the number of sequences used for training
   max_sequences: 1       # Use only this many sequences (from data_root)
-  single_frame: true     # Overfit on a single clip from first sequence; disables validation
+  single_frame: false     # Overfit on a single clip from first sequence; disables validation
 
 # ------------------------------------------------------------------
 # Weights & Biases
