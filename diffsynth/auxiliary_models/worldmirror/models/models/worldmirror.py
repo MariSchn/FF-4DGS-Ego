@@ -331,6 +331,8 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
                     patch_start_idx=patch_start_idx,
                     hand_bboxes=hand_bboxes,
                     hand_valid=hand_valid,
+                    focal_length=views.get("focal_length", None),
+                    crop_local_output=views.get("crop_local_output", False),
                 )
                 preds["hand_joints"] = hand_joints
             elif self.hand_head_type == "dpt":

@@ -11,6 +11,8 @@ import json
 import os
 import random
 
+import numpy as np
+
 import torch
 import torch.nn.functional as F
 import wandb
@@ -129,6 +131,16 @@ class HOT3DHandDataset(Dataset):
                 )
                 if bbox_frames is None:
                     print(f"Skipping {seq_path}: missing calibration for hand crop")
+                    continue
+
+                # Transform GT from world space to crop-local frame to match
+                # the network's raw (z, tx_crop, ty_crop) output.
+                ok = HOT3DHandDataset._transform_gt_to_crop_local(
+                    seq_path, n_video, hand_ts_sorted, gt_per_frame,
+                    bbox_frames, valid_frames, res=res,
+                )
+                if not ok:
+                    print(f"Skipping {seq_path}: missing calibration for GT crop-local transform")
                     continue
             else:
                 bbox_frames = valid_frames = None
@@ -317,6 +329,121 @@ class HOT3DHandDataset(Dataset):
 
         return bboxes_list, valid_list
 
+    @staticmethod
+    def _transform_gt_to_crop_local(seq_path, n_video, hand_ts_sorted, gt_per_frame,
+                                     bbox_frames, valid_frames, res=(224, 224)):
+        """Transform GT wrist position and orientation from world space to crop-local frame.
+
+        The network predicts (z, tx_crop, ty_crop) in the crop-local frame,
+        where tx_crop and ty_crop are normalised offsets from the crop centre.
+        This method converts GT to match that frame so the MSE loss compares
+        like with like.
+
+        Steps per frame per hand:
+            1. world → camera:  t_cam = R_cw @ t_world + t_cw
+            2. camera → crop-local (inverse pinhole + bbox geometry):
+                u_pixel = t_x * f / z + W/2
+                v_pixel = t_y * f / z + H/2
+                tx_crop = 2 * (u_pixel - bbox_cx) / bbox_w
+                ty_crop = 2 * (v_pixel - bbox_cy) / bbox_h
+                z       = t_z
+
+        Orientation is transformed to camera frame (world → camera).
+
+        Modifies gt_per_frame in-place.
+        Returns True on success, False if calibration files are missing.
+        """
+        from projectaria_tools.core.sophus import SE3
+        from scipy.spatial.transform import Rotation
+        from scripts.hand_vis_utils import (
+            load_camera_calibration, load_headset_trajectory, find_closest,
+        )
+
+        calib_path   = os.path.join(seq_path, "mps_slam_calibration", "online_calibration.jsonl")
+        headset_path = os.path.join(seq_path, "ground_truth", "headset_trajectory.csv")
+
+        for p in [calib_path, headset_path]:
+            if not os.path.exists(p):
+                return False
+
+        T_device_camera, _cam_calib = load_camera_calibration(calib_path)
+        headset_poses = load_headset_trajectory(headset_path)
+        headset_ts = sorted(headset_poses.keys())
+
+        H, W = res
+        focal_length = float(H)  # default approximation matching HandCropHead
+
+        ts_start, ts_end = hand_ts_sorted[0], hand_ts_sorted[-1]
+
+        for frame_i in range(len(gt_per_frame)):
+            frac = frame_i / max(n_video - 1, 1)
+            query_tc = int(ts_start + frac * (ts_end - ts_start))
+
+            # Per-frame world→camera transform
+            closest_ht = find_closest(headset_ts, query_tc)
+            t_wd, q_wd_wxyz = headset_poses[closest_ht]
+            T_world_device = SE3.from_quat_and_translation(
+                q_wd_wxyz[0], q_wd_wxyz[1:], t_wd
+            )[0]
+            T_camera_world = (
+                T_device_camera.inverse().to_matrix()
+                @ T_world_device.inverse().to_matrix()
+            )
+            R_cw = T_camera_world[:3, :3]
+            t_cw = T_camera_world[:3, 3]
+
+            gt_vec = gt_per_frame[frame_i]  # [64] = 2 hands x 32
+            frame_bboxes = bbox_frames[frame_i]   # [2, 4] normalised (x1,y1,x2,y2)
+            frame_valid  = valid_frames[frame_i]   # [2] bool
+
+            for hand_idx in range(NUM_HANDS):
+                off = hand_idx * HAND_PARAM_DIM
+                t_world = gt_vec[off:off + 3].numpy()
+                q_wxyz  = gt_vec[off + 3:off + 7].numpy()
+
+                # Skip zero (absent) hands
+                if np.abs(t_world).sum() < 1e-8 and np.abs(q_wxyz).sum() < 1e-8:
+                    continue
+
+                # --- Step 1: world → camera position ---
+                t_cam = R_cw @ t_world + t_cw
+                t_x, t_y, t_z = t_cam[0], t_cam[1], t_cam[2]
+
+                # --- Step 2: camera → crop-local translation ---
+                # Pinhole projection: camera 3D → pixel
+                u_pixel = t_x * focal_length / t_z + W / 2.0
+                v_pixel = t_y * focal_length / t_z + H / 2.0
+
+                # Bbox geometry in pixels
+                bbox = frame_bboxes[hand_idx].numpy()  # [4] normalised
+                bbox_cx = (bbox[0] + bbox[2]) / 2.0 * W
+                bbox_cy = (bbox[1] + bbox[3]) / 2.0 * H
+                bbox_w  = (bbox[2] - bbox[0]) * W
+                bbox_h  = (bbox[3] - bbox[1]) * H
+
+                # Inverse of _crop_relative_to_global:
+                #   u_pixel = bbox_cx + tx_crop * bbox_w / 2
+                #   => tx_crop = 2 * (u_pixel - bbox_cx) / bbox_w
+                tx_crop = 2.0 * (u_pixel - bbox_cx) / max(bbox_w, 1e-6)
+                ty_crop = 2.0 * (v_pixel - bbox_cy) / max(bbox_h, 1e-6)
+
+                gt_vec[off]     = float(t_z)
+                gt_vec[off + 1] = float(tx_crop)
+                gt_vec[off + 2] = float(ty_crop)
+
+                # --- Step 3: world → camera orientation (unchanged) ---
+                q_xyzw = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
+                R_world = Rotation.from_quat(q_xyzw).as_matrix()
+                R_cam = R_cw @ R_world
+                q_cam_xyzw = Rotation.from_matrix(R_cam).as_quat()
+                q_cam_wxyz = np.array([
+                    q_cam_xyzw[3], q_cam_xyzw[0], q_cam_xyzw[1], q_cam_xyzw[2]
+                ])
+
+                gt_vec[off + 3:off + 7] = torch.from_numpy(q_cam_wxyz.astype(np.float32))
+
+        return True
+
 
 def discover_sequences(data_root):
     seqs = []
@@ -334,7 +461,8 @@ def discover_sequences(data_root):
 # Model helpers
 # ------------------------------------------------------------------
 
-def build_views(imgs, num_frames, device, hand_bboxes=None, hand_valid=None):
+def build_views(imgs, num_frames, device, hand_bboxes=None, hand_valid=None,
+                 crop_local_output=False):
     B, _, _, H, W = imgs.shape
     views = {
         "img":          imgs,
@@ -350,6 +478,8 @@ def build_views(imgs, num_frames, device, hand_bboxes=None, hand_valid=None):
         views["hand_bboxes"] = hand_bboxes
     if hand_valid is not None:
         views["hand_valid"] = hand_valid
+    if crop_local_output:
+        views["crop_local_output"] = True
     return views
 
 
@@ -432,16 +562,18 @@ def run_validation(model, val_loader, num_frames, device, vis_clip_indices=None)
             gt = vbatch["gt"].to(device)
             hb = vbatch["hand_bboxes"].to(device) if "hand_bboxes" in vbatch else None
             hv = vbatch["hand_valid"].to(device)  if "hand_valid"  in vbatch else None
-            preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
+            preds = model(build_views(imgs, num_frames, device, hb, hv, crop_local_output=True), is_inference=False, use_motion=False)
             val_loss += F.mse_loss(preds["hand_joints"], gt).item()
 
             if vis_clip_indices:
+                # For vis we need camera-space predictions for rendering
+                vis_preds = model(build_views(imgs, num_frames, device, hb, hv, crop_local_output=False), is_inference=False, use_motion=False)
                 for item_idx in range(imgs.shape[0]):
                     clip_idx = batch_idx * batch_size + item_idx
                     if clip_idx in vis_clip_indices:
                         captured[clip_idx] = {
                             "gt": gt[item_idx, 0].cpu(),
-                            "pred": preds["hand_joints"][item_idx, 0].cpu(),
+                            "pred": vis_preds["hand_joints"][item_idx, 0].cpu(),
                         }
 
     return val_loss / max(len(val_loader), 1), captured
@@ -454,7 +586,8 @@ def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
         imgs = torch.stack([it["img"] for it in train_vis_items]).to(device)
         hb = torch.stack([it["hand_bboxes"] for it in train_vis_items]).to(device) if "hand_bboxes" in train_vis_items[0] else None
         hv = torch.stack([it["hand_valid"]  for it in train_vis_items]).to(device) if "hand_valid"  in train_vis_items[0] else None
-        preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
+        # crop_local_output=False so predictions are in camera space for rendering
+        preds = model(build_views(imgs, num_frames, device, hb, hv, crop_local_output=False), is_inference=False, use_motion=False)
         pairs = [
             (item["gt"][0], preds["hand_joints"][i, 0].cpu())
             for i, item in enumerate(train_vis_items)
@@ -611,7 +744,7 @@ def train():
             gt = batch["gt"].to(device)
             hb = batch["hand_bboxes"].to(device) if "hand_bboxes" in batch else None
             hv = batch["hand_valid"].to(device)  if "hand_valid"  in batch else None
-            preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
+            preds = model(build_views(imgs, num_frames, device, hb, hv, crop_local_output=True), is_inference=False, use_motion=False)
             loss = F.mse_loss(preds["hand_joints"], gt)
             (loss / grad_accum_steps).backward()
 
