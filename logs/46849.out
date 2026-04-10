@@ -1,9 +1,0 @@
-Loaded checkpoint. New (hand head) keys: 115
-Hand head parameters: 39,950,369
-Found 198 sequences
-[DEBUG] Single-frame overfit: seq=P0001_10a27bf7, clip offset=1856
-Train clips: 1 | Val clips: 1
-WARNING: You are using a MANO model, with only 10 shape coefficients.
-WARNING: You are using a MANO model, with only 10 shape coefficients.
-[VIS] 1 val + 1 train frames across 1 sequences
-Training on cuda | 1 epochs | batch_size=1 | grad_accum_steps=4
