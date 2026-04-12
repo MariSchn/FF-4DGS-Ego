@@ -593,13 +593,30 @@ def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
 # Training
 # ------------------------------------------------------------------
 
+def _apply_overrides(cfg, overrides):
+    """Apply dotted-key overrides like 'training.lr=3e-4' to a nested dict."""
+    for ov in overrides:
+        key, val = ov.split("=", 1)
+        parts = key.split(".")
+        d = cfg
+        for p in parts[:-1]:
+            d = d.setdefault(p, {})
+        d[parts[-1]] = yaml.safe_load(val)
+
+
 def train():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/train_hand_head.yaml")
+    parser.add_argument("overrides", nargs="*", metavar="KEY=VAL",
+                        help="Config overrides, e.g. training.lr=3e-4 model.hamer_head_kwargs.depth=4")
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+
+    if args.overrides:
+        _apply_overrides(cfg, args.overrides)
+        print(f"Config overrides: {args.overrides}")
 
     data_cfg     = cfg["data"]
     model_cfg    = cfg["model"]
