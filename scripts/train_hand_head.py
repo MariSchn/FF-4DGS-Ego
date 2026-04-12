@@ -702,8 +702,10 @@ def train():
 
     # --- Optimizer & scheduler ---
     epochs     = training_cfg["epochs"]
+    steps_per_epoch = len(train_loader) // grad_accum_steps
+    total_steps = epochs * steps_per_epoch
     optimizer  = Adam(hand_params, lr=float(training_cfg["lr"]))
-    scheduler  = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=float(training_cfg.get("min_lr", 1e-6)))
+    scheduler  = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=float(training_cfg.get("min_lr", 1e-6)))
 
     log_every  = training_cfg.get("log_every", 500)
     val_every  = training_cfg.get("val_every", 2000)
@@ -771,6 +773,7 @@ def train():
             if (batch_idx + 1) % grad_accum_steps == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(hand_params, max_norm=float("inf"))
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad()
                 avg_loss = accum_loss / grad_accum_steps
                 accum_loss = 0.0
@@ -819,8 +822,6 @@ def train():
         # Flush leftover gradients from an incomplete accumulation window
         if (batch_idx + 1) % grad_accum_steps != 0:
             optimizer.zero_grad()
-
-        scheduler.step()
 
     # --- Save final ---
     torch.save(model.hand_head.state_dict(), os.path.join(output_dir, "hand_head_final.pt"))
