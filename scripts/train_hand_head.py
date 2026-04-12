@@ -750,6 +750,7 @@ def train():
     for epoch in tqdm(range(1, epochs + 1), desc="Epochs"):
         model.train()
         optimizer.zero_grad()
+        accum_loss = 0.0
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
             imgs = batch["img"].to(device)
@@ -765,19 +766,22 @@ def train():
             else:
                 loss = F.mse_loss(preds["hand_joints"], gt)
             (loss / grad_accum_steps).backward()
+            accum_loss += loss.item()
 
             if (batch_idx + 1) % grad_accum_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
+                avg_loss = accum_loss / grad_accum_steps
+                accum_loss = 0.0
                 global_step += 1
 
                 # --- Train logging ---
                 if use_wandb:
-                    wandb.log({"train/loss": loss.item(), "lr": scheduler.get_last_lr()[0]}, step=global_step)
+                    wandb.log({"train/loss": avg_loss, "lr": scheduler.get_last_lr()[0]}, step=global_step)
 
                 if global_step % log_every == 0 or global_step == 1:
                     lr = scheduler.get_last_lr()[0]
-                    tqdm.write(f"  step {global_step} | train_loss={loss.item():.6f} | lr={lr:.2e}")
+                    tqdm.write(f"  step {global_step} | train_loss={avg_loss:.6f} | lr={lr:.2e}")
                     if use_wandb and train_vis_items:
                         train_images = render_train_vis(model, train_vis_items, num_frames, device, render_fn)
                         if train_images:
@@ -809,6 +813,10 @@ def train():
 
                 if global_step % save_every == 0:
                     torch.save(model.hand_head.state_dict(), os.path.join(output_dir, f"checkpoint_{global_step}.pt"))
+
+        # Flush leftover gradients from an incomplete accumulation window
+        if (batch_idx + 1) % grad_accum_steps != 0:
+            optimizer.zero_grad()
 
         scheduler.step()
 
