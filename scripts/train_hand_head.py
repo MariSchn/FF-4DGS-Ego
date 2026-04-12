@@ -125,23 +125,39 @@ class HOT3DHandDataset(Dataset):
                 gt_per_frame.append(_hand_to_vec(hand_entries[ts]))
 
             if self.use_hand_crop:
-                bbox_frames, valid_frames = HOT3DHandDataset._compute_projected_bboxes(
-                    seq_path, n_video, hand_ts_sorted, gt_per_frame,
-                    rescale_factor=self.rescale_factor,
-                )
-                if bbox_frames is None:
-                    print(f"Skipping {seq_path}: missing calibration for hand crop")
-                    continue
+                cache_name = f"hand_bboxes_rf{self.rescale_factor}_res{res[0]}x{res[1]}.pt"
+                cache_path = os.path.join(seq_path, "hand_data", cache_name)
 
-                # Transform GT from world space to crop-local frame to match
-                # the network's raw (z, tx_crop, ty_crop) output.
-                ok = HOT3DHandDataset._transform_gt_to_crop_local(
-                    seq_path, n_video, hand_ts_sorted, gt_per_frame,
-                    bbox_frames, valid_frames, res=res,
-                )
-                if not ok:
-                    print(f"Skipping {seq_path}: missing calibration for GT crop-local transform")
-                    continue
+                if os.path.exists(cache_path):
+                    cached = torch.load(cache_path, weights_only=True)
+                    bbox_frames = list(cached["bboxes"])
+                    valid_frames = list(cached["valid"])
+                    gt_per_frame[:] = list(cached["gt"])
+                else:
+                    bbox_frames, valid_frames = HOT3DHandDataset._compute_projected_bboxes(
+                        seq_path, n_video, hand_ts_sorted, gt_per_frame,
+                        rescale_factor=self.rescale_factor,
+                    )
+                    if bbox_frames is None:
+                        print(f"Skipping {seq_path}: missing calibration for hand crop")
+                        continue
+
+                    # Transform GT from world space to crop-local frame to match
+                    # the network's raw (z, tx_crop, ty_crop) output.
+                    ok = HOT3DHandDataset._transform_gt_to_crop_local(
+                        seq_path, n_video, hand_ts_sorted, gt_per_frame,
+                        bbox_frames, valid_frames, res=res,
+                    )
+                    if not ok:
+                        print(f"Skipping {seq_path}: missing calibration for GT crop-local transform")
+                        continue
+
+                    torch.save({
+                        "bboxes": torch.stack(bbox_frames),
+                        "valid": torch.stack(valid_frames),
+                        "gt": torch.stack(gt_per_frame),
+                    }, cache_path)
+                    print(f"Cached hand bboxes -> {cache_path}")
             else:
                 bbox_frames = valid_frames = None
 
