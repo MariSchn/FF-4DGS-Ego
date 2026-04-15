@@ -42,8 +42,8 @@ training:
   lr: 1e-4
   min_lr: 1e-7           # Minimum LR for cosine annealing scheduler
   epochs: 1
-  batch_size: 1
-  grad_accum_steps: 4    # Effective batch = batch_size * grad_accum_steps
+  batch_size: 8
+  grad_accum_steps: 3    # Effective batch = batch_size * grad_accum_steps
   log_every: 250         # Steps between train loss logs (console + W&B)
   val_every: 250         # Steps between validation runs
   save_every: 1000       # Steps between checkpoint saves
@@ -64,7 +64,7 @@ visualization:
 # ------------------------------------------------------------------
 debug:
   enabled: false         # When true, apply max_sequences limit to limit the number of sequences used for training
-  max_sequences: 1       # Use only this many sequences (from data_root)
+  max_sequences: 50       # Use only this many sequences (from data_root)
   single_frame: true     # Overfit on a single clip from first sequence; disables validation
 
 # ------------------------------------------------------------------

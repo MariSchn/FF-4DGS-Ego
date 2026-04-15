@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 
+
 class Keypoint3DLoss(nn.Module):
     def __init__(self, loss_type: str = 'l1'):
         """
@@ -80,7 +81,7 @@ class ParameterLoss(nn.Module):
         self,
         pred_param: torch.Tensor,
         gt_param: torch.Tensor,
-        has_param: torch.Tensor,
+        # has_param: torch.Tensor,
     ) -> torch.Tensor:
         """
         Compute masked MSE loss over MANO parameters predicted by HandCropHead.
@@ -90,12 +91,14 @@ class ParameterLoss(nn.Module):
                 parameters (position, quaternion, pose, betas).
             gt_param (torch.Tensor): Shape [B, S, ...] — ground truth MANO
                 parameters.
-            has_param (torch.Tensor): Shape [B, S] — binary mask; 1 if the
-                sample has a valid ground truth annotation, 0 otherwise.
-
         Returns:
             torch.Tensor: Scalar parameter loss.
         """
+
+        # has_param (torch.Tensor): Shape [B, S] — binary mask; 1 if the            
+        # sample has a valid ground truth annotation, 0 otherwise.
+        has_param = (gt_param.abs().sum(dim=-1) > 0).float() # [B, S]
+        
         num_dims = len(pred_param.shape)
 
         # Broadcast mask over all parameter dimensions beyond [B, S]

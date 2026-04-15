@@ -110,6 +110,56 @@ class MANOModel:
         }
         return self.get_mesh(hand_data, is_right)
 
+    def get_joints(self, hand_data, is_right, return_tensor=False):
+        """Generate 3D joints. 
+        If return_tensor=True, it stays a Torch tensor (for training loss).
+        If False, returns a numpy array (for dataset/vis).
+        """
+        # Ensure inputs are tensors and moved to the correct device
+        betas = torch.as_tensor([hand_data["betas"]], dtype=torch.float32)
+        pose = torch.as_tensor([hand_data["pose"]], dtype=torch.float32)
+        
+        wrist = hand_data["wrist_xform"]
+        t_xyz = np.array(wrist["t_xyz"])
+        q_wxyz = np.array(wrist["q_wxyz"])
+        q_xyzw = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
+        rotvec = Rotation.from_quat(q_xyzw).as_rotvec().astype(np.float32)
+
+        global_orient = torch.from_numpy(rotvec).unsqueeze(0).to(betas.device)
+        transl = torch.tensor(t_xyz, dtype=torch.float32).unsqueeze(0).to(betas.device)
+
+        layer = self.right if is_right else self.left
+        # Move layer to match data device (crucial for GPU training)
+        layer = layer.to(betas.device)
+
+        output = layer(
+            betas=betas,
+            global_orient=global_orient,
+            hand_pose=pose,
+            transl=transl,
+            return_verts=True,
+        )
+
+        joints = output.joints # [21, 3]
+
+        # if output.joints:
+        #     joints = output.joints[0] # [21, 3]
+        # else:
+        #     # Fallback if no joints are found
+        #     joints = torch.zeros((1, 21, 3), device=betas.device)
+        return joints if return_tensor else joints.detach().cpu().numpy()
+
+    def get_joints_from_tensor(self, params_32, is_right, return_tensor=False):
+        """Helper to convert the flat 32-dim vector directly to joints."""
+        hand_data = {
+            "wrist_xform": {
+                "t_xyz": params_32[:3].tolist(),
+                "q_wxyz": params_32[3:7].tolist(),
+            },
+            "pose": params_32[7:22].tolist(),
+            "betas": params_32[22:32].tolist(),
+        }
+        return self.get_joints(hand_data, is_right, return_tensor=return_tensor)
 
 # ---------------------------------------------------------------------------
 # Data loading

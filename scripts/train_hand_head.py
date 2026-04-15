@@ -13,6 +13,7 @@ import random
 
 import torch
 import torch.nn.functional as F
+import numpy as np
 import wandb
 import yaml
 from decord import VideoReader
@@ -26,6 +27,7 @@ from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import Wor
 from diffsynth.utils.auxiliary import load_video
 
 from scripts.hamer_losses import Keypoint3DLoss, ParameterLoss
+# from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
 
 
 HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
@@ -57,24 +59,31 @@ def default_full_image_bboxes(num_frames: int) -> tuple:
 class HOT3DHandDataset(Dataset):
     """Sliding-window clips over a list of sequences."""
 
-    def __init__(self, seq_dirs, num_frames=16, res=(224, 224), clip_stride=None,
+    def __init__(self, seq_dirs, mano_model, num_frames=16, res=(224, 224), clip_stride=None,
                  use_hand_crop=False, bbox_margin=0.15):
         self.num_frames = num_frames
+        self.mano_model = mano_model
         self.res = res
         self.use_hand_crop = use_hand_crop
         self.bbox_margin = bbox_margin
         self.clips = []
-
+        
         if clip_stride is None:
             clip_stride = num_frames
 
         for seq_path in seq_dirs:
             video_path = os.path.join(seq_path, "video_main_rgb.mp4")
-            jsonl_path = os.path.join(seq_path, "hand_data/mano_hand_pose_trajectory.jsonl")
+            hand_data_root = os.path.join(seq_path, "hand_data")
+            jsonl_path = os.path.join(hand_data_root, "mano_hand_pose_trajectory.jsonl")
+            cache_path = os.path.join(hand_data_root, "gt_joints_cache.pt")
 
             if not os.path.exists(video_path) or not os.path.exists(jsonl_path):
                 print(f"Skipping {seq_path} because it doesn't have a video or jsonl file")
                 continue
+            
+            # if seq_path[0:5] in ["P0004", "P0005", "P0006", "P0008", "P0016", "P0020"]:
+            #     print(f"Skipping {seq_path} as it doesn't have MANO data")
+            #     continue
 
             # Load all JSONL entries keyed by timestamp
             hand_entries = {}  # timestamp_ns -> hand_poses dict
@@ -125,6 +134,43 @@ class HOT3DHandDataset(Dataset):
                 ts = _closest_ts(frame_i)
                 gt_per_frame.append(_hand_to_vec(hand_entries[ts]))
 
+            # Handle GT joints (load or compute)
+            if os.path.exists(cache_path):
+                # Load: [N_video, 2, 21, 3]
+                seq_gt_joints = torch.load(cache_path, weights_only=True)
+                print(f"Loaded GT joints for {seq_path}.")
+            else:
+                seq_gt_joints_list = []
+                for frame_p in gt_per_frame:
+                    frame_joints = []
+                    for h_idx in range(NUM_HANDS):
+                        offset = h_idx * HAND_PARAM_DIM
+                        p = frame_p[offset : offset + HAND_PARAM_DIM]
+                        
+                        if p.abs().sum() < 1e-6:
+                            # Match the 16 joints returned by your model
+                            j3d = np.zeros((16, 3), dtype=np.float32)
+                        else:
+                            j3d = self.mano_model.get_joints_from_tensor(p, is_right=(h_idx==1), return_tensor=False)
+                            
+                            # Remove the extra batch dimension [1, 16, 3] -> [16, 3]
+                            if isinstance(j3d, np.ndarray):
+                                if j3d.ndim == 3:
+                                    j3d = j3d.squeeze(0)
+                            elif torch.is_tensor(j3d):
+                                if j3d.dim() == 3:
+                                    j3d = j3d.squeeze(0)
+                                    
+                        frame_joints.append(torch.as_tensor(j3d, dtype=torch.float32))
+                    
+                    # This will now succeed: [16, 3] stacked with [16, 3] -> [2, 16, 3]
+                    seq_gt_joints_list.append(torch.stack(frame_joints))
+                
+                seq_gt_joints = torch.stack(seq_gt_joints_list) # Result: [N, 2, 16, 3]
+                torch.save(seq_gt_joints, cache_path)
+                print(f"Computed and saved GT joints for {seq_path}.")
+
+            # Handle Bounding Boxes
             if self.use_hand_crop:
                 bbox_frames, valid_frames = HOT3DHandDataset._compute_projected_bboxes(
                     seq_path, n_video, hand_ts_sorted, gt_per_frame, self.bbox_margin,
@@ -135,10 +181,13 @@ class HOT3DHandDataset(Dataset):
             else:
                 bbox_frames = valid_frames = None
 
+            # Create Sliding Window Clips
             for start in range(0, n_video - num_frames + 1, clip_stride):
+                end = start + num_frames
                 clip = {
                     "video_path":   video_path,
-                    "gt_frames":    gt_per_frame[start : start + num_frames],
+                    "gt_frames":    gt_per_frame[start : end],
+                    "gt_joints":    seq_gt_joints[start : end],
                     "frame_offset": start,
                     "seq_path":     seq_path,
                 }
@@ -159,10 +208,39 @@ class HOT3DHandDataset(Dataset):
             sampling="first",
             frame_offset=clip["frame_offset"],
         )
+        
         imgs = torch.stack([TVF.to_tensor(img) for img in pil_images])
-        gt = torch.stack(clip["gt_frames"])
+        gt_params = torch.stack(clip["gt_frames"])
+        gt_joints = clip["gt_joints"] 
 
-        out = {"img": imgs, "gt": gt}
+        # # Pre-compute GT joints for the whole clip
+        # all_gt_joints = []
+        # for frame_p in gt_params:
+        #     frame_joints = []
+        #     for h_idx in range(NUM_HANDS):
+        #         offset = h_idx * HAND_PARAM_DIM
+        #         p = frame_p[offset : offset + HAND_PARAM_DIM]
+                
+        #         # Use CPU/Numpy version for the Dataset
+        #         if p.abs().sum() < 1e-6:
+        #             j3d = np.zeros((21, 3), dtype=np.float32)
+        #         else:
+        #             j3d = self.mano_model.get_joints_from_tensor(p, is_right=(h_idx==1), return_tensor=False)
+        #         frame_joints.append(torch.from_numpy(j3d))
+        #     all_gt_joints.append(torch.stack(frame_joints))
+            
+
+        # gt_joints_3d = torch.stack(all_gt_joints) 
+        # gt_joints_3d = torch.squeeze(gt_joints_3d, 2)
+        # # [16, 2, 21, 3], [num_frames, num_hands, num_joints, dims]
+        
+        # print(f"gt_joints_3d.shape: {gt_joints_3d.shape}")
+
+        out = {
+            "img": imgs, 
+            "gt": gt_params, 
+            "gt_joints": gt_joints
+        }
 
         if self.use_hand_crop:
             out["hand_bboxes"] = torch.stack(clip["hand_bboxes"])  # [S, 2, 4]
@@ -363,7 +441,7 @@ def render_vis_list(vis_items, gt_pred_pairs, render_fn):
 # Validation
 # ------------------------------------------------------------------
 
-def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_param, vis_clip_indices=None):
+def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_param, mano_model, vis_clip_indices=None):
     """Run validation and optionally capture gt/pred at specific clip indices."""
     model.eval()
     val_loss = 0.0
@@ -376,10 +454,26 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             hb = vbatch["hand_bboxes"].to(device) if "hand_bboxes" in vbatch else None
             hv = vbatch["hand_valid"].to(device)  if "hand_valid"  in vbatch else None
             preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
-            
-            has_param = (gt.abs().sum(dim=-1) > 1e-6)
-            loss_param = criterion_param(preds["hand_joints"], gt, has_param)
-            val_loss += loss_param.item()
+            pred_params = preds["hand_joints"]
+
+            pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
+
+            # Calculate parameter loss
+            loss_param = criterion_param(pred_params, gt)
+
+            # Calculate keypoint loss
+            gt_joints = vbatch["gt_joints"].to(device)
+            gt_conf = torch.ones((*gt_joints.shape[:-1], 1), device=device)
+            gt_input = torch.cat([gt_joints, gt_conf], dim=-1)
+
+            B, S, H, J, _ = pred_joints.shape
+            pred_flat = pred_joints.view(B * S * H, 1, J, 3)
+            gt_flat = gt_input.view(B * S * H, 1, J, 4)
+
+            loss_kp3d = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0)
+
+            loss = loss_param + loss_kp3d
+            val_loss += loss.item()
 
 
             if vis_clip_indices:
@@ -413,7 +507,39 @@ def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
 # Training
 # ------------------------------------------------------------------
 
+def compute_joints_from_batch(params, mano_model, device):
+    """
+    Refactored helper to convert param tensors to joints.
+    Args:
+        params: Tensor of shape [B, S, 64]
+        mano_model: The MANOModel wrapper
+    Returns:
+        joints: Tensor of shape [B, S, 2, 21, 3] on the correct device
+    """
+    B, S, _ = params.shape
+    joints_list = []
+    
+    # We loop through batch and sequence
+    for b in range(B):
+        for s in range(S):
+            for h_idx in range(NUM_HANDS):
+                offset = h_idx * HAND_PARAM_DIM
+                p = params[b, s, offset : offset + HAND_PARAM_DIM]
+                
+                # return_tensor=True preserves gradients
+                j = mano_model.get_joints_from_tensor(p, is_right=(h_idx==1), return_tensor=True)
+                
+                # IMPORTANT: Squeeze the [1, 16, 3] to [16, 3] 
+                # so the stacked tensor has the correct total dimensions
+                joints_list.append(j.squeeze(0))
+
+    # Reconstruct the batch shape [B, S, 2, 16, 3]
+    # Note: 16 joints instead of 21
+    return torch.stack(joints_list).view(B, S, 2, 16, 3).to(device)
+
 def train():
+
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/train_hand_head.yaml")
     args = parser.parse_args()
@@ -437,7 +563,15 @@ def train():
     print(f"Loaded checkpoint. New (hand head) keys: {len(missing)}")
     model.to(device)
 
-    criterion_kp3d = Keypoint3DLoss(loss_type='l1').to(device)
+    vis_cfg = cfg.get("visualization", {})
+    mano_folder = vis_cfg.get("mano_model_folder")
+    if not mano_folder:
+        raise RuntimeError("MANO model folder must be specified in config for training and visualization")
+    from scripts.hand_vis_utils import MANOModel
+    mano_model = MANOModel(mano_folder)
+
+    criterion_kp3d = Keypoint3DLoss(loss_type='l2').to(device)
+    # criterion_kp2d = Keypoint2DLoss(loss_type='l2').to(device)
     criterion_param = ParameterLoss().to(device)
 
     hand_params = list(model.hand_head.parameters())
@@ -472,7 +606,7 @@ def train():
 
     if debug_cfg.get("single_frame", False):
         # Overfit on a single clip from the middle of the first sequence
-        single_set = HOT3DHandDataset(all_seqs[:1], **ds_kwargs)
+        single_set = HOT3DHandDataset(all_seqs[:1], mano_model, **ds_kwargs)
         mid = len(single_set.clips) // 2
         single_set.clips = [single_set.clips[mid]]
         train_set = val_set = single_set
@@ -484,8 +618,8 @@ def train():
         if n_val == 0:
             print("[WARN] No validation sequences — validation disabled, no best checkpoint will be saved")
         val_seqs, train_seqs = all_seqs[:n_val], all_seqs[n_val:]
-        train_set = HOT3DHandDataset(train_seqs, **ds_kwargs)
-        val_set = HOT3DHandDataset(val_seqs, **ds_kwargs) if val_seqs else None
+        train_set = HOT3DHandDataset(train_seqs, mano_model, **ds_kwargs)
+        val_set = HOT3DHandDataset(val_seqs, mano_model, **ds_kwargs) if val_seqs else None
 
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True, drop_last=True)
@@ -500,8 +634,6 @@ def train():
         print(f"Train clips: {len(train_set)} | Val clips: 0")
 
     # --- Visualization setup ---
-    vis_cfg = cfg.get("visualization", {})
-    mano_folder = vis_cfg.get("mano_model_folder")
     num_vis_frames = vis_cfg.get("num_vis_frames", 4)
     render_fn = None
     val_vis_items = []
@@ -509,9 +641,9 @@ def train():
 
     has_val_clips = val_set is not None and len(val_set.clips) > 0
     if mano_folder and (has_val_clips or len(train_set.clips) > 0):
-        from scripts.hand_vis_utils import MANOModel, render_hand_comparison
+        from scripts.hand_vis_utils import render_hand_comparison
+        
         render_fn = render_hand_comparison
-        mano_model = MANOModel(mano_folder)
         seq_cache = {}
 
         if has_val_clips:
@@ -558,19 +690,54 @@ def train():
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
             imgs = batch["img"].to(device)
-            gt = batch["gt"].to(device)
+            gt_params = batch["gt"].to(device)
+            gt_joints = batch["gt_joints"].to(device)
+
             hb = batch["hand_bboxes"].to(device) if "hand_bboxes" in batch else None
             hv = batch["hand_valid"].to(device)  if "hand_valid"  in batch else None
-            preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
             
-            # loss = F.mse_loss(preds["hand_joints"], gt)
-            gt_kp3d = preds["gt_keypoints_3d"]          # [B, S, N, 4] — coords + confidence
-            gt_param = gt                                # [B, S, hand_param_dim]
-            has_param = (gt.abs().sum(dim=-1) > 1e-6)   # [B, S] — True where GT is non-zero
+            # print(f"gt_params: {gt_params}")
+            # print(f"gt_joints: {gt_joints}")
 
-            loss_kp3d  = criterion_kp3d(preds["hand_keypoints_3d"], gt_kp3d)
-            loss_param = criterion_param(preds["hand_joints"], gt_param, has_param)
-            loss = loss_kp3d + loss_param
+            preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
+            pred_params = preds["hand_joints"] # [B, 16, 64]
+
+            pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
+
+            print(f"imgs shape: {imgs.shape} | gt_params shape: {gt_params.shape} | gt_joints shape: {gt_joints.shape}")
+            print(f"pred_params shape: {pred_params.shape} | pred_joints shape: {pred_joints.shape}")
+
+            # Calculate parameter loss
+            loss_param = criterion_param(pred_params, gt_params)
+
+            # Calculate keypoint loss
+            # 1. Add 1.0 confidence to GT
+            device = gt_joints.device
+            # Create [B, S, 2, 16, 1] of ones
+            gt_conf = torch.ones((*gt_joints.shape[:-1], 1), device=device)
+            # Concatenate to get [B, S, 2, 16, 4]
+            gt_input = torch.cat([gt_joints, gt_conf], dim=-1)
+
+            # 2. Flatten for the Loss Class
+            # The loss expects [Batch, Seq, Joints, Channels]
+            # We merge Batch, Seq, and Hands into a single 'Super-Batch'
+            B, S, H, J, _ = pred_joints.shape
+            pred_flat = pred_joints.view(B * S * H, 1, J, 3) # [512, 1, 16, 3]
+            gt_flat = gt_input.view(B * S * H, 1, J, 4)     # [512, 1, 16, 4]
+
+            print(f"imgs shape: {imgs.shape} | gt_params shape: {gt_params.shape} | gt_joints shape: {gt_joints.shape}")
+            print(f"pred_params shape: {pred_params.shape} | pred_joints shape: {pred_joints.shape}")
+
+            # 3. Calculate Loss
+            # The loss internally centers joints based on the pelvis (root)
+            loss_kp3d = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0)
+
+
+            # loss_kp3d = criterion_kp3d(pred_joints, gt_joints)
+            
+            loss = loss_param + loss_kp3d
+            # TODO:
+            # loss = loss_param + loss_kp3d + loss_kp2d
 
             (loss / grad_accum_steps).backward()
 
@@ -594,7 +761,7 @@ def train():
 
                 # --- Validation ---
                 if val_loader and (global_step % val_every == 0 or global_step == 1):
-                    val_loss, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_param, val_vis_clip_indices)
+                    val_loss, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_param, mano_model, val_vis_clip_indices)
                     tqdm.write(f"  step {global_step} | val_loss={val_loss:.6f}")
 
                     if use_wandb:
