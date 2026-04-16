@@ -11,6 +11,8 @@ import json
 import os
 import random
 
+import numpy as np
+
 import torch
 import torch.nn.functional as F
 import wandb
@@ -26,6 +28,25 @@ from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import Wor
 from diffsynth.utils.auxiliary import load_video
 
 HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
+NUM_HANDS = 2
+
+
+# ------------------------------------------------------------------
+# Bounding-box utilities
+# ------------------------------------------------------------------
+
+
+
+def default_full_image_bboxes(num_frames: int) -> tuple:
+    """Fallback: return full-image bboxes (no effective cropping).
+
+    Useful as a baseline or when real bboxes are not yet available.
+    """
+    bboxes = torch.zeros(num_frames, NUM_HANDS, 4)
+    bboxes[:, :, 2] = 1.0  # x2
+    bboxes[:, :, 3] = 1.0  # y2
+    valid = torch.ones(num_frames, NUM_HANDS, dtype=torch.bool)
+    return bboxes, valid
 
 
 # ------------------------------------------------------------------
@@ -35,15 +56,18 @@ HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
 class HOT3DHandDataset(Dataset):
     """Sliding-window clips over a list of sequences."""
 
-    def __init__(self, seq_dirs, num_frames=16, res=(224, 224), clip_stride=None):
+    def __init__(self, seq_dirs, num_frames=16, res=(224, 224), clip_stride=None,
+                 use_hand_crop=False, rescale_factor=2.0):
         self.num_frames = num_frames
         self.res = res
+        self.use_hand_crop = use_hand_crop
+        self.rescale_factor = rescale_factor
         self.clips = []
 
         if clip_stride is None:
             clip_stride = num_frames
 
-        for seq_path in seq_dirs:
+        for seq_path in tqdm(seq_dirs):
             video_path = os.path.join(seq_path, "video_main_rgb.mp4")
             jsonl_path = os.path.join(seq_path, "hand_data/mano_hand_pose_trajectory.jsonl")
 
@@ -100,13 +124,54 @@ class HOT3DHandDataset(Dataset):
                 ts = _closest_ts(frame_i)
                 gt_per_frame.append(_hand_to_vec(hand_entries[ts]))
 
+            if self.use_hand_crop:
+                cache_name = f"hand_bboxes_rf{self.rescale_factor}_res{res[0]}x{res[1]}.pt"
+                cache_path = os.path.join(seq_path, "hand_data", cache_name)
+
+                if os.path.exists(cache_path):
+                    cached = torch.load(cache_path, weights_only=True)
+                    bbox_frames = list(cached["bboxes"])
+                    valid_frames = list(cached["valid"])
+                    gt_per_frame[:] = list(cached["gt"])
+                else:
+                    bbox_frames, valid_frames = HOT3DHandDataset._compute_projected_bboxes(
+                        seq_path, n_video, hand_ts_sorted, gt_per_frame,
+                        rescale_factor=self.rescale_factor,
+                    )
+                    if bbox_frames is None:
+                        print(f"Skipping {seq_path}: missing calibration for hand crop")
+                        continue
+
+                    # Transform GT from world space to crop-local frame to match
+                    # the network's raw (z, tx_crop, ty_crop) output.
+                    ok = HOT3DHandDataset._transform_gt_to_crop_local(
+                        seq_path, n_video, hand_ts_sorted, gt_per_frame,
+                        bbox_frames, valid_frames, res=res,
+                    )
+                    if not ok:
+                        print(f"Skipping {seq_path}: missing calibration for GT crop-local transform")
+                        continue
+
+                    torch.save({
+                        "bboxes": torch.stack(bbox_frames),
+                        "valid": torch.stack(valid_frames),
+                        "gt": torch.stack(gt_per_frame),
+                    }, cache_path)
+                    print(f"Cached hand bboxes -> {cache_path}")
+            else:
+                bbox_frames = valid_frames = None
+
             for start in range(0, n_video - num_frames + 1, clip_stride):
-                self.clips.append({
+                clip = {
                     "video_path":   video_path,
                     "gt_frames":    gt_per_frame[start : start + num_frames],
                     "frame_offset": start,
                     "seq_path":     seq_path,
-                })
+                }
+                if self.use_hand_crop:
+                    clip["hand_bboxes"] = bbox_frames[start : start + num_frames]
+                    clip["hand_valid"]  = valid_frames[start : start + num_frames]
+                self.clips.append(clip)
 
     def __len__(self):
         return len(self.clips)
@@ -122,7 +187,250 @@ class HOT3DHandDataset(Dataset):
         )
         imgs = torch.stack([TVF.to_tensor(img) for img in pil_images])
         gt = torch.stack(clip["gt_frames"])
-        return {"img": imgs, "gt": gt}
+
+        out = {"img": imgs, "gt": gt}
+
+        if self.use_hand_crop:
+            out["hand_bboxes"] = torch.stack(clip["hand_bboxes"])  # [S, 2, 4]
+            out["hand_valid"]  = torch.stack(clip["hand_valid"])   # [S, 2]
+
+        return out
+
+    @staticmethod
+    def _compute_projected_bboxes(seq_path, n_video, hand_ts_sorted, gt_per_frame,
+                                   rescale_factor=2.0, **_kwargs):
+        """Compute per-frame hand bboxes by projecting the full MANO mesh.
+
+        Follows the same approach as HaMeR's hand detection pipeline:
+        1. Project all hand mesh vertices to 2D (like HaMeR uses ViTPose keypoints)
+        2. Compute a tight bounding box around all valid projected vertices
+        3. Apply a rescale factor to pad the box (HaMeR default: 2.0x)
+
+        This produces bboxes that tightly enclose the visible hand and are
+        centered on the hand (not just the wrist), matching HaMeR's ViTPose
+        keypoint-based bbox extraction.
+
+        Returns lists of [2, 4] bbox tensors (normalised x1,y1,x2,y2 in [0,1])
+        and [2] bool valid tensors, or (None, None) if calibration files are missing.
+        """
+        import numpy as np
+        from projectaria_tools.core.sophus import SE3
+        from scripts.hand_vis_utils import (
+            load_camera_calibration, load_headset_trajectory, find_closest,
+            load_hand_poses, MANOModel, project_vertices,
+        )
+
+        calib_path   = os.path.join(seq_path, "mps_slam_calibration", "online_calibration.jsonl")
+        headset_path = os.path.join(seq_path, "ground_truth", "headset_trajectory.csv")
+        jsonl_path   = os.path.join(seq_path, "hand_data", "mano_hand_pose_trajectory.jsonl")
+        mano_folder  = os.path.join(os.path.dirname(os.path.dirname(seq_path)),
+                                     "models", "MANO")
+
+        # Also accept mano_folder from the repo root (common layout)
+        if not os.path.exists(mano_folder):
+            # Try relative to the FF-4DGS-Ego repo root
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            mano_folder = os.path.join(repo_root, "models", "MANO")
+
+        for p in [calib_path, headset_path, jsonl_path]:
+            if not os.path.exists(p):
+                return None, None
+        if not os.path.exists(mano_folder):
+            print(f"[WARN] MANO model folder not found at {mano_folder}, "
+                  "cannot compute mesh-based bboxes")
+            return None, None
+
+        T_device_camera, cam_calib = load_camera_calibration(calib_path)
+        headset_poses = load_headset_trajectory(headset_path)
+        headset_ts    = sorted(headset_poses.keys())
+
+        hand_poses_data = load_hand_poses(jsonl_path)
+        hand_ts_data    = sorted(hand_poses_data.keys())
+
+        mano_model = MANOModel(mano_folder)
+
+        ts_start, ts_end = hand_ts_sorted[0], hand_ts_sorted[-1]
+        IMAGE_WIDTH = 1408  # Aria sensor resolution before resize
+
+        bboxes_list = []
+        valid_list  = []
+
+        for frame_i in range(len(gt_per_frame)):
+            frac     = frame_i / max(n_video - 1, 1)
+            query_tc = int(ts_start + frac * (ts_end - ts_start))
+
+            # Find closest headset pose
+            closest_ht = find_closest(headset_ts, query_tc)
+            t_wd, q_wd = headset_poses[closest_ht]
+            T_world_device = SE3.from_quat_and_translation(q_wd[0], q_wd[1:], t_wd)[0]
+
+            # Find closest hand pose entry (raw JSONL data with full MANO params)
+            closest_hand_ts = find_closest(hand_ts_data, query_tc)
+            hand_data = hand_poses_data[closest_hand_ts]
+
+            frame_bboxes = torch.zeros(NUM_HANDS, 4)
+            frame_valid  = torch.zeros(NUM_HANDS, dtype=torch.bool)
+
+            for hand_idx in range(NUM_HANDS):
+                hand_key = str(hand_idx)  # "0" = left, "1" = right
+                is_right = hand_idx == 1
+
+                if hand_key not in hand_data or not hand_data[hand_key]:
+                    # Hand absent: safe fallback bbox
+                    frame_bboxes[hand_idx] = torch.tensor([0.25, 0.25, 0.75, 0.75])
+                    continue
+
+                try:
+                    # Generate full MANO mesh in world coordinates
+                    vertices, _faces = mano_model.get_mesh(hand_data[hand_key], is_right)
+
+                    # Project all 778 vertices to 2D using the same projection
+                    # as hand_vis_utils (fisheye + 90° rotation)
+                    pixels, depths, valid_mask = project_vertices(
+                        vertices, T_world_device, T_device_camera, cam_calib,
+                        image_width=IMAGE_WIDTH,
+                    )
+
+                    if valid_mask.sum() < 10:
+                        frame_bboxes[hand_idx] = torch.tensor([0.25, 0.25, 0.75, 0.75])
+                        continue
+
+                    # Tight bbox around all valid projected vertices (in pixels)
+                    valid_pixels = pixels[valid_mask]  # [N_valid, 2] — (u, v) in pixel coords
+                    u_min, v_min = valid_pixels.min(axis=0)
+                    u_max, v_max = valid_pixels.max(axis=0)
+
+                    # Compute center and size (Hamer-style: center + scale)
+                    center_u = (u_min + u_max) / 2.0
+                    center_v = (v_min + v_max) / 2.0
+                    bbox_w = u_max - u_min
+                    bbox_h = v_max - v_min
+
+                    # Apply rescale factor (Hamer default = 2.0) to pad the bbox
+                    # This matches HaMeR's ViTDetDataset: scale = rescale_factor * (box_size) / 200
+                    # but we directly expand the bbox by the factor
+                    bbox_w *= rescale_factor
+                    bbox_h *= rescale_factor
+
+                    # Make square (take max side, like Hamer's expand_to_aspect_ratio)
+                    bbox_size = max(bbox_w, bbox_h)
+
+                    # Convert to normalised [0,1] coords (x1, y1, x2, y2)
+                    x1 = (center_u - bbox_size / 2.0) / IMAGE_WIDTH
+                    y1 = (center_v - bbox_size / 2.0) / IMAGE_WIDTH
+                    x2 = (center_u + bbox_size / 2.0) / IMAGE_WIDTH
+                    y2 = (center_v + bbox_size / 2.0) / IMAGE_WIDTH
+
+                    # Clamp to [0, 1]
+                    x1 = max(0.0, min(1.0, x1))
+                    y1 = max(0.0, min(1.0, y1))
+                    x2 = max(0.0, min(1.0, x2))
+                    y2 = max(0.0, min(1.0, y2))
+
+                    # Sanity check: box must have positive area
+                    if x2 - x1 < 0.01 or y2 - y1 < 0.01:
+                        frame_bboxes[hand_idx] = torch.tensor([0.25, 0.25, 0.75, 0.75])
+                        continue
+
+                    frame_bboxes[hand_idx] = torch.tensor([x1, y1, x2, y2])
+                    frame_valid[hand_idx] = True
+
+                except Exception as e:
+                    # Fallback on MANO mesh generation failure
+                    frame_bboxes[hand_idx] = torch.tensor([0.25, 0.25, 0.75, 0.75])
+                    continue
+
+            bboxes_list.append(frame_bboxes)
+            valid_list.append(frame_valid)
+
+        return bboxes_list, valid_list
+
+    @staticmethod
+    def _transform_gt_to_crop_local(seq_path, n_video, hand_ts_sorted, gt_per_frame,
+                                     bbox_frames, valid_frames, res=(224, 224)):
+        """Transform GT wrist position and orientation from world space to camera frame.
+
+        The HaMeR cross-attention head regresses MANO parameters in camera space
+        (matching original HaMeR semantics). The crop is provided to the head
+        spatially via ROI Align + bbox geometry injection — there is no
+        crop-local decoder, so we must NOT project the GT translation into a
+        crop-local frame. Doing so previously combined a pinhole approximation
+        with fisheye-projected bboxes and produced GT values inconsistent with
+        anything the head could learn (loss ~300k).
+
+        Steps per frame per hand:
+            1. world → camera position:    t_cam = R_cw @ t_world + t_cw
+            2. world → camera orientation: R_cam = R_cw @ R_world
+
+        Modifies gt_per_frame in-place.
+        Returns True on success, False if calibration files are missing.
+        """
+        from projectaria_tools.core.sophus import SE3
+        from scipy.spatial.transform import Rotation
+        from scripts.hand_vis_utils import (
+            load_camera_calibration, load_headset_trajectory, find_closest,
+        )
+
+        calib_path   = os.path.join(seq_path, "mps_slam_calibration", "online_calibration.jsonl")
+        headset_path = os.path.join(seq_path, "ground_truth", "headset_trajectory.csv")
+
+        for p in [calib_path, headset_path]:
+            if not os.path.exists(p):
+                return False
+
+        T_device_camera, _cam_calib = load_camera_calibration(calib_path)
+        headset_poses = load_headset_trajectory(headset_path)
+        headset_ts = sorted(headset_poses.keys())
+
+        ts_start, ts_end = hand_ts_sorted[0], hand_ts_sorted[-1]
+
+        for frame_i in range(len(gt_per_frame)):
+            frac = frame_i / max(n_video - 1, 1)
+            query_tc = int(ts_start + frac * (ts_end - ts_start))
+
+            # Per-frame world→camera transform
+            closest_ht = find_closest(headset_ts, query_tc)
+            t_wd, q_wd_wxyz = headset_poses[closest_ht]
+            T_world_device = SE3.from_quat_and_translation(
+                q_wd_wxyz[0], q_wd_wxyz[1:], t_wd
+            )[0]
+            T_camera_world = (
+                T_device_camera.inverse().to_matrix()
+                @ T_world_device.inverse().to_matrix()
+            )
+            R_cw = T_camera_world[:3, :3]
+            t_cw = T_camera_world[:3, 3]
+
+            gt_vec = gt_per_frame[frame_i]  # [64] = 2 hands x 32
+
+            for hand_idx in range(NUM_HANDS):
+                off = hand_idx * HAND_PARAM_DIM
+                t_world = gt_vec[off:off + 3].numpy()
+                q_wxyz  = gt_vec[off + 3:off + 7].numpy()
+
+                # Skip zero (absent) hands
+                if np.abs(t_world).sum() < 1e-8 and np.abs(q_wxyz).sum() < 1e-8:
+                    continue
+
+                # --- Step 1: world → camera position ---
+                t_cam = R_cw @ t_world + t_cw
+
+                gt_vec[off]     = float(t_cam[0])
+                gt_vec[off + 1] = float(t_cam[1])
+                gt_vec[off + 2] = float(t_cam[2])
+
+                # --- Step 2: world → camera orientation ---
+                q_xyzw = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
+                R_world = Rotation.from_quat(q_xyzw).as_matrix()
+                R_cam = R_cw @ R_world
+                q_cam_xyzw = Rotation.from_matrix(R_cam).as_quat()
+                q_cam_wxyz = np.array([
+                    q_cam_xyzw[3], q_cam_xyzw[0], q_cam_xyzw[1], q_cam_xyzw[2]
+                ])
+
+                gt_vec[off + 3:off + 7] = torch.from_numpy(q_cam_wxyz.astype(np.float32))
+
+        return True
 
 
 def discover_sequences(data_root):
@@ -141,9 +449,10 @@ def discover_sequences(data_root):
 # Model helpers
 # ------------------------------------------------------------------
 
-def build_views(imgs, num_frames, device):
+def build_views(imgs, num_frames, device, hand_bboxes=None, hand_valid=None,
+                 crop_local_output=False):
     B, _, _, H, W = imgs.shape
-    return {
+    views = {
         "img":          imgs,
         "is_target":    torch.zeros((B, num_frames), dtype=torch.bool, device=device),
         "timestamp":    torch.arange(num_frames, device=device).unsqueeze(0).expand(B, -1),
@@ -153,6 +462,13 @@ def build_views(imgs, num_frames, device):
         "camera_intrs": torch.eye(3, device=device).view(1, 1, 3, 3).expand(B, num_frames, 3, 3),
         "depthmap":     torch.ones((B, num_frames, H, W), device=device),
     }
+    if hand_bboxes is not None:
+        views["hand_bboxes"] = hand_bboxes
+    if hand_valid is not None:
+        views["hand_valid"] = hand_valid
+    if crop_local_output:
+        views["crop_local_output"] = True
+    return views
 
 
 # ------------------------------------------------------------------
@@ -191,6 +507,9 @@ def setup_vis_items(dataset, num_vis_frames, seq_cache, mano_model, preload=Fals
             data = dataset[clip_idx]
             entry["img"] = data["img"]
             entry["gt"] = data["gt"]
+            if "hand_bboxes" in data:
+                entry["hand_bboxes"] = data["hand_bboxes"]
+                entry["hand_valid"] = data["hand_valid"]
         items.append(entry)
     return items
 
@@ -229,16 +548,26 @@ def run_validation(model, val_loader, num_frames, device, vis_clip_indices=None)
         for batch_idx, vbatch in enumerate(tqdm(val_loader, desc="Val", leave=False)):
             imgs = vbatch["img"].to(device)
             gt = vbatch["gt"].to(device)
-            preds = model(build_views(imgs, num_frames, device), is_inference=False, use_motion=False)
-            val_loss += F.mse_loss(preds["hand_joints"], gt).item()
+            hb = vbatch["hand_bboxes"].to(device) if "hand_bboxes" in vbatch else None
+            hv = vbatch["hand_valid"].to(device)  if "hand_valid"  in vbatch else None
+            preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
+            if hv is not None:
+                valid_mask = hv.unsqueeze(-1).expand(-1, -1, -1, HAND_PARAM_DIM).reshape(
+                    hv.shape[0], hv.shape[1], -1).float()
+                diff_sq = (preds["hand_joints"] - gt) ** 2
+                val_loss += (diff_sq * valid_mask).sum().item() / valid_mask.sum().clamp(min=1).item()
+            else:
+                val_loss += F.mse_loss(preds["hand_joints"], gt).item()
 
             if vis_clip_indices:
+                # For vis we need camera-space predictions for rendering
+                vis_preds = model(build_views(imgs, num_frames, device, hb, hv, crop_local_output=False), is_inference=False, use_motion=False)
                 for item_idx in range(imgs.shape[0]):
                     clip_idx = batch_idx * batch_size + item_idx
                     if clip_idx in vis_clip_indices:
                         captured[clip_idx] = {
                             "gt": gt[item_idx, 0].cpu(),
-                            "pred": preds["hand_joints"][item_idx, 0].cpu(),
+                            "pred": vis_preds["hand_joints"][item_idx, 0].cpu(),
                         }
 
     return val_loss / max(len(val_loader), 1), captured
@@ -249,7 +578,10 @@ def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
     model.eval()
     with torch.no_grad():
         imgs = torch.stack([it["img"] for it in train_vis_items]).to(device)
-        preds = model(build_views(imgs, num_frames, device), is_inference=False, use_motion=False)
+        hb = torch.stack([it["hand_bboxes"] for it in train_vis_items]).to(device) if "hand_bboxes" in train_vis_items[0] else None
+        hv = torch.stack([it["hand_valid"]  for it in train_vis_items]).to(device) if "hand_valid"  in train_vis_items[0] else None
+        # crop_local_output=False so predictions are in camera space for rendering
+        preds = model(build_views(imgs, num_frames, device, hb, hv, crop_local_output=False), is_inference=False, use_motion=False)
         pairs = [
             (item["gt"][0], preds["hand_joints"][i, 0].cpu())
             for i, item in enumerate(train_vis_items)
@@ -261,13 +593,30 @@ def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
 # Training
 # ------------------------------------------------------------------
 
+def _apply_overrides(cfg, overrides):
+    """Apply dotted-key overrides like 'training.lr=3e-4' to a nested dict."""
+    for ov in overrides:
+        key, val = ov.split("=", 1)
+        parts = key.split(".")
+        d = cfg
+        for p in parts[:-1]:
+            d = d.setdefault(p, {})
+        d[parts[-1]] = yaml.safe_load(val)
+
+
 def train():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/train_hand_head.yaml")
+    parser.add_argument("overrides", nargs="*", metavar="KEY=VAL",
+                        help="Config overrides, e.g. training.lr=3e-4 model.hamer_head_kwargs.depth=4")
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+
+    if args.overrides:
+        _apply_overrides(cfg, args.overrides)
+        print(f"Config overrides: {args.overrides}")
 
     data_cfg     = cfg["data"]
     model_cfg    = cfg["model"]
@@ -306,9 +655,18 @@ def train():
     grad_accum_steps = training_cfg.get("grad_accum_steps", 1)
     num_workers      = data_cfg.get("num_workers", 4)
 
+    # Hand-crop dataset options (mirror the model flag)
+    use_hand_crop = model_cfg.get("hand_head_type") == "hand_crop" or model_cfg.get("use_hand_crop", False)
+    rescale_factor = cfg.get("hand_crop", {}).get("rescale_factor", 2.0)
+
+    ds_kwargs = dict(
+        num_frames=num_frames, res=res, clip_stride=clip_stride,
+        use_hand_crop=use_hand_crop, rescale_factor=rescale_factor,
+    )
+
     if debug_cfg.get("single_frame", False):
         # Overfit on a single clip from the middle of the first sequence
-        single_set = HOT3DHandDataset(all_seqs[:1], num_frames=num_frames, res=res, clip_stride=clip_stride)
+        single_set = HOT3DHandDataset(all_seqs[:1], **ds_kwargs)
         mid = len(single_set.clips) // 2
         single_set.clips = [single_set.clips[mid]]
         train_set = val_set = single_set
@@ -320,8 +678,8 @@ def train():
         if n_val == 0:
             print("[WARN] No validation sequences — validation disabled, no best checkpoint will be saved")
         val_seqs, train_seqs = all_seqs[:n_val], all_seqs[n_val:]
-        train_set = HOT3DHandDataset(train_seqs, num_frames=num_frames, res=res, clip_stride=clip_stride)
-        val_set = HOT3DHandDataset(val_seqs, num_frames=num_frames, res=res, clip_stride=clip_stride) if val_seqs else None
+        train_set = HOT3DHandDataset(train_seqs, **ds_kwargs)
+        val_set = HOT3DHandDataset(val_seqs, **ds_kwargs) if val_seqs else None
 
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True, drop_last=True)
@@ -361,8 +719,10 @@ def train():
 
     # --- Optimizer & scheduler ---
     epochs     = training_cfg["epochs"]
+    steps_per_epoch = len(train_loader) // grad_accum_steps
+    total_steps = epochs * steps_per_epoch
     optimizer  = Adam(hand_params, lr=float(training_cfg["lr"]))
-    scheduler  = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=float(training_cfg.get("min_lr", 1e-6)))
+    scheduler  = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=float(training_cfg.get("min_lr", 1e-6)))
 
     log_every  = training_cfg.get("log_every", 500)
     val_every  = training_cfg.get("val_every", 2000)
@@ -384,6 +744,24 @@ def train():
             config=cfg,
         )
 
+    # --- Diagnostic: first-batch GT translation stats (sanity check the
+    # crop-local / camera-frame transform after the fisheye fix). ---
+    _diag_batch = next(iter(train_loader))
+    _diag_gt = _diag_batch["gt"]  # [B, S, 64]
+    for _hand_idx, _name in enumerate(("left", "right")):
+        _off = _hand_idx * HAND_PARAM_DIM
+        _t = _diag_gt[..., _off:_off + 3]
+        _nz = _t.abs().sum(dim=-1) > 1e-6
+        if _nz.any():
+            _tv = _t[_nz]
+            print(f"[DIAG] {_name} hand GT t_cam: "
+                  f"min={_tv.min().item():.4f} max={_tv.max().item():.4f} "
+                  f"mean={_tv.mean().item():.4f} std={_tv.std().item():.4f} "
+                  f"(N={_nz.sum().item()})")
+        else:
+            print(f"[DIAG] {_name} hand GT t_cam: all-zero in first batch")
+    del _diag_batch, _diag_gt
+
     best_val_loss = float("inf")
     global_step = 0
 
@@ -391,26 +769,41 @@ def train():
     for epoch in tqdm(range(1, epochs + 1), desc="Epochs"):
         model.train()
         optimizer.zero_grad()
+        accum_loss = 0.0
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
             imgs = batch["img"].to(device)
             gt = batch["gt"].to(device)
-            preds = model(build_views(imgs, num_frames, device), is_inference=False, use_motion=False)
-            loss = F.mse_loss(preds["hand_joints"], gt)
+            hb = batch["hand_bboxes"].to(device) if "hand_bboxes" in batch else None
+            hv = batch["hand_valid"].to(device)  if "hand_valid"  in batch else None
+            preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
+            if hv is not None:
+                valid_mask = hv.unsqueeze(-1).expand(-1, -1, -1, HAND_PARAM_DIM).reshape(
+                    hv.shape[0], hv.shape[1], -1).float()
+                diff_sq = (preds["hand_joints"] - gt) ** 2
+                loss = (diff_sq * valid_mask).sum() / valid_mask.sum().clamp(min=1)
+            else:
+                loss = F.mse_loss(preds["hand_joints"], gt)
             (loss / grad_accum_steps).backward()
+            accum_loss += loss.item()
 
             if (batch_idx + 1) % grad_accum_steps == 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(hand_params, max_norm=float("inf"))
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad()
+                avg_loss = accum_loss / grad_accum_steps
+                accum_loss = 0.0
                 global_step += 1
 
                 # --- Train logging ---
                 if use_wandb:
-                    wandb.log({"train/loss": loss.item(), "lr": scheduler.get_last_lr()[0]}, step=global_step)
+                    wandb.log({"train/loss": avg_loss, "train/grad_norm": grad_norm.item(),
+                               "lr": scheduler.get_last_lr()[0]}, step=global_step)
 
                 if global_step % log_every == 0 or global_step == 1:
                     lr = scheduler.get_last_lr()[0]
-                    tqdm.write(f"  step {global_step} | train_loss={loss.item():.6f} | lr={lr:.2e}")
+                    tqdm.write(f"  step {global_step} | train_loss={avg_loss:.6f} | grad_norm={grad_norm.item():.4f} | lr={lr:.2e}")
                     if use_wandb and train_vis_items:
                         train_images = render_train_vis(model, train_vis_items, num_frames, device, render_fn)
                         if train_images:
@@ -443,7 +836,9 @@ def train():
                 if global_step % save_every == 0:
                     torch.save(model.hand_head.state_dict(), os.path.join(output_dir, f"checkpoint_{global_step}.pt"))
 
-        scheduler.step()
+        # Flush leftover gradients from an incomplete accumulation window
+        if (batch_idx + 1) % grad_accum_steps != 0:
+            optimizer.zero_grad()
 
     # --- Save final ---
     torch.save(model.hand_head.state_dict(), os.path.join(output_dir, "hand_head_final.pt"))

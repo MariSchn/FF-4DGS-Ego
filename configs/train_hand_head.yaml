@@ -4,7 +4,7 @@
 data:
   # Root folder containing one subdir per sequence. Each sequence must have
   # video_main_rgb.mp4 and hand_data/mano_hand_pose_trajectory.jsonl
-  data_root: "data/hot3d_aria/sequences"
+  data_root: "/home/user/dmonopoli/data/hot3d_aria/sequences"
   # Number of frames per clip (sliding window over video). Full video is too long to fit in memory.
   num_frames: 16
   # [height, width] to which video frames are resized
@@ -12,7 +12,7 @@ data:
   # Step between consecutive clips when sliding over a video (stride=num_frames -> non-overlapping)
   clip_stride: 8
   # Fraction of sequences used for validation (0.0 = no validation; 0.1 = 10% held out)
-  val_split: 0.05
+  val_split: 0.01
   # DataLoader workers for loading video clips
   num_workers: 4
 
@@ -26,6 +26,13 @@ model:
   freeze_backbone: true
   # Enable hand prediction head
   enable_hand: true
+  # Hand head type: "hamer" (Hamer-style cross-attention) or "dpt" (dense prediction)
+  hand_head_type: "hamer"
+  # Enable hand crop (ROI Align on features around detected hand bbox)
+  use_hand_crop: true
+  # Crop feature map size (output of ROI Align per hand)
+  hand_crop_size: 8
+
   # Disable other heads
   enable_cam: false
   enable_pts: false
@@ -34,20 +41,30 @@ model:
   enable_motion: false
   enable_gs: false
 
+  # HaMeR head architecture (only used when hand_head_type == "hamer")
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+
 # ------------------------------------------------------------------
 # Training
 # ------------------------------------------------------------------
 training:
   lr: 1e-4
   min_lr: 1e-7           # Minimum LR for cosine annealing scheduler
-  epochs: 1
-  batch_size: 1
-  grad_accum_steps: 4    # Effective batch = batch_size * grad_accum_steps
-  log_every: 250         # Steps between train loss logs (console + W&B)
-  val_every: 250         # Steps between validation runs
+  epochs: 5
+  batch_size: 32
+  grad_accum_steps: 1    # Effective batch = batch_size * grad_accum_steps
+  log_every: 500         # Steps between train loss logs (console + W&B)
+  val_every: 500         # Steps between validation runs
   save_every: 1000       # Steps between checkpoint saves
   seed: 42               # Random seed
-  output_dir: "checkpoints/overfit_1_frame"
+  output_dir: "checkpoints/default"
 
 # ------------------------------------------------------------------
 # Visualization
@@ -59,12 +76,20 @@ visualization:
   num_vis_frames: 4
 
 # ------------------------------------------------------------------
+# Hand Crop (HaMeR-style bbox parameters)
+# ------------------------------------------------------------------
+hand_crop:
+  # Rescale factor for hand bounding box (matches HaMeR default of 2.0x) 
+  # The tight MANO mesh bbox is expanded by this factor to provide context
+  rescale_factor: 1.5
+
+# ------------------------------------------------------------------
 # Debug
 # ------------------------------------------------------------------
 debug:
-  enabled: false         # When true, apply max_sequences limit to limit the number of sequences used for training
-  max_sequences: 1       # Use only this many sequences (from data_root)
-  single_frame: true     # Overfit on a single clip from first sequence; disables validation
+  enabled: false          # When true, apply max_sequences limit to limit the number of sequences used for training
+  max_sequences: 5       # Use only this many sequences (from data_root)
+  single_frame: false     # Overfit on a single clip from first sequence; disables validation
 
 # ------------------------------------------------------------------
 # Weights & Biases
@@ -73,6 +98,6 @@ wandb:
   enabled: true
   project: "hand-head-training"
   entity: 3DV-Project
-  run_name: "Full Dataset"
+  run_name: "Large Batch Size 3 Epcochs"
   tags: []
   notes: null

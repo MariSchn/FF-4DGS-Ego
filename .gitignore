@@ -1,4 +1,5 @@
 __pycache__
+.ipynb_checkpoints/
 *.egg-info
 .vscode
 .gradio
@@ -9,3 +10,8 @@ __pycache__
 /wandb
 /checkpoints
 /venv
+*.pt
+*.mp4
+checkpoints/
+P0001_*/
+hand_data/
