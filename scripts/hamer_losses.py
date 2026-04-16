@@ -18,9 +18,9 @@ class Keypoint2DLoss(nn.Module):
         """
         super(Keypoint2DLoss, self).__init__()
         if loss_type == 'l1':
-            self.loss_fn = nn.L1Loss()
+            self.loss_fn = nn.L1Loss(reduction='none')
         elif loss_type == 'l2':
-            self.loss_fn = nn.MSELoss()
+            self.loss_fn = nn.MSELoss(reduction='none')
         else:
             raise NotImplementedError('Unsupported loss function')
 
@@ -33,9 +33,10 @@ class Keypoint2DLoss(nn.Module):
         Returns:
             torch.Tensor: 2D keypoint loss.
         """
+        batch_size = pred_keypoints_2d.shape[0]
         conf = gt_keypoints_2d[:, :, :, -1].unsqueeze(-1).clone()  # [B, S, N, 1]
-        loss = (conf * self.loss_fn(pred_keypoints_2d, gt_keypoints_2d[:, :, :, :-1])).sum(dim=(2, 3))
-        return loss.sum()
+        loss = (conf * self.loss_fn(pred_keypoints_2d, gt_keypoints_2d[:, :, :, :-1])).sum(dim=(1, 2, 3))
+        return loss.sum() / batch_size
 
         
 class Keypoint3DLoss(nn.Module):
@@ -48,9 +49,9 @@ class Keypoint3DLoss(nn.Module):
         """
         super(Keypoint3DLoss, self).__init__()
         if loss_type == 'l1':
-            self.loss_fn = nn.L1Loss()
+            self.loss_fn = nn.L1Loss(reduction='none')
         elif loss_type == 'l2':
-            self.loss_fn = nn.MSELoss()
+            self.loss_fn = nn.MSELoss(reduction='none')
         else:
             raise NotImplementedError(f'Unsupported loss type: {loss_type!r}. Choose from "l1" or "l2".')
 
@@ -79,6 +80,7 @@ class Keypoint3DLoss(nn.Module):
             torch.Tensor: Scalar 3D keypoint loss.
         """
         gt_keypoints_3d = gt_keypoints_3d.clone()
+        batch_size = pred_keypoints_3d.shape[0]
 
         # Root-centre both prediction and ground truth
         pred_keypoints_3d = pred_keypoints_3d - pred_keypoints_3d[:, :, pelvis_id, :].unsqueeze(2)
@@ -91,8 +93,8 @@ class Keypoint3DLoss(nn.Module):
         conf = gt_keypoints_3d[:, :, :, -1].unsqueeze(-1).clone()
         gt_keypoints_3d = gt_keypoints_3d[:, :, :, :-1]
 
-        loss = (conf * self.loss_fn(pred_keypoints_3d, gt_keypoints_3d)).sum(dim=(2, 3))
-        return loss.sum()
+        loss = (conf * self.loss_fn(pred_keypoints_3d, gt_keypoints_3d)).sum(dim=(1, 2, 3))
+        return loss.sum() / batch_size
 
 
 class ParameterLoss(nn.Module):
@@ -104,7 +106,7 @@ class ParameterLoss(nn.Module):
         annotation is unavailable.
         """
         super(ParameterLoss, self).__init__()
-        self.loss_fn = nn.MSELoss()
+        self.loss_fn = nn.MSELoss(reduction='none')
 
     def forward(
         self,
@@ -124,10 +126,11 @@ class ParameterLoss(nn.Module):
             torch.Tensor: Scalar parameter loss.
         """
 
-        # has_param (torch.Tensor): Shape [B, S] — binary mask; 1 if the            
+        # has_param (torch.Tensor): Shape [B, S] — binary mask; 1 if the
         # sample has a valid ground truth annotation, 0 otherwise.
         has_param = (gt_param.abs().sum(dim=-1) > 0).float() # [B, S]
-        
+
+        batch_size = pred_param.shape[0]
         num_dims = len(pred_param.shape)
 
         # Broadcast mask over all parameter dimensions beyond [B, S]
@@ -135,5 +138,5 @@ class ParameterLoss(nn.Module):
             *has_param.shape, *([1] * (num_dims - len(has_param.shape)))
         )
 
-        loss = mask * self.loss_fn(pred_param, gt_param)
+        loss = (mask * self.loss_fn(pred_param, gt_param)).reshape(batch_size, -1).mean(dim=-1)
         return loss.sum()
