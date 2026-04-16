@@ -16,3 +16,5 @@ __pycache__
 checkpoints/
 P0001_*/
 hand_data/
+
+venv_gb10/
