@@ -1,18 +1,0 @@
-wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/miliev/.netrc.
-wandb: Currently logged in as: miliev (3DV-Project) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
-wandb: setting up run izun9bg3
-wandb: Tracking run with wandb version 0.25.1
-wandb: Run data is saved locally in /home/miliev/FF-4DGS-Ego/wandb/run-20260416_104740-izun9bg3
-wandb: Run `wandb offline` to turn off syncing.
-wandb: Syncing run Full Dataset
-wandb: ⭐️ View project at https://wandb.ai/3DV-Project/hand-head-training
-wandb: 🚀 View run at https://wandb.ai/3DV-Project/hand-head-training/runs/izun9bg3
-Epochs:   0%|          | 0/1 [00:00<?, ?it/s]
-Train 1: 0it [00:00, ?it/s][A
-                           [AEpochs: 100%|██████████| 1/1 [00:00<00:00,  6.14it/s]Epochs: 100%|██████████| 1/1 [00:00<00:00,  6.11it/s]
-wandb: updating run metadata
-wandb: uploading wandb-metadata.json; uploading requirements.txt; uploading output.log; uploading wandb-summary.json
-wandb: 🚀 View run Full Dataset at: https://wandb.ai/3DV-Project/hand-head-training/runs/izun9bg3
-wandb: ⭐️ View project at: https://wandb.ai/3DV-Project/hand-head-training
-wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
-wandb: Find logs at: ./wandb/run-20260416_104740-izun9bg3/logs

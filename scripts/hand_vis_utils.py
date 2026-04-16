@@ -322,6 +322,31 @@ def project_joints_torch(joints_world, T_camera_world, focal_length, cx, cy, ima
     return torch.stack([u, v], dim=-1)
 
 
+def project_vertices_camera_space(vertices_camera, cam_calib, image_width=1408):
+    """Project 3D camera-space vertices to 2D pixel coordinates.
+
+    Same as project_vertices but skips the world→camera transform because the
+    vertices are already in camera space (e.g. from HandCropHead's
+    _crop_relative_to_global output).
+    """
+    N = vertices_camera.shape[0]
+    depths = vertices_camera[:, 2]
+    pixels = np.zeros((N, 2))
+    valid = np.zeros(N, dtype=bool)
+    margin = 100
+
+    for i in np.where(depths > 0.01)[0]:
+        p = cam_calib.project(vertices_camera[i])
+        if p is not None:
+            u = (image_width - 1) - p[1]
+            v = p[0]
+            if -margin <= u <= image_width + margin and -margin <= v <= image_width + margin:
+                pixels[i] = [u, v]
+                valid[i] = True
+
+    return pixels, depths, valid
+
+
 def render_mesh_overlay(image, pixels, faces, depths, valid, color, alpha, wireframe):
     """Render a mesh overlay on the image using filled triangles with alpha blending."""
     overlay = image.copy()
@@ -482,7 +507,10 @@ def render_hand_comparison(vis_context, frame_idx, gt_params, pred_params):
         except Exception as e:
             print(f"[VIS] GT {'right' if is_right else 'left'} failed: {e}")
 
-    # Render predicted hands from model output (wireframe)
+    # Render predicted hands from model output (wireframe).
+    # Predicted params are in camera space (from HandCropHead's
+    # _crop_relative_to_global), so project directly without the
+    # world→camera transform.
     for is_right, color in [(False, PRED_LEFT_COLOR), (True, PRED_RIGHT_COLOR)]:
         offset = 32 if is_right else 0
         params = pred_params[offset:offset + 32]
@@ -490,7 +518,7 @@ def render_hand_comparison(vis_context, frame_idx, gt_params, pred_params):
             continue
         try:
             verts, faces = mano.get_mesh_from_params(params, is_right)
-            pixels, depths, valid = project_vertices(verts, T_world_device, T_dev_cam, cam_calib)
+            pixels, depths, valid = project_vertices_camera_space(verts, cam_calib)
             if valid.sum() >= 10:
                 image = render_mesh_overlay(image, pixels, faces, depths, valid, color, 0.35, True)
         except Exception as e:

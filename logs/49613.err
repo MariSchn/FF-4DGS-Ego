@@ -1,19 +1,0 @@
-wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/miliev/.netrc.
-wandb: Currently logged in as: miliev (3DV-Project) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
-wandb: setting up run e34uwig0
-wandb: Tracking run with wandb version 0.25.1
-wandb: Run data is saved locally in /home/miliev/FF-4DGS-Ego/wandb/run-20260415_144608-e34uwig0
-wandb: Run `wandb offline` to turn off syncing.
-wandb: Syncing run Full Dataset
-wandb: ⭐️ View project at https://wandb.ai/3DV-Project/hand-head-training
-wandb: 🚀 View run at https://wandb.ai/3DV-Project/hand-head-training/runs/e34uwig0
-Epochs:   0%|          | 0/1 [00:00<?, ?it/s]
-Train 1: 0it [00:00, ?it/s][A
-                           [AEpochs: 100%|██████████| 1/1 [00:00<00:00,  7.50it/s]Epochs: 100%|██████████| 1/1 [00:00<00:00,  7.48it/s]
-wandb: updating run metadata; uploading console lines 0-0
-wandb: uploading output.log; uploading config.yaml; uploading wandb-metadata.json; uploading requirements.txt
-wandb: uploading summary, console lines 0-2
-wandb: 🚀 View run Full Dataset at: https://wandb.ai/3DV-Project/hand-head-training/runs/e34uwig0
-wandb: ⭐️ View project at: https://wandb.ai/3DV-Project/hand-head-training
-wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
-wandb: Find logs at: ./wandb/run-20260415_144608-e34uwig0/logs

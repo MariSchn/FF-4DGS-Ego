@@ -1,21 +1,0 @@
-wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/miliev/.netrc.
-wandb: Currently logged in as: miliev (3DV-Project) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
-wandb: setting up run cvke5g6a
-wandb: Tracking run with wandb version 0.25.1
-wandb: Run data is saved locally in /home/miliev/FF-4DGS-Ego/wandb/run-20260409_115859-cvke5g6a
-wandb: Run `wandb offline` to turn off syncing.
-wandb: Syncing run Full Dataset
-wandb: ⭐️ View project at https://wandb.ai/3DV-Project/hand-head-training
-wandb: 🚀 View run at https://wandb.ai/3DV-Project/hand-head-training/runs/cvke5g6a
-Epochs:   0%|          | 0/1 [00:00<?, ?it/s]
-Train 1:   0%|          | 0/1 [00:00<?, ?it/s][A
-                                              [AEpochs:   0%|          | 0/1 [00:03<?, ?it/s]
-Traceback (most recent call last):
-  File "<frozen runpy>", line 198, in _run_module_as_main
-  File "<frozen runpy>", line 88, in _run_code
-  File "/home/miliev/FF-4DGS-Ego/scripts/train_hand_head.py", line 642, in <module>
-    train()
-  File "/home/miliev/FF-4DGS-Ego/scripts/train_hand_head.py", line 581, in train
-    loss_kp3d  = criterion_kp3d(preds["hand_keypoints_3d"], gt_kp3d)
-                                ~~~~~^^^^^^^^^^^^^^^^^^^^^
-KeyError: 'hand_keypoints_3d'

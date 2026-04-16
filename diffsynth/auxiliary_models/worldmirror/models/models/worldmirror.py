@@ -61,6 +61,7 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         self.hand_head_type = kwargs.get("hand_head_type", "hamer")
         self.use_hand_crop = kwargs.get("use_hand_crop", False)
         self.hand_crop_size = kwargs.get("hand_crop_size", 8)
+        self.hamer_head_kwargs = kwargs.get("hamer_head_kwargs", {})
 
         self.life_span_gamma = life_span_gamma
         self.dynamic_threshold = dynamic_threshold
@@ -212,15 +213,7 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
                     use_crop=self.use_hand_crop,
                     crop_size=self.hand_crop_size,
                     patch_size=patch_size,
-                )
-            elif self.hand_head_type == "hand_crop":
-                from ..heads.hand_crop_head import HandCropHead
-                self.hand_head = HandCropHead(
-                    dim_in=2 * dim,
-                    patch_size=patch_size,
-                    hand_param_dim=32,   # per hand: 3 pos + 4 quat + 15 pose + 10 betas
-                    num_hands=2,
-                    crop_size=self.hand_crop_size,
+                    **self.hamer_head_kwargs,
                 )
             elif self.hand_head_type == "dpt":
                 self.hand_head = DPTHead(
@@ -331,6 +324,8 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
                     patch_start_idx=patch_start_idx,
                     hand_bboxes=hand_bboxes,
                     hand_valid=hand_valid,
+                    focal_length=views.get("focal_length", None),
+                    crop_local_output=views.get("crop_local_output", False),
                 )
                 preds["hand_joints"] = hand_joints
             elif self.hand_head_type == "dpt":
