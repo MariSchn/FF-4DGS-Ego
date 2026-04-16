@@ -1,0 +1,223 @@
+Collecting torch==2.7.1
+  Downloading torch-2.7.1-cp312-cp312-manylinux_2_28_aarch64.whl.metadata (29 kB)
+Collecting torchvision==0.22.1
+  Downloading torchvision-0.22.1-cp312-cp312-manylinux_2_28_aarch64.whl.metadata (6.1 kB)
+Collecting filelock (from torch==2.7.1)
+  Downloading filelock-3.28.0-py3-none-any.whl.metadata (2.0 kB)
+Collecting typing-extensions>=4.10.0 (from torch==2.7.1)
+  Downloading typing_extensions-4.15.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting setuptools (from torch==2.7.1)
+  Downloading setuptools-82.0.1-py3-none-any.whl.metadata (6.5 kB)
+Collecting sympy>=1.13.3 (from torch==2.7.1)
+  Downloading sympy-1.14.0-py3-none-any.whl.metadata (12 kB)
+Collecting networkx (from torch==2.7.1)
+  Downloading networkx-3.6.1-py3-none-any.whl.metadata (6.8 kB)
+Collecting jinja2 (from torch==2.7.1)
+  Downloading jinja2-3.1.6-py3-none-any.whl.metadata (2.9 kB)
+Collecting fsspec (from torch==2.7.1)
+  Downloading fsspec-2026.3.0-py3-none-any.whl.metadata (10 kB)
+Collecting numpy (from torchvision==0.22.1)
+  Downloading numpy-2.4.4-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl.metadata (6.6 kB)
+Collecting pillow!=8.3.*,>=5.3.0 (from torchvision==0.22.1)
+  Downloading pillow-12.2.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl.metadata (8.8 kB)
+Collecting mpmath<1.4,>=1.1.0 (from sympy>=1.13.3->torch==2.7.1)
+  Downloading mpmath-1.3.0-py3-none-any.whl.metadata (8.6 kB)
+Collecting MarkupSafe>=2.0 (from jinja2->torch==2.7.1)
+  Downloading markupsafe-3.0.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl.metadata (2.7 kB)
+Downloading torch-2.7.1-cp312-cp312-manylinux_2_28_aarch64.whl (98.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 98.9/98.9 MB 87.5 MB/s eta 0:00:00
+Downloading torchvision-0.22.1-cp312-cp312-manylinux_2_28_aarch64.whl (2.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.5/2.5 MB 161.6 MB/s eta 0:00:00
+Downloading pillow-12.2.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl (6.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 6.4/6.4 MB 221.8 MB/s eta 0:00:00
+Downloading sympy-1.14.0-py3-none-any.whl (6.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 6.3/6.3 MB 343.6 MB/s eta 0:00:00
+Downloading typing_extensions-4.15.0-py3-none-any.whl (44 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 44.6/44.6 kB 23.4 MB/s eta 0:00:00
+Downloading filelock-3.28.0-py3-none-any.whl (39 kB)
+Downloading fsspec-2026.3.0-py3-none-any.whl (202 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 202.6/202.6 kB 119.6 MB/s eta 0:00:00
+Downloading jinja2-3.1.6-py3-none-any.whl (134 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 134.9/134.9 kB 73.5 MB/s eta 0:00:00
+Downloading networkx-3.6.1-py3-none-any.whl (2.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 214.9 MB/s eta 0:00:00
+Downloading numpy-2.4.4-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl (15.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 15.7/15.7 MB 193.9 MB/s eta 0:00:00
+Downloading setuptools-82.0.1-py3-none-any.whl (1.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.0/1.0 MB 282.7 MB/s eta 0:00:00
+Downloading markupsafe-3.0.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl (24 kB)
+Downloading mpmath-1.3.0-py3-none-any.whl (536 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 536.2/536.2 kB 231.2 MB/s eta 0:00:00
+Installing collected packages: mpmath, typing-extensions, sympy, setuptools, pillow, numpy, networkx, MarkupSafe, fsspec, filelock, jinja2, torch, torchvision
+Successfully installed MarkupSafe-3.0.3 filelock-3.28.0 fsspec-2026.3.0 jinja2-3.1.6 mpmath-1.3.0 networkx-3.6.1 numpy-2.4.4 pillow-12.2.0 setuptools-82.0.1 sympy-1.14.0 torch-2.7.1 torchvision-0.22.1 typing-extensions-4.15.0
+Collecting transformers==4.57.6 (from -r requirements.txt (line 2))
+  Downloading transformers-4.57.6-py3-none-any.whl.metadata (43 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 44.0/44.0 kB 3.0 MB/s eta 0:00:00
+Collecting safetensors (from -r requirements.txt (line 3))
+  Downloading safetensors-0.7.0-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl.metadata (4.1 kB)
+Collecting einops (from -r requirements.txt (line 4))
+  Downloading einops-0.8.2-py3-none-any.whl.metadata (13 kB)
+Requirement already satisfied: numpy in ./venv_gb10/lib/python3.12/site-packages (from -r requirements.txt (line 5)) (2.4.4)
+Requirement already satisfied: Pillow in ./venv_gb10/lib/python3.12/site-packages (from -r requirements.txt (line 6)) (12.2.0)
+Collecting tqdm (from -r requirements.txt (line 7))
+  Downloading tqdm-4.67.3-py3-none-any.whl.metadata (57 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 57.7/57.7 kB 14.4 MB/s eta 0:00:00
+Collecting sentencepiece (from -r requirements.txt (line 8))
+  Downloading sentencepiece-0.2.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl.metadata (10 kB)
+Collecting imageio (from -r requirements.txt (line 11))
+  Downloading imageio-2.37.3-py3-none-any.whl.metadata (9.7 kB)
+Collecting opencv-python (from -r requirements.txt (line 13))
+  Downloading opencv_python-4.13.0.92-cp37-abi3-manylinux_2_28_aarch64.whl.metadata (19 kB)
+Collecting huggingface_hub (from -r requirements.txt (line 16))
+  Downloading huggingface_hub-1.10.2-py3-none-any.whl.metadata (14 kB)
+Collecting modelscope (from -r requirements.txt (line 17))
+  Downloading modelscope-1.35.4-py3-none-any.whl.metadata (43 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 43.5/43.5 kB 14.4 MB/s eta 0:00:00
+Collecting lpips (from -r requirements.txt (line 20))
+  Downloading lpips-0.1.4-py3-none-any.whl.metadata (10 kB)
+Collecting scikit-image (from -r requirements.txt (line 21))
+  Downloading scikit_image-0.26.0-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl.metadata (15 kB)
+Collecting torchmetrics (from -r requirements.txt (line 22))
+  Downloading torchmetrics-1.9.0-py3-none-any.whl.metadata (23 kB)
+Collecting plyfile (from -r requirements.txt (line 25))
+  Downloading plyfile-1.1.3-py3-none-any.whl.metadata (43 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 43.3/43.3 kB 16.7 MB/s eta 0:00:00
+Collecting jaxtyping (from -r requirements.txt (line 26))
+  Downloading jaxtyping-0.3.9-py3-none-any.whl.metadata (7.4 kB)
+Collecting scipy (from -r requirements.txt (line 27))
+  Downloading scipy-1.17.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl.metadata (62 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 62.1/62.1 kB 21.5 MB/s eta 0:00:00
+Collecting matplotlib (from -r requirements.txt (line 28))
+  Downloading matplotlib-3.10.8-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl.metadata (52 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 52.8/52.8 kB 25.6 MB/s eta 0:00:00
+Collecting evo (from -r requirements.txt (line 29))
+  Downloading evo-1.35.2-py3-none-any.whl.metadata (14 kB)
+Collecting e3nn (from -r requirements.txt (line 30))
+  Downloading e3nn-0.6.0-py3-none-any.whl.metadata (6.0 kB)
+Collecting addict (from -r requirements.txt (line 31))
+  Downloading addict-2.4.0-py3-none-any.whl.metadata (1.0 kB)
+Collecting moviepy==1.0.3 (from -r requirements.txt (line 32))
+  Downloading moviepy-1.0.3.tar.gz (388 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 388.3/388.3 kB 24.1 MB/s eta 0:00:00
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting gradio (from -r requirements.txt (line 35))
+  Downloading gradio-6.12.0-py3-none-any.whl.metadata (17 kB)
+Collecting trimesh (from -r requirements.txt (line 36))
+  Downloading trimesh-4.11.5-py3-none-any.whl.metadata (13 kB)
+Collecting viser (from -r requirements.txt (line 37))
+  Downloading viser-1.0.26-py3-none-any.whl.metadata (5.4 kB)
+Collecting accelerate (from -r requirements.txt (line 40))
+  Downloading accelerate-1.13.0-py3-none-any.whl.metadata (19 kB)
+Collecting deepspeed==0.16.7 (from -r requirements.txt (line 41))
+  Downloading deepspeed-0.16.7.tar.gz (1.5 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.5/1.5 MB 105.8 MB/s eta 0:00:00
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting omegaconf (from -r requirements.txt (line 42))
+  Downloading omegaconf-2.3.0-py3-none-any.whl.metadata (3.9 kB)
+Collecting peft (from -r requirements.txt (line 43))
+  Downloading peft-0.19.0-py3-none-any.whl.metadata (15 kB)
+Collecting tensorboard (from -r requirements.txt (line 44))
+  Downloading tensorboard-2.20.0-py3-none-any.whl.metadata (1.8 kB)
+Collecting wandb (from -r requirements.txt (line 45))
+  Downloading wandb-0.26.0-py3-none-manylinux_2_28_aarch64.whl.metadata (11 kB)
+Collecting ftfy (from -r requirements.txt (line 48))
+  Downloading ftfy-6.3.1-py3-none-any.whl.metadata (7.3 kB)
+Collecting pandas (from -r requirements.txt (line 51))
+  Downloading pandas-3.0.2-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl.metadata (79 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 79.5/79.5 kB 26.0 MB/s eta 0:00:00
+Collecting smplx (from -r requirements.txt (line 54))
+  Downloading smplx-0.1.28-py3-none-any.whl.metadata (10 kB)
+Collecting torch-scatter
+  Downloading torch_scatter-2.1.2.tar.gz (108 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 108.0/108.0 kB 5.9 MB/s eta 0:00:00
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: torch-scatter
+  Building wheel for torch-scatter (pyproject.toml): started
+  Building wheel for torch-scatter (pyproject.toml): still running...
+  Building wheel for torch-scatter (pyproject.toml): finished with status 'done'
+  Created wheel for torch-scatter: filename=torch_scatter-2.1.2-cp312-cp312-linux_aarch64.whl size=615644 sha256=4d4d4871c685911fbf5a2fdc5663491a168192f76bce0cb622cda3fd9f70efd3
+  Stored in directory: /scratch/miliev/pip_cache/wheels/84/20/50/44800723f57cd798630e77b3ec83bc80bd26a1e3dc3a672ef5
+Successfully built torch-scatter
+Installing collected packages: torch-scatter
+Successfully installed torch-scatter-2.1.2
+Collecting gsplat
+  Downloading gsplat-1.5.3-py3-none-any.whl.metadata (1.1 kB)
+Collecting ninja (from gsplat)
+  Downloading ninja-1.13.0-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl.metadata (5.1 kB)
+Requirement already satisfied: numpy in ./venv_gb10/lib/python3.12/site-packages (from gsplat) (2.4.4)
+Collecting jaxtyping (from gsplat)
+  Using cached jaxtyping-0.3.9-py3-none-any.whl.metadata (7.4 kB)
+Collecting rich>=12 (from gsplat)
+  Downloading rich-15.0.0-py3-none-any.whl.metadata (18 kB)
+Requirement already satisfied: torch in ./venv_gb10/lib/python3.12/site-packages (from gsplat) (2.7.1)
+Collecting markdown-it-py>=2.2.0 (from rich>=12->gsplat)
+  Downloading markdown_it_py-4.0.0-py3-none-any.whl.metadata (7.3 kB)
+Collecting pygments<3.0.0,>=2.13.0 (from rich>=12->gsplat)
+  Downloading pygments-2.20.0-py3-none-any.whl.metadata (2.5 kB)
+Collecting wadler-lindig>=0.1.3 (from jaxtyping->gsplat)
+  Downloading wadler_lindig-0.1.7-py3-none-any.whl.metadata (17 kB)
+Requirement already satisfied: filelock in ./venv_gb10/lib/python3.12/site-packages (from torch->gsplat) (3.28.0)
+Requirement already satisfied: typing-extensions>=4.10.0 in ./venv_gb10/lib/python3.12/site-packages (from torch->gsplat) (4.15.0)
+Requirement already satisfied: setuptools in ./venv_gb10/lib/python3.12/site-packages (from torch->gsplat) (82.0.1)
+Requirement already satisfied: sympy>=1.13.3 in ./venv_gb10/lib/python3.12/site-packages (from torch->gsplat) (1.14.0)
+Requirement already satisfied: networkx in ./venv_gb10/lib/python3.12/site-packages (from torch->gsplat) (3.6.1)
+Requirement already satisfied: jinja2 in ./venv_gb10/lib/python3.12/site-packages (from torch->gsplat) (3.1.6)
+Requirement already satisfied: fsspec in ./venv_gb10/lib/python3.12/site-packages (from torch->gsplat) (2026.3.0)
+Collecting mdurl~=0.1 (from markdown-it-py>=2.2.0->rich>=12->gsplat)
+  Downloading mdurl-0.1.2-py3-none-any.whl.metadata (1.6 kB)
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in ./venv_gb10/lib/python3.12/site-packages (from sympy>=1.13.3->torch->gsplat) (1.3.0)
+Requirement already satisfied: MarkupSafe>=2.0 in ./venv_gb10/lib/python3.12/site-packages (from jinja2->torch->gsplat) (3.0.3)
+Downloading gsplat-1.5.3-py3-none-any.whl (6.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 6.5/6.5 MB 74.6 MB/s eta 0:00:00
+Downloading rich-15.0.0-py3-none-any.whl (310 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 310.7/310.7 kB 159.0 MB/s eta 0:00:00
+Downloading jaxtyping-0.3.9-py3-none-any.whl (56 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 56.3/56.3 kB 31.7 MB/s eta 0:00:00
+Downloading ninja-1.13.0-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl (177 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 177.5/177.5 kB 97.4 MB/s eta 0:00:00
+Downloading markdown_it_py-4.0.0-py3-none-any.whl (87 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 87.3/87.3 kB 55.0 MB/s eta 0:00:00
+Downloading pygments-2.20.0-py3-none-any.whl (1.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 336.6 MB/s eta 0:00:00
+Downloading wadler_lindig-0.1.7-py3-none-any.whl (20 kB)
+Downloading mdurl-0.1.2-py3-none-any.whl (10.0 kB)
+Installing collected packages: wadler-lindig, pygments, ninja, mdurl, markdown-it-py, jaxtyping, rich, gsplat
+Successfully installed gsplat-1.5.3 jaxtyping-0.3.9 markdown-it-py-4.0.0 mdurl-0.1.2 ninja-1.13.0 pygments-2.20.0 rich-15.0.0 wadler-lindig-0.1.7
+Collecting chumpy
+  Downloading chumpy-0.70.tar.gz (50 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 50.6/50.6 kB 3.6 MB/s eta 0:00:00
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting scipy>=0.13.0 (from chumpy)
+  Using cached scipy-1.17.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl.metadata (62 kB)
+Collecting six>=1.11.0 (from chumpy)
+  Downloading six-1.17.0-py2.py3-none-any.whl.metadata (1.7 kB)
+Requirement already satisfied: numpy<2.7,>=1.26.4 in ./venv_gb10/lib/python3.12/site-packages (from scipy>=0.13.0->chumpy) (2.4.4)
+Downloading scipy-1.17.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl (32.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 32.9/32.9 MB 102.9 MB/s eta 0:00:00
+Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
+Building wheels for collected packages: chumpy
+  Building wheel for chumpy (pyproject.toml): started
+  Building wheel for chumpy (pyproject.toml): finished with status 'done'
+  Created wheel for chumpy: filename=chumpy-0.70-py3-none-any.whl size=58302 sha256=68e550eae39753f216003de6e790e4b7d48285c7550a1bbc6ca89eeca3ec748e
+  Stored in directory: /scratch/miliev/pip_cache/wheels/ae/b7/0e/6f56330e9077b8a6aad99bdb76981b07a7e8b3f056def662a6
+Successfully built chumpy
+Installing collected packages: six, scipy, chumpy
+Successfully installed chumpy-0.70 scipy-1.17.1 six-1.17.0
+Collecting pyyaml
+  Downloading pyyaml-6.0.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl.metadata (2.4 kB)
+Downloading pyyaml-6.0.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl (775 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 775.1/775.1 kB 16.8 MB/s eta 0:00:00
+Installing collected packages: pyyaml
+Successfully installed pyyaml-6.0.3

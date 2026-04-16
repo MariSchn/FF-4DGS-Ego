@@ -11,7 +11,6 @@ sentencepiece
 imageio
 imageio[ffmpeg]
 opencv-python
-decord
 
 # Model downloading
 huggingface_hub
@@ -53,4 +52,4 @@ pandas
 
 # Hand visualization (MANO)
 smplx
-projectaria-tools
+# projectaria-tools: no aarch64/Python 3.12 PyPI wheel; build from source if needed
