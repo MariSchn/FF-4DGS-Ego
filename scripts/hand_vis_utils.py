@@ -264,6 +264,64 @@ def project_vertices(vertices_world, T_world_device, T_device_camera, cam_calib,
     return pixels, depths, valid
 
 
+def project_joints_torch(joints_world, T_camera_world, focal_length, cx, cy, image_width=1408):
+    """Differentiable pinhole approximation of project_vertices.
+
+    Applies the same 90° CW coordinate flip as project_vertices so that projected
+    pixel coordinates are directly comparable to GT pixels produced by that function.
+    Fisheye distortion is ignored — the approximation is sufficient for gradient
+    direction during training.
+
+    Args:
+        joints_world (torch.Tensor): Shape [B, ..., 3] — 3D joint positions in world
+            coordinates.
+        T_camera_world (torch.Tensor): Shape [B, 4, 4] — world-to-camera extrinsic
+            matrix for each item in the leading batch dimension.
+        focal_length (torch.Tensor | float): Shape [B] or scalar — focal length f
+            (assumes fx == fy for the spherical fisheye approximation).
+        cx (torch.Tensor | float): Shape [B] or scalar — principal point x.
+        cy (torch.Tensor | float): Shape [B] or scalar — principal point y.
+        image_width (int): Sensor width in pixels used by project_vertices (default 1408).
+
+    Returns:
+        torch.Tensor: Shape [B, ..., 2] — projected [u, v] pixel coordinates.
+    """
+    B = joints_world.shape[0]
+    device = joints_world.device
+    dtype = joints_world.dtype
+    T = T_camera_world.to(device=device, dtype=dtype)       # [B, 4, 4]
+
+    ones = torch.ones(*joints_world.shape[:-1], 1, device=device, dtype=dtype)
+    j_homo = torch.cat([joints_world, ones], dim=-1)        # [B, ..., 4]
+
+    # Flatten middle dims into M so we can use batched matmul
+    leading = j_homo.shape[1:-1]                            # (...) dims tuple
+    j_flat = j_homo.reshape(B, -1, 4)                      # [B, M, 4]
+    # T @ each column vector: T [B,4,4] × j_flat.T [B,4,M] → [B,4,M] → [B,M,4]
+    j_cam = (T @ j_flat.transpose(1, 2)).transpose(1, 2)   # [B, M, 4]
+    j_cam = j_cam[..., :3].reshape(B, *leading, 3)         # [B, ..., 3]
+
+    z = j_cam[..., 2].clamp(min=1e-4)
+
+    # Broadcast per-batch intrinsics over all leading dims
+    n_leading = len(leading)
+    if isinstance(focal_length, torch.Tensor) and focal_length.ndim > 0:
+        f   = focal_length.to(device=device, dtype=dtype).view(B, *([1] * n_leading))
+        cx_ = cx.to(device=device, dtype=dtype).view(B, *([1] * n_leading))
+        cy_ = cy.to(device=device, dtype=dtype).view(B, *([1] * n_leading))
+    else:
+        f, cx_, cy_ = focal_length, cx, cy
+
+    col = f * j_cam[..., 0] / z + cx_
+    row = f * j_cam[..., 1] / z + cy_
+
+    # Match project_vertices: u = (W-1) - col,  v = row
+    u = (image_width - 1) - col
+    v = row
+
+    return torch.stack([u, v], dim=-1)
+
+
 def render_mesh_overlay(image, pixels, faces, depths, valid, color, alpha, wireframe):
     """Render a mesh overlay on the image using filled triangles with alpha blending."""
     overlay = image.copy()

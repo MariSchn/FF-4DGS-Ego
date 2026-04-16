@@ -33,9 +33,8 @@ class Keypoint2DLoss(nn.Module):
         Returns:
             torch.Tensor: 2D keypoint loss.
         """
-        conf = gt_keypoints_2d[:, :, -1].unsqueeze(-1).clone()
-        batch_size = conf.shape[0]
-        loss = (conf * self.loss_fn(pred_keypoints_2d, gt_keypoints_2d[:, :, :-1])).sum(dim=(1,2))
+        conf = gt_keypoints_2d[:, :, :, -1].unsqueeze(-1).clone()  # [B, S, N, 1]
+        loss = (conf * self.loss_fn(pred_keypoints_2d, gt_keypoints_2d[:, :, :, :-1])).sum(dim=(2, 3))
         return loss.sum()
 
         

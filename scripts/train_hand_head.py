@@ -26,8 +26,7 @@ from tqdm import tqdm
 from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
 from diffsynth.utils.auxiliary import load_video
 
-from scripts.hamer_losses import Keypoint3DLoss, ParameterLoss
-# from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
+from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
 
 
 HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
@@ -170,6 +169,32 @@ class HOT3DHandDataset(Dataset):
                 torch.save(seq_gt_joints, cache_path)
                 print(f"Computed and saved GT joints for {seq_path}.")
 
+            # Handle 2D GT joints + camera data
+            cam_2d_cache_path   = os.path.join(hand_data_root, "gt_joints_2d_cache.pt")
+            cam_extr_cache_path = os.path.join(hand_data_root, "cam_extrinsics_cache.pt")
+            cam_intr_cache_path = os.path.join(hand_data_root, "cam_intrinsics.pt")
+
+            if (os.path.exists(cam_2d_cache_path)
+                    and os.path.exists(cam_extr_cache_path)
+                    and os.path.exists(cam_intr_cache_path)):
+                seq_gt_joints_2d   = torch.load(cam_2d_cache_path,   weights_only=True)
+                seq_cam_extrinsics = torch.load(cam_extr_cache_path,  weights_only=True)
+                seq_cam_intrinsics = torch.load(cam_intr_cache_path,  weights_only=True)
+                print(f"Loaded 2D GT joints + cam data for {seq_path}.")
+            else:
+                seq_gt_joints_2d, seq_cam_extrinsics, seq_cam_intrinsics = (
+                    HOT3DHandDataset._compute_2d_cam_data(
+                        seq_path, n_video, hand_ts_sorted, seq_gt_joints
+                    )
+                )
+                if seq_gt_joints_2d is not None:
+                    torch.save(seq_gt_joints_2d,   cam_2d_cache_path)
+                    torch.save(seq_cam_extrinsics, cam_extr_cache_path)
+                    torch.save(seq_cam_intrinsics, cam_intr_cache_path)
+                    print(f"Computed and saved 2D GT joints + cam data for {seq_path}.")
+                else:
+                    print(f"No calibration for {seq_path} — 2D loss unavailable for this sequence.")
+
             # Handle Bounding Boxes
             if self.use_hand_crop:
                 bbox_frames, valid_frames = HOT3DHandDataset._compute_projected_bboxes(
@@ -194,6 +219,10 @@ class HOT3DHandDataset(Dataset):
                 if self.use_hand_crop:
                     clip["hand_bboxes"] = bbox_frames[start : start + num_frames]
                     clip["hand_valid"]  = valid_frames[start : start + num_frames]
+                if seq_gt_joints_2d is not None:
+                    clip["gt_joints_2d"]   = seq_gt_joints_2d[start : end]    # [S, 2, 16, 3]
+                    clip["cam_extrinsics"] = seq_cam_extrinsics[start : end]  # [S, 4, 4]
+                    clip["cam_intrinsics"] = seq_cam_intrinsics                # [3]
                 self.clips.append(clip)
 
     def __len__(self):
@@ -245,6 +274,11 @@ class HOT3DHandDataset(Dataset):
         if self.use_hand_crop:
             out["hand_bboxes"] = torch.stack(clip["hand_bboxes"])  # [S, 2, 4]
             out["hand_valid"]  = torch.stack(clip["hand_valid"])   # [S, 2]
+
+        if "gt_joints_2d" in clip:
+            out["gt_joints_2d"]   = clip["gt_joints_2d"]    # [S, 2, 16, 3]
+            out["cam_extrinsics"] = clip["cam_extrinsics"]  # [S, 4, 4]
+            out["cam_intrinsics"] = clip["cam_intrinsics"]  # [3]
 
         return out
 
@@ -337,6 +371,91 @@ class HOT3DHandDataset(Dataset):
             valid_list.append(frame_valid)
 
         return bboxes_list, valid_list
+
+    @staticmethod
+    def _compute_2d_cam_data(seq_path, n_video, hand_ts_sorted, seq_gt_joints_3d):
+        """Compute GT 2D keypoints and per-frame camera extrinsics for the 2D loss.
+
+        Projects all GT 3D joints to pixel coordinates using project_vertices and
+        records the world-to-camera extrinsic matrix for each frame so that predicted
+        joints can be projected differentiably at training time.
+
+        Returns:
+            gt_joints_2d   (torch.Tensor | None): [N, 2, 16, 3]  — (u, v, confidence)
+            cam_extrinsics (torch.Tensor | None): [N, 4, 4]       — T_camera_world per frame
+            cam_intrinsics (torch.Tensor | None): [3]             — [f, cx, cy]
+            or (None, None, None) if calibration files are missing.
+        """
+        import numpy as np
+        from projectaria_tools.core.sophus import SE3
+        from scripts.hand_vis_utils import (
+            load_camera_calibration, load_headset_trajectory, find_closest, project_vertices,
+        )
+
+        calib_path   = os.path.join(seq_path, "mps_slam_calibration", "online_calibration.jsonl")
+        headset_path = os.path.join(seq_path, "ground_truth", "headset_trajectory.csv")
+        if not os.path.exists(calib_path) or not os.path.exists(headset_path):
+            return None, None, None
+
+        T_device_camera, cam_calib = load_camera_calibration(calib_path)
+        headset_poses = load_headset_trajectory(headset_path)
+        headset_ts    = sorted(headset_poses.keys())
+
+        # Extract intrinsics from calibration JSON
+        # FISHEYE624 params layout: [f, cx, cy, k1..k6, p1, p2, s0..s3]
+        with open(calib_path) as fh:
+            entry = json.loads(fh.readline())
+            for cam in entry["CameraCalibrations"]:
+                if cam["Label"] == "camera-rgb":
+                    raw_params = np.array(cam["Projection"]["Params"], dtype=np.float64)
+                    break
+        cam_intrinsics = torch.tensor(
+            [raw_params[0], raw_params[1], raw_params[2]], dtype=torch.float32
+        )  # [f, cx, cy]
+
+        ts_start, ts_end = hand_ts_sorted[0], hand_ts_sorted[-1]
+        IMAGE_WIDTH = 1408
+
+        gt_joints_2d_list   = []
+        cam_extrinsics_list = []
+
+        for frame_i in range(n_video):
+            frac     = frame_i / max(n_video - 1, 1)
+            query_tc = int(ts_start + frac * (ts_end - ts_start))
+
+            closest_ht     = find_closest(headset_ts, query_tc)
+            t_wd, q_wd     = headset_poses[closest_ht]
+            T_world_device = SE3.from_quat_and_translation(q_wd[0], q_wd[1:], t_wd)[0]
+            T_cam_world_np = (
+                T_device_camera.inverse().to_matrix()
+                @ T_world_device.inverse().to_matrix()
+            )  # [4, 4] numpy
+
+            cam_extrinsics_list.append(
+                torch.tensor(T_cam_world_np, dtype=torch.float32)
+            )
+
+            # Project all joints for this frame
+            frame_joints_3d = seq_gt_joints_3d[frame_i]   # [2, 16, 3]
+            frame_joints_2d = torch.zeros(NUM_HANDS, 16, 3)  # [u, v, confidence]
+
+            for h_idx in range(NUM_HANDS):
+                joints_w = frame_joints_3d[h_idx].numpy()  # [16, 3]
+                if np.abs(joints_w).sum() < 1e-6:
+                    continue  # hand absent — confidence stays 0
+
+                pixels, _, valid = project_vertices(
+                    joints_w, T_world_device, T_device_camera, cam_calib, IMAGE_WIDTH
+                )
+                frame_joints_2d[h_idx, :, 0] = torch.from_numpy(pixels[:, 0].astype(np.float32))
+                frame_joints_2d[h_idx, :, 1] = torch.from_numpy(pixels[:, 1].astype(np.float32))
+                frame_joints_2d[h_idx, :, 2] = torch.from_numpy(valid.astype(np.float32))
+
+            gt_joints_2d_list.append(frame_joints_2d)
+
+        gt_joints_2d   = torch.stack(gt_joints_2d_list)    # [N, 2, 16, 3]
+        cam_extrinsics = torch.stack(cam_extrinsics_list)  # [N, 4, 4]
+        return gt_joints_2d, cam_extrinsics, cam_intrinsics
 
 
 def discover_sequences(data_root):
@@ -441,7 +560,7 @@ def render_vis_list(vis_items, gt_pred_pairs, render_fn):
 # Validation
 # ------------------------------------------------------------------
 
-def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_param, mano_model, vis_clip_indices=None):
+def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, vis_clip_indices=None):
     """Run validation and optionally capture gt/pred at specific clip indices."""
     model.eval()
     val_loss = 0.0
@@ -473,8 +592,29 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             loss_kp3d = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0)
 
             loss = loss_param + loss_kp3d
-            val_loss += loss.item()
 
+            # 2D reprojection loss
+            if "gt_joints_2d" in vbatch:
+                from scripts.hand_vis_utils import project_joints_torch
+                cam_extr = vbatch["cam_extrinsics"].to(device)  # [B, S, 4, 4]
+                cam_intr = vbatch["cam_intrinsics"].to(device)  # [B, 3]
+
+                N = B * S
+                pred_j  = pred_joints.view(N, H, J, 3)
+                T_flat  = cam_extr.view(N, 4, 4)
+                focal_N = cam_intr[:, 0].unsqueeze(1).expand(B, S).reshape(N)
+                cx_N    = cam_intr[:, 1].unsqueeze(1).expand(B, S).reshape(N)
+                cy_N    = cam_intr[:, 2].unsqueeze(1).expand(B, S).reshape(N)
+
+                pred_2d      = project_joints_torch(pred_j, T_flat, focal_N, cx_N, cy_N)
+                pred_2d_flat = pred_2d.view(N * H, 1, J, 2)
+
+                gt_2d      = vbatch["gt_joints_2d"].to(device)
+                gt_2d_flat = gt_2d.view(N * H, 1, J, 3)
+
+                loss = loss + criterion_kp2d(pred_2d_flat, gt_2d_flat)
+
+            val_loss += loss.item()
 
             if vis_clip_indices:
                 for item_idx in range(imgs.shape[0]):
@@ -570,8 +710,8 @@ def train():
     from scripts.hand_vis_utils import MANOModel
     mano_model = MANOModel(mano_folder)
 
-    criterion_kp3d = Keypoint3DLoss(loss_type='l2').to(device)
-    # criterion_kp2d = Keypoint2DLoss(loss_type='l2').to(device)
+    criterion_kp3d  = Keypoint3DLoss(loss_type='l2').to(device)
+    criterion_kp2d  = Keypoint2DLoss(loss_type='l2').to(device)
     criterion_param = ParameterLoss().to(device)
 
     hand_params = list(model.hand_head.parameters())
@@ -728,16 +868,35 @@ def train():
             print(f"imgs shape: {imgs.shape} | gt_params shape: {gt_params.shape} | gt_joints shape: {gt_joints.shape}")
             print(f"pred_params shape: {pred_params.shape} | pred_joints shape: {pred_joints.shape}")
 
-            # 3. Calculate Loss
+            # 3. Calculate 3D Loss
             # The loss internally centers joints based on the pelvis (root)
             loss_kp3d = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0)
 
-
-            # loss_kp3d = criterion_kp3d(pred_joints, gt_joints)
-            
             loss = loss_param + loss_kp3d
-            # TODO:
-            # loss = loss_param + loss_kp3d + loss_kp2d
+
+            # 4. Calculate 2D reprojection loss (requires camera data in batch)
+            if "gt_joints_2d" in batch:
+                from scripts.hand_vis_utils import project_joints_torch
+                cam_extr = batch["cam_extrinsics"].to(device)  # [B, S, 4, 4]
+                cam_intr = batch["cam_intrinsics"].to(device)  # [B, 3] = [f, cx, cy]
+
+                # Merge B*S into a single leading dim for batched projection
+                N = B * S
+                pred_j  = pred_joints.view(N, H, J, 3)        # [N, H, J, 3]
+                T_flat  = cam_extr.view(N, 4, 4)              # [N, 4, 4]
+                focal_N = cam_intr[:, 0].unsqueeze(1).expand(B, S).reshape(N)
+                cx_N    = cam_intr[:, 1].unsqueeze(1).expand(B, S).reshape(N)
+                cy_N    = cam_intr[:, 2].unsqueeze(1).expand(B, S).reshape(N)
+
+                pred_2d = project_joints_torch(pred_j, T_flat, focal_N, cx_N, cy_N)
+                # pred_2d: [N, H, J, 2] → reshape for criterion: [N*H, 1, J, 2]
+                pred_2d_flat = pred_2d.view(N * H, 1, J, 2)
+
+                gt_2d      = batch["gt_joints_2d"].to(device)          # [B, S, H, J, 3]
+                gt_2d_flat = gt_2d.view(N * H, 1, J, 3)
+
+                loss_kp2d = criterion_kp2d(pred_2d_flat, gt_2d_flat)
+                loss = loss + loss_kp2d
 
             (loss / grad_accum_steps).backward()
 
@@ -761,7 +920,7 @@ def train():
 
                 # --- Validation ---
                 if val_loader and (global_step % val_every == 0 or global_step == 1):
-                    val_loss, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_param, mano_model, val_vis_clip_indices)
+                    val_loss, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, val_vis_clip_indices)
                     tqdm.write(f"  step {global_step} | val_loss={val_loss:.6f}")
 
                     if use_wandb:
