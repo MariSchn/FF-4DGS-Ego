@@ -24,6 +24,23 @@ from scipy.spatial.transform import Rotation
 # MANO mesh generation
 # ---------------------------------------------------------------------------
 
+def _quat_wxyz_to_rotvec(q_wxyz, eps=1e-8):
+    """Convert a (w, x, y, z) quaternion to a rotation vector.
+
+    Predicted quaternions early in training can have vanishing norm, which
+    crashes scipy's `Rotation.from_quat`. Normalise and fall back to identity
+    when the norm is below `eps`.
+    """
+    q = np.asarray(q_wxyz, dtype=np.float64)
+    norm = np.linalg.norm(q)
+    if norm < eps:
+        q = np.array([1.0, 0.0, 0.0, 0.0])
+    else:
+        q = q / norm
+    q_xyzw = np.array([q[1], q[2], q[3], q[0]])
+    return Rotation.from_quat(q_xyzw).as_rotvec().astype(np.float32)
+
+
 class MANOModel:
     """Wrapper around smplx MANO for left/right hand mesh generation."""
 
@@ -69,8 +86,7 @@ class MANOModel:
         t_xyz = np.array(wrist["t_xyz"])
         q_wxyz = np.array(wrist["q_wxyz"])
 
-        q_xyzw = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
-        rotvec = Rotation.from_quat(q_xyzw).as_rotvec().astype(np.float32)
+        rotvec = _quat_wxyz_to_rotvec(q_wxyz)
 
         global_orient = torch.from_numpy(rotvec).unsqueeze(0)
         transl = torch.tensor(t_xyz, dtype=torch.float32).unsqueeze(0)
@@ -122,8 +138,7 @@ class MANOModel:
         wrist = hand_data["wrist_xform"]
         t_xyz = np.array(wrist["t_xyz"])
         q_wxyz = np.array(wrist["q_wxyz"])
-        q_xyzw = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
-        rotvec = Rotation.from_quat(q_xyzw).as_rotvec().astype(np.float32)
+        rotvec = _quat_wxyz_to_rotvec(q_wxyz)
 
         global_orient = torch.from_numpy(rotvec).unsqueeze(0).to(betas.device)
         transl = torch.tensor(t_xyz, dtype=torch.float32).unsqueeze(0).to(betas.device)
