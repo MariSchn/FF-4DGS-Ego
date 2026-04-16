@@ -460,6 +460,46 @@ class HOT3DHandDataset(Dataset):
 
         return bboxes_list, valid_list
 
+    @staticmethod
+    def _load_camera_seq_data(seq_path):
+        """Load per-sequence camera calibration + headset trajectory.
+
+        Returns (T_device_camera, cam_calib, headset_poses, headset_ts, calib_path)
+        or None if the required calibration files are missing.
+        """
+        from scripts.hand_vis_utils import load_camera_calibration, load_headset_trajectory
+
+        calib_path = os.path.join(seq_path, "mps_slam_calibration", "online_calibration.jsonl")
+        headset_path = os.path.join(seq_path, "ground_truth", "headset_trajectory.csv")
+        if not os.path.exists(calib_path) or not os.path.exists(headset_path):
+            return None
+
+        T_device_camera, cam_calib = load_camera_calibration(calib_path)
+        headset_poses = load_headset_trajectory(headset_path)
+        headset_ts = sorted(headset_poses.keys())
+        return T_device_camera, cam_calib, headset_poses, headset_ts, calib_path
+
+    @staticmethod
+    def _frame_camera_transforms(frame_i, n_video, hand_ts_sorted,
+                                 headset_poses, headset_ts, T_device_camera):
+        """Build T_world_device and T_camera_world (numpy [4, 4]) for one frame."""
+        from projectaria_tools.core.sophus import SE3
+        from scripts.hand_vis_utils import find_closest
+
+        ts_start, ts_end = hand_ts_sorted[0], hand_ts_sorted[-1]
+        frac = frame_i / max(n_video - 1, 1)
+        query_tc = int(ts_start + frac * (ts_end - ts_start))
+
+        closest_ht = find_closest(headset_ts, query_tc)
+        t_wd, q_wd = headset_poses[closest_ht]
+        T_world_device = SE3.from_quat_and_translation(q_wd[0], q_wd[1:], t_wd)[0]
+        T_camera_world = (
+            T_device_camera.inverse().to_matrix()
+            @ T_world_device.inverse().to_matrix()
+        )
+        return T_world_device, T_camera_world
+
+    @staticmethod
     def _compute_2d_cam_data(seq_path, n_video, hand_ts_sorted, seq_gt_joints_3d):
         """Compute GT 2D keypoints and per-frame camera extrinsics for the 2D loss.
 
@@ -474,21 +514,13 @@ class HOT3DHandDataset(Dataset):
             or (None, None, None) if calibration files are missing.
         """
         import numpy as np
-        from projectaria_tools.core.sophus import SE3
-        from scripts.hand_vis_utils import (
-            load_camera_calibration, load_headset_trajectory, find_closest, project_vertices,
-        )
+        from scripts.hand_vis_utils import project_vertices
 
-        calib_path   = os.path.join(seq_path, "mps_slam_calibration", "online_calibration.jsonl")
-        headset_path = os.path.join(seq_path, "ground_truth", "headset_trajectory.csv")
-        if not os.path.exists(calib_path) or not os.path.exists(headset_path):
+        seq_data = HOT3DHandDataset._load_camera_seq_data(seq_path)
+        if seq_data is None:
             return None, None, None
+        T_device_camera, cam_calib, headset_poses, headset_ts, calib_path = seq_data
 
-        T_device_camera, cam_calib = load_camera_calibration(calib_path)
-        headset_poses = load_headset_trajectory(headset_path)
-        headset_ts    = sorted(headset_poses.keys())
-
-        # Extract intrinsics from calibration JSON
         # FISHEYE624 params layout: [f, cx, cy, k1..k6, p1, p2, s0..s3]
         with open(calib_path) as fh:
             entry = json.loads(fh.readline())
@@ -500,24 +532,15 @@ class HOT3DHandDataset(Dataset):
             [raw_params[0], raw_params[1], raw_params[2]], dtype=torch.float32
         )  # [f, cx, cy]
 
-        ts_start, ts_end = hand_ts_sorted[0], hand_ts_sorted[-1]
         IMAGE_WIDTH = 1408
 
         gt_joints_2d_list   = []
         cam_extrinsics_list = []
 
         for frame_i in range(n_video):
-            frac     = frame_i / max(n_video - 1, 1)
-            query_tc = int(ts_start + frac * (ts_end - ts_start))
-
-            closest_ht     = find_closest(headset_ts, query_tc)
-            t_wd, q_wd     = headset_poses[closest_ht]
-            T_world_device = SE3.from_quat_and_translation(q_wd[0], q_wd[1:], t_wd)[0]
-            T_cam_world_np = (
-                T_device_camera.inverse().to_matrix()
-                @ T_world_device.inverse().to_matrix()
-            )  # [4, 4] numpy
-
+            T_world_device, T_cam_world_np = HOT3DHandDataset._frame_camera_transforms(
+                frame_i, n_video, hand_ts_sorted, headset_poses, headset_ts, T_device_camera,
+            )
             cam_extrinsics_list.append(
                 torch.tensor(T_cam_world_np, dtype=torch.float32)
             )
@@ -564,38 +587,16 @@ class HOT3DHandDataset(Dataset):
         Modifies gt_per_frame in-place.
         Returns True on success, False if calibration files are missing.
         """
-        from projectaria_tools.core.sophus import SE3
         from scipy.spatial.transform import Rotation
-        from scripts.hand_vis_utils import (
-            load_camera_calibration, load_headset_trajectory, find_closest,
-        )
 
-        calib_path   = os.path.join(seq_path, "mps_slam_calibration", "online_calibration.jsonl")
-        headset_path = os.path.join(seq_path, "ground_truth", "headset_trajectory.csv")
-
-        for p in [calib_path, headset_path]:
-            if not os.path.exists(p):
-                return False
-
-        T_device_camera, _cam_calib = load_camera_calibration(calib_path)
-        headset_poses = load_headset_trajectory(headset_path)
-        headset_ts = sorted(headset_poses.keys())
-
-        ts_start, ts_end = hand_ts_sorted[0], hand_ts_sorted[-1]
+        seq_data = HOT3DHandDataset._load_camera_seq_data(seq_path)
+        if seq_data is None:
+            return False
+        T_device_camera, _cam_calib, headset_poses, headset_ts, _calib_path = seq_data
 
         for frame_i in range(len(gt_per_frame)):
-            frac = frame_i / max(n_video - 1, 1)
-            query_tc = int(ts_start + frac * (ts_end - ts_start))
-
-            # Per-frame world→camera transform
-            closest_ht = find_closest(headset_ts, query_tc)
-            t_wd, q_wd_wxyz = headset_poses[closest_ht]
-            T_world_device = SE3.from_quat_and_translation(
-                q_wd_wxyz[0], q_wd_wxyz[1:], t_wd
-            )[0]
-            T_camera_world = (
-                T_device_camera.inverse().to_matrix()
-                @ T_world_device.inverse().to_matrix()
+            _T_world_device, T_camera_world = HOT3DHandDataset._frame_camera_transforms(
+                frame_i, n_video, hand_ts_sorted, headset_poses, headset_ts, T_device_camera,
             )
             R_cw = T_camera_world[:3, :3]
             t_cw = T_camera_world[:3, 3]
