@@ -742,6 +742,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
     """Run validation and optionally capture gt/pred at specific clip indices."""
     model.eval()
     val_loss = 0.0
+    val_terms = {"param": 0.0, "kp3d": 0.0, "kp2d": 0.0}
     captured = {}
     batch_size = val_loader.batch_size
     with torch.no_grad():
@@ -770,6 +771,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             loss_kp3d = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0)
 
             loss = loss_param + loss_kp3d
+            loss_kp2d = torch.zeros((), device=device)
 
             # 2D reprojection loss
             if "gt_joints_2d" in vbatch:
@@ -784,15 +786,24 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 cx_N    = cam_intr[:, 1].unsqueeze(1).expand(B, S).reshape(N)
                 cy_N    = cam_intr[:, 2].unsqueeze(1).expand(B, S).reshape(N)
 
-                pred_2d      = project_joints_torch(pred_j, T_flat, focal_N, cx_N, cy_N)
-                pred_2d_flat = pred_2d.view(N * H, 1, J, 2)
+                pred_2d = project_joints_torch(pred_j, T_flat, focal_N, cx_N, cy_N)
 
-                gt_2d      = vbatch["gt_joints_2d"].to(device)
-                gt_2d_flat = gt_2d.view(N * H, 1, J, 3)
+                IMAGE_WIDTH = 1408.0
+                pred_2d_norm = pred_2d / IMAGE_WIDTH - 0.5
+                gt_2d        = vbatch["gt_joints_2d"].to(device)
+                gt_2d_norm   = gt_2d.clone()
+                gt_2d_norm[..., :2] = gt_2d[..., :2] / IMAGE_WIDTH - 0.5
 
-                loss = loss + criterion_kp2d(pred_2d_flat, gt_2d_flat)
+                pred_2d_flat = pred_2d_norm.view(N * H, 1, J, 2)
+                gt_2d_flat   = gt_2d_norm.view(N * H, 1, J, 3)
+
+                loss_kp2d = criterion_kp2d(pred_2d_flat, gt_2d_flat)
+                loss = loss + loss_kp2d
 
             val_loss += loss.item()
+            val_terms["param"] += loss_param.item()
+            val_terms["kp3d"]  += loss_kp3d.item()
+            val_terms["kp2d"]  += loss_kp2d.item()
 
             if vis_clip_indices:
                 # For vis we need camera-space predictions for rendering
@@ -805,7 +816,9 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                             "pred": vis_preds["hand_joints"][item_idx, 0].cpu(),
                         }
 
-    return val_loss / max(len(val_loader), 1), captured
+    n = max(len(val_loader), 1)
+    val_terms = {k: v / n for k, v in val_terms.items()}
+    return val_loss / n, val_terms, captured
 
 
 def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
@@ -911,7 +924,7 @@ def train():
     mano_model = MANOModel(mano_folder)
 
     criterion_kp3d  = Keypoint3DLoss(loss_type='l2').to(device)
-    criterion_kp2d  = Keypoint2DLoss(loss_type='l2').to(device)
+    criterion_kp2d  = Keypoint2DLoss(loss_type='l1').to(device)
     criterion_param = ParameterLoss().to(device)
 
     hand_params = list(model.hand_head.parameters())
@@ -1048,6 +1061,7 @@ def train():
         model.train()
         optimizer.zero_grad()
         accum_loss = 0.0
+        accum_terms = {"param": 0.0, "kp3d": 0.0, "kp2d": 0.0}
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
             imgs = batch["img"].to(device)
@@ -1064,6 +1078,9 @@ def train():
             pred_params = preds["hand_joints"] # [B, 16, 64]
 
             pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
+
+            # Per-term trackers (filled below)
+            loss_kp2d = torch.zeros((), device=device)
 
             # Calculate parameter loss
             loss_param = criterion_param(pred_params, gt_params)
@@ -1103,11 +1120,19 @@ def train():
                 cy_N    = cam_intr[:, 2].unsqueeze(1).expand(B, S).reshape(N)
 
                 pred_2d = project_joints_torch(pred_j, T_flat, focal_N, cx_N, cy_N)
-                # pred_2d: [N, H, J, 2] → reshape for criterion: [N*H, 1, J, 2]
-                pred_2d_flat = pred_2d.view(N * H, 1, J, 2)
 
-                gt_2d      = batch["gt_joints_2d"].to(device)          # [B, S, H, J, 3]
-                gt_2d_flat = gt_2d.view(N * H, 1, J, 3)
+                # Match HaMeR convention: compute loss in normalized image coords
+                # (HaMeR normalizes GT to [-0.5, 0.5] and predicts in the same range
+                # via focal_length / IMAGE_SIZE). Raw pixel residuals are ~10^3× bigger
+                # than normalized ones and under L2 that explodes the loss.
+                IMAGE_WIDTH = 1408.0
+                pred_2d_norm = pred_2d / IMAGE_WIDTH - 0.5
+                gt_2d        = batch["gt_joints_2d"].to(device)        # [B, S, H, J, 3]
+                gt_2d_norm   = gt_2d.clone()
+                gt_2d_norm[..., :2] = gt_2d[..., :2] / IMAGE_WIDTH - 0.5
+
+                pred_2d_flat = pred_2d_norm.view(N * H, 1, J, 2)
+                gt_2d_flat   = gt_2d_norm.view(N * H, 1, J, 3)
 
                 loss_kp2d = criterion_kp2d(pred_2d_flat, gt_2d_flat)
                 loss = loss + loss_kp2d
@@ -1115,6 +1140,9 @@ def train():
 
             (loss / grad_accum_steps).backward()
             accum_loss += loss.item()
+            accum_terms["param"] += loss_param.item()
+            accum_terms["kp3d"]  += loss_kp3d.item()
+            accum_terms["kp2d"]  += loss_kp2d.item()
 
             if (batch_idx + 1) % grad_accum_steps == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(hand_params, max_norm=float("inf"))
@@ -1122,17 +1150,27 @@ def train():
                 scheduler.step()
                 optimizer.zero_grad()
                 avg_loss = accum_loss / grad_accum_steps
+                avg_terms = {k: v / grad_accum_steps for k, v in accum_terms.items()}
                 accum_loss = 0.0
+                accum_terms = {"param": 0.0, "kp3d": 0.0, "kp2d": 0.0}
                 global_step += 1
 
                 # --- Train logging ---
                 if use_wandb:
-                    wandb.log({"train/loss": avg_loss, "train/grad_norm": grad_norm.item(),
+                    wandb.log({"train/loss": avg_loss,
+                               "train/loss_param": avg_terms["param"],
+                               "train/loss_kp3d":  avg_terms["kp3d"],
+                               "train/loss_kp2d":  avg_terms["kp2d"],
+                               "train/grad_norm":  grad_norm.item(),
                                "lr": scheduler.get_last_lr()[0]}, step=global_step)
 
                 if global_step % log_every == 0 or global_step == 1:
                     lr = scheduler.get_last_lr()[0]
-                    tqdm.write(f"  step {global_step} | train_loss={avg_loss:.6f} | grad_norm={grad_norm.item():.4f} | lr={lr:.2e}")
+                    tqdm.write(
+                        f"  step {global_step} | train_loss={avg_loss:.4f} "
+                        f"(param={avg_terms['param']:.4f} kp3d={avg_terms['kp3d']:.4f} kp2d={avg_terms['kp2d']:.4f}) "
+                        f"| grad_norm={grad_norm.item():.4f} | lr={lr:.2e}"
+                    )
                     if use_wandb and train_vis_items:
                         train_images = render_train_vis(model, train_vis_items, num_frames, device, render_fn)
                         if train_images:
@@ -1141,11 +1179,17 @@ def train():
 
                 # --- Validation ---
                 if val_loader and (global_step % val_every == 0 or global_step == 1):
-                    val_loss, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, val_vis_clip_indices)
-                    tqdm.write(f"  step {global_step} | val_loss={val_loss:.6f}")
+                    val_loss, val_terms, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, val_vis_clip_indices)
+                    tqdm.write(
+                        f"  step {global_step} | val_loss={val_loss:.4f} "
+                        f"(param={val_terms['param']:.4f} kp3d={val_terms['kp3d']:.4f} kp2d={val_terms['kp2d']:.4f})"
+                    )
 
                     if use_wandb:
-                        log_dict = {"val/loss": val_loss}
+                        log_dict = {"val/loss": val_loss,
+                                    "val/loss_param": val_terms["param"],
+                                    "val/loss_kp3d":  val_terms["kp3d"],
+                                    "val/loss_kp2d":  val_terms["kp2d"]}
                         if val_vis_items:
                             pairs = [
                                 (captured[it["clip_idx"]]["gt"], captured[it["clip_idx"]]["pred"])
