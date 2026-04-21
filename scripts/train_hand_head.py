@@ -76,7 +76,15 @@ class HOT3DHandDataset(Dataset):
             video_path = os.path.join(seq_path, "video_main_rgb.mp4")
             hand_data_root = os.path.join(seq_path, "hand_data")
             jsonl_path = os.path.join(hand_data_root, "mano_hand_pose_trajectory.jsonl")
-            cache_path = os.path.join(hand_data_root, "gt_joints_cache.pt")
+            # The joint cache depends on whether we've rewritten the params into
+            # camera frame. Bump the filename so stale world-frame caches don't
+            # get silently reused after switching crop mode.
+            # v2 suffix = MANO transl semantics fixed (joint_0_canonical-aware).
+            joint_cache_name = (
+                "gt_joints_cache_cam_v2.pt" if self.use_hand_crop
+                else "gt_joints_cache_world.pt"
+            )
+            joint_cache_path = os.path.join(hand_data_root, joint_cache_name)
 
             if not os.path.exists(video_path) or not os.path.exists(jsonl_path):
                 print(f"Skipping {seq_path} because it doesn't have a video or jsonl file")
@@ -135,43 +143,11 @@ class HOT3DHandDataset(Dataset):
                 ts = _closest_ts(frame_i)
                 gt_per_frame.append(_hand_to_vec(hand_entries[ts]))
 
-            # Handle GT joints (load or compute)
-            if os.path.exists(cache_path):
-                # Load: [N_video, 2, 21, 3]
-                seq_gt_joints = torch.load(cache_path, weights_only=True)
-                print(f"Loaded GT joints for {seq_path}.")
-            else:
-                seq_gt_joints_list = []
-                for frame_p in gt_per_frame:
-                    frame_joints = []
-                    for h_idx in range(NUM_HANDS):
-                        offset = h_idx * HAND_PARAM_DIM
-                        p = frame_p[offset : offset + HAND_PARAM_DIM]
-                        
-                        if p.abs().sum() < 1e-6:
-                            # Match the 16 joints returned by your model
-                            j3d = np.zeros((16, 3), dtype=np.float32)
-                        else:
-                            j3d = self.mano_model.get_joints_from_tensor(p, is_right=(h_idx==1), return_tensor=False)
-                            
-                            # Remove the extra batch dimension [1, 16, 3] -> [16, 3]
-                            if isinstance(j3d, np.ndarray):
-                                if j3d.ndim == 3:
-                                    j3d = j3d.squeeze(0)
-                            elif torch.is_tensor(j3d):
-                                if j3d.dim() == 3:
-                                    j3d = j3d.squeeze(0)
-                                    
-                        frame_joints.append(torch.as_tensor(j3d, dtype=torch.float32))
-                    
-                    # This will now succeed: [16, 3] stacked with [16, 3] -> [2, 16, 3]
-                    seq_gt_joints_list.append(torch.stack(frame_joints))
-                
-                seq_gt_joints = torch.stack(seq_gt_joints_list) # Result: [N, 2, 16, 3]
-                torch.save(seq_gt_joints, cache_path)
-                print(f"Computed and saved GT joints for {seq_path}.")
-
-            # Handle 2D GT joints + camera data
+            # Handle 2D GT joints + camera data. If we have to compute this
+            # from scratch, we need world-frame joints (project_vertices applies
+            # its own world→camera transform). If the cache exists we skip that
+            # entirely, which matters because after use_hand_crop below we
+            # rewrite gt_per_frame into camera frame.
             cam_2d_cache_path   = os.path.join(hand_data_root, "gt_joints_2d_cache.pt")
             cam_extr_cache_path = os.path.join(hand_data_root, "cam_extrinsics_cache.pt")
             cam_intr_cache_path = os.path.join(hand_data_root, "cam_intrinsics.pt")
@@ -184,9 +160,12 @@ class HOT3DHandDataset(Dataset):
                 seq_cam_intrinsics = torch.load(cam_intr_cache_path,  weights_only=True)
                 print(f"Loaded 2D GT joints + cam data for {seq_path}.")
             else:
+                # gt_per_frame is still in world frame here (crop transform runs below),
+                # so joints computed from it are in world frame as project_vertices expects.
+                seq_gt_joints_world = self._compute_seq_joints_from_params(gt_per_frame)
                 seq_gt_joints_2d, seq_cam_extrinsics, seq_cam_intrinsics = (
                     HOT3DHandDataset._compute_2d_cam_data(
-                        seq_path, n_video, hand_ts_sorted, seq_gt_joints
+                        seq_path, n_video, hand_ts_sorted, seq_gt_joints_world
                     )
                 )
                 if seq_gt_joints_2d is not None:
@@ -197,13 +176,13 @@ class HOT3DHandDataset(Dataset):
                 else:
                     print(f"No calibration for {seq_path} — 2D loss unavailable for this sequence.")
 
-            # Handle Bounding Boxes
+            # Handle Bounding Boxes (rewrites gt_per_frame into camera frame on a hit).
             if self.use_hand_crop:
-                cache_name = f"hand_bboxes_rf{self.rescale_factor}_res{res[0]}x{res[1]}.pt"
-                cache_path = os.path.join(seq_path, "hand_data", cache_name)
+                cache_name = f"hand_bboxes_v2_rf{self.rescale_factor}_res{res[0]}x{res[1]}.pt"
+                bbox_cache_path = os.path.join(seq_path, "hand_data", cache_name)
 
-                if os.path.exists(cache_path):
-                    cached = torch.load(cache_path, weights_only=True)
+                if os.path.exists(bbox_cache_path):
+                    cached = torch.load(bbox_cache_path, weights_only=True)
                     bbox_frames = list(cached["bboxes"])
                     valid_frames = list(cached["valid"])
                     gt_per_frame[:] = list(cached["gt"])
@@ -216,9 +195,9 @@ class HOT3DHandDataset(Dataset):
                         print(f"Skipping {seq_path}: missing calibration for hand crop")
                         continue
 
-                    # Transform GT from world space to crop-local frame to match
-                    # the network's raw (z, tx_crop, ty_crop) output.
-                    ok = HOT3DHandDataset._transform_gt_to_crop_local(
+                    # world → camera frame so predicted and ground-truth params
+                    # (and the joints we derive from them) live in the same frame.
+                    ok = self._transform_gt_to_crop_local(
                         seq_path, n_video, hand_ts_sorted, gt_per_frame,
                         bbox_frames, valid_frames, res=res,
                     )
@@ -230,10 +209,19 @@ class HOT3DHandDataset(Dataset):
                         "bboxes": torch.stack(bbox_frames),
                         "valid": torch.stack(valid_frames),
                         "gt": torch.stack(gt_per_frame),
-                    }, cache_path)
-                    print(f"Cached hand bboxes -> {cache_path}")
+                    }, bbox_cache_path)
+                    print(f"Cached hand bboxes -> {bbox_cache_path}")
             else:
                 bbox_frames = valid_frames = None
+
+            # Build GT joints from the (possibly camera-frame) params.
+            if os.path.exists(joint_cache_path):
+                seq_gt_joints = torch.load(joint_cache_path, weights_only=True)
+                print(f"Loaded GT joints for {seq_path}.")
+            else:
+                seq_gt_joints = self._compute_seq_joints_from_params(gt_per_frame)
+                torch.save(seq_gt_joints, joint_cache_path)
+                print(f"Computed and saved GT joints for {seq_path}.")
 
             # Create Sliding Window Clips
             for start in range(0, n_video - num_frames + 1, clip_stride):
@@ -253,6 +241,32 @@ class HOT3DHandDataset(Dataset):
                     clip["cam_extrinsics"] = seq_cam_extrinsics[start : end]  # [S, 4, 4]
                     clip["cam_intrinsics"] = seq_cam_intrinsics                # [3]
                 self.clips.append(clip)
+
+    def _compute_seq_joints_from_params(self, gt_per_frame):
+        """Run MANO once per (frame, hand) to produce [N, 2, 16, 3] joints.
+
+        Used for both the world-frame joints fed to the 2D cache generator and
+        the camera-frame joints that become the 3D-loss ground truth.
+        """
+        seq_list = []
+        for frame_p in gt_per_frame:
+            frame_joints = []
+            for h_idx in range(NUM_HANDS):
+                offset = h_idx * HAND_PARAM_DIM
+                p = frame_p[offset : offset + HAND_PARAM_DIM]
+                if p.abs().sum() < 1e-6:
+                    j3d = np.zeros((16, 3), dtype=np.float32)
+                else:
+                    j3d = self.mano_model.get_joints_from_tensor(
+                        p, is_right=(h_idx == 1), return_tensor=False,
+                    )
+                    if isinstance(j3d, np.ndarray) and j3d.ndim == 3:
+                        j3d = j3d.squeeze(0)
+                    elif torch.is_tensor(j3d) and j3d.dim() == 3:
+                        j3d = j3d.squeeze(0)
+                frame_joints.append(torch.as_tensor(j3d, dtype=torch.float32))
+            seq_list.append(torch.stack(frame_joints))
+        return torch.stack(seq_list)
 
     def __len__(self):
         return len(self.clips)
@@ -567,22 +581,23 @@ class HOT3DHandDataset(Dataset):
         cam_extrinsics = torch.stack(cam_extrinsics_list)  # [N, 4, 4]
         return gt_joints_2d, cam_extrinsics, cam_intrinsics
 
-    @staticmethod
-    def _transform_gt_to_crop_local(seq_path, n_video, hand_ts_sorted, gt_per_frame,
+    def _transform_gt_to_crop_local(self, seq_path, n_video, hand_ts_sorted, gt_per_frame,
                                      bbox_frames, valid_frames, res=(224, 224)):
-        """Transform GT wrist position and orientation from world space to camera frame.
+        """Transform GT wrist position and orientation from world to camera frame.
 
-        The HaMeR cross-attention head regresses MANO parameters in camera space
-        (matching original HaMeR semantics). The crop is provided to the head
-        spatially via ROI Align + bbox geometry injection — there is no
-        crop-local decoder, so we must NOT project the GT translation into a
-        crop-local frame. Doing so previously combined a pinhole approximation
-        with fisheye-projected bboxes and produced GT values inconsistent with
-        anything the head could learn (loss ~300k).
+        MANO's convention is `joint_0_final = joint_0_canonical(betas) + transl`,
+        i.e. `transl` is an offset from the beta-specific canonical wrist location,
+        NOT an absolute world position. So naively doing `R_cw @ transl + t_cw`
+        places joint 0 at `joint_0_canonical + R_cw @ transl + t_cw` in camera
+        frame, which differs from the true camera-frame wrist position by
+        `(I - R_cw) @ joint_0_canonical`. This manifested as a visible
+        rotation+mirror offset in the GT-vs-pred overlay.
 
-        Steps per frame per hand:
-            1. world → camera position:    t_cam = R_cw @ t_world + t_cw
-            2. world → camera orientation: R_cam = R_cw @ R_world
+        Correct transform (per frame per hand):
+            1. joint_0_world = joint_0_canonical(betas) + transl_world
+            2. joint_0_cam   = R_cw @ joint_0_world + t_cw
+            3. transl_cam    = joint_0_cam - joint_0_canonical(betas)
+            4. R_cam         = R_cw @ R_world   (unchanged)
 
         Modifies gt_per_frame in-place.
         Returns True on success, False if calibration files are missing.
@@ -593,6 +608,27 @@ class HOT3DHandDataset(Dataset):
         if seq_data is None:
             return False
         T_device_camera, _cam_calib, headset_poses, headset_ts, _calib_path = seq_data
+
+        # Cache joint_0_canonical per (is_right, betas) since betas are usually
+        # constant across a sequence and MANO is fairly slow.
+        self.mano_model._ensure_device(torch.device("cpu"))
+        canon_cache = {}
+
+        def canonical_joint_0(betas_np, is_right):
+            key = (is_right, tuple(np.round(betas_np, 5)))
+            if key in canon_cache:
+                return canon_cache[key]
+            layer = self.mano_model.right if is_right else self.mano_model.left
+            out = layer(
+                betas=torch.tensor([betas_np], dtype=torch.float32),
+                global_orient=torch.zeros(1, 3),
+                hand_pose=torch.zeros(1, 15),
+                transl=torch.zeros(1, 3),
+                return_verts=True,
+            )
+            j0 = out.joints[0, 0].detach().numpy().astype(np.float64)
+            canon_cache[key] = j0
+            return j0
 
         for frame_i in range(len(gt_per_frame)):
             _T_world_device, T_camera_world = HOT3DHandDataset._frame_camera_transforms(
@@ -605,21 +641,25 @@ class HOT3DHandDataset(Dataset):
 
             for hand_idx in range(NUM_HANDS):
                 off = hand_idx * HAND_PARAM_DIM
-                t_world = gt_vec[off:off + 3].numpy()
-                q_wxyz  = gt_vec[off + 3:off + 7].numpy()
+                t_world = gt_vec[off:off + 3].numpy().astype(np.float64)
+                q_wxyz  = gt_vec[off + 3:off + 7].numpy().astype(np.float64)
+                betas   = gt_vec[off + 22:off + 32].numpy().astype(np.float64)
 
-                # Skip zero (absent) hands
                 if np.abs(t_world).sum() < 1e-8 and np.abs(q_wxyz).sum() < 1e-8:
                     continue
 
-                # --- Step 1: world → camera position ---
-                t_cam = R_cw @ t_world + t_cw
+                j0_canon = canonical_joint_0(betas, is_right=(hand_idx == 1))
+
+                # Joint 0 in world → camera → back to transl-offset form
+                j0_world = j0_canon + t_world
+                j0_cam   = R_cw @ j0_world + t_cw
+                t_cam    = j0_cam - j0_canon
 
                 gt_vec[off]     = float(t_cam[0])
                 gt_vec[off + 1] = float(t_cam[1])
                 gt_vec[off + 2] = float(t_cam[2])
 
-                # --- Step 2: world → camera orientation ---
+                # Rotation transforms as before
                 q_xyzw = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
                 R_world = Rotation.from_quat(q_xyzw).as_matrix()
                 R_cam = R_cw @ R_world
@@ -738,7 +778,7 @@ def render_vis_list(vis_items, gt_pred_pairs, render_fn):
 # Validation
 # ------------------------------------------------------------------
 
-def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, vis_clip_indices=None):
+def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None):
     """Run validation and optionally capture gt/pred at specific clip indices."""
     model.eval()
     val_loss = 0.0
@@ -755,50 +795,57 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             pred_params = preds["hand_joints"]
 
             pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
-
-            # Calculate parameter loss
-            loss_param = criterion_param(pred_params, gt)
-
-            # Calculate keypoint loss
-            gt_joints = vbatch["gt_joints"].to(device)
-            gt_conf = torch.ones((*gt_joints.shape[:-1], 1), device=device)
-            gt_input = torch.cat([gt_joints, gt_conf], dim=-1)
-
             B, S, H, J, _ = pred_joints.shape
-            pred_flat = pred_joints.view(B * S * H, 1, J, 3)
-            gt_flat = gt_input.view(B * S * H, 1, J, 4)
 
+            if hv is not None:
+                has_hand = hv.float()
+            else:
+                gt_pack = gt.view(*gt.shape[:-1], NUM_HANDS, HAND_PARAM_DIM)
+                has_hand = (gt_pack.abs().sum(dim=-1) > 1e-6).float()
+
+            loss_param = criterion_param(pred_params, gt, has_hand)
+
+            gt_joints = vbatch["gt_joints"].to(device)
+            gt_conf = has_hand.unsqueeze(-1).unsqueeze(-1).expand(B, S, H, J, 1)
+            gt_input = torch.cat([gt_joints, gt_conf], dim=-1)
+            pred_flat = pred_joints.view(B * S * H, 1, J, 3)
+            gt_flat   = gt_input.view(B * S * H, 1, J, 4)
             loss_kp3d = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0)
 
-            loss = loss_param + loss_kp3d
             loss_kp2d = torch.zeros((), device=device)
-
-            # 2D reprojection loss
             if "gt_joints_2d" in vbatch:
-                from scripts.hand_vis_utils import project_joints_torch
-                cam_extr = vbatch["cam_extrinsics"].to(device)  # [B, S, 4, 4]
-                cam_intr = vbatch["cam_intrinsics"].to(device)  # [B, 3]
-
+                cam_intr = vbatch["cam_intrinsics"].to(device)            # [B, 3]
                 N = B * S
                 pred_j  = pred_joints.view(N, H, J, 3)
-                T_flat  = cam_extr.view(N, 4, 4)
-                focal_N = cam_intr[:, 0].unsqueeze(1).expand(B, S).reshape(N)
-                cx_N    = cam_intr[:, 1].unsqueeze(1).expand(B, S).reshape(N)
-                cy_N    = cam_intr[:, 2].unsqueeze(1).expand(B, S).reshape(N)
+                focal   = cam_intr[:, 0].unsqueeze(1).expand(B, S).reshape(N, 1, 1)
+                cx      = cam_intr[:, 1].unsqueeze(1).expand(B, S).reshape(N, 1, 1)
+                cy      = cam_intr[:, 2].unsqueeze(1).expand(B, S).reshape(N, 1, 1)
 
-                pred_2d = project_joints_torch(pred_j, T_flat, focal_N, cx_N, cy_N)
-
+                # Clamp at 5 cm (below camera focal distance is nonphysical)
+                # to keep focal*x/z finite when early pred params are degenerate.
+                z = pred_j[..., 2].clamp_min(0.05)
+                col = focal * pred_j[..., 0] / z + cx
+                row = focal * pred_j[..., 1] / z + cy
                 IMAGE_WIDTH = 1408.0
+                u = (IMAGE_WIDTH - 1.0) - col
+                v = row
+                pred_2d = torch.stack([u, v], dim=-1)
+
                 pred_2d_norm = pred_2d / IMAGE_WIDTH - 0.5
                 gt_2d        = vbatch["gt_joints_2d"].to(device)
                 gt_2d_norm   = gt_2d.clone()
                 gt_2d_norm[..., :2] = gt_2d[..., :2] / IMAGE_WIDTH - 0.5
+                gt_2d_norm[..., 2]  = gt_2d_norm[..., 2] * has_hand.unsqueeze(-1)
 
                 pred_2d_flat = pred_2d_norm.view(N * H, 1, J, 2)
                 gt_2d_flat   = gt_2d_norm.view(N * H, 1, J, 3)
+                loss_kp2d    = criterion_kp2d(pred_2d_flat, gt_2d_flat)
 
-                loss_kp2d = criterion_kp2d(pred_2d_flat, gt_2d_flat)
-                loss = loss + loss_kp2d
+            loss = (
+                loss_weights["param"] * loss_param
+                + loss_weights["kp3d"] * loss_kp3d
+                + loss_weights["kp2d"] * loss_kp2d
+            )
 
             val_loss += loss.item()
             val_terms["param"] += loss_param.item()
@@ -842,34 +889,23 @@ def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
 # ------------------------------------------------------------------
 
 def compute_joints_from_batch(params, mano_model, device):
-    """
-    Refactored helper to convert param tensors to joints.
+    """Differentiable, batched conversion of 32-D MANO params to 3D joints.
+
     Args:
-        params: Tensor of shape [B, S, 64]
-        mano_model: The MANOModel wrapper
+        params: [B, S, 64] — two hands packed as (left[32], right[32]).
+        mano_model: MANOModel wrapper.
+
     Returns:
-        joints: Tensor of shape [B, S, 2, 21, 3] on the correct device
+        [B, S, 2, 16, 3] joint tensor with autograd linked back to `params`.
     """
-    B, S, _ = params.shape
-    joints_list = []
-
-    # We loop through batch and sequence
-    for b in range(B):
-        for s in range(S):
-            for h_idx in range(NUM_HANDS):
-                offset = h_idx * HAND_PARAM_DIM
-                p = params[b, s, offset : offset + HAND_PARAM_DIM]
-
-                # return_tensor=True preserves gradients
-                j = mano_model.get_joints_from_tensor(p, is_right=(h_idx==1), return_tensor=True)
-
-                # IMPORTANT: Squeeze the [1, 16, 3] to [16, 3]
-                # so the stacked tensor has the correct total dimensions
-                joints_list.append(j.squeeze(0))
-
-    # Reconstruct the batch shape [B, S, 2, 16, 3]
-    # Note: 16 joints instead of 21
-    return torch.stack(joints_list).view(B, S, 2, 16, 3).to(device)
+    B, S, D = params.shape
+    assert D == NUM_HANDS * HAND_PARAM_DIM
+    N = B * S
+    flat = params.view(N, NUM_HANDS, HAND_PARAM_DIM)  # [N, 2, 32]
+    left  = mano_model.get_joints_batched(flat[:, 0], is_right=False, device=device)  # [N, 16, 3]
+    right = mano_model.get_joints_batched(flat[:, 1], is_right=True,  device=device)
+    joints = torch.stack([left, right], dim=1)  # [N, 2, 16, 3]
+    return joints.view(B, S, NUM_HANDS, joints.shape[-2], 3)
 
 
 def _apply_overrides(cfg, overrides):
@@ -1053,6 +1089,20 @@ def train():
             print(f"[DIAG] {_name} hand GT t_cam: all-zero in first batch")
     del _diag_batch, _diag_gt
 
+    # --- Sanity check: MANO path must be differentiable w.r.t. pred_params.
+    # If this assert fires, loss_kp3d / loss_kp2d will silently contribute no
+    # gradient to the head and training will look fine on loss_param only.
+    _probe = 0.01 * torch.randn(1, num_frames, NUM_HANDS * HAND_PARAM_DIM,
+                                device=device)
+    _probe = _probe.detach().clone().requires_grad_(True)
+    _probe_joints = compute_joints_from_batch(_probe, mano_model, device)
+    _probe_joints.sum().backward()
+    assert _probe.grad is not None and _probe.grad.abs().sum().item() > 0, (
+        "MANO joint computation is not differentiable — check "
+        "MANOModel.get_joints_batched / quat_wxyz_to_axis_angle_torch."
+    )
+    del _probe, _probe_joints
+
     best_val_loss = float("inf")
     global_step = 0
 
@@ -1075,68 +1125,70 @@ def train():
             # print(f"gt_joints: {gt_joints}")
 
             preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
-            pred_params = preds["hand_joints"] # [B, 16, 64]
+            pred_params = preds["hand_joints"] # [B, S, 64]
 
             pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
 
-            # Per-term trackers (filled below)
             loss_kp2d = torch.zeros((), device=device)
 
-            # Calculate parameter loss
-            loss_param = criterion_param(pred_params, gt_params)
+            # Per-hand presence mask — prefer the dataset's hand_valid (derived from
+            # the projected-bbox pipeline); fall back to a params-are-nonzero check.
+            if hv is not None:
+                has_hand = hv.to(device).float()                 # [B, S, 2]
+            else:
+                gt_pack = gt_params.view(*gt_params.shape[:-1], NUM_HANDS, HAND_PARAM_DIM)
+                has_hand = (gt_pack.abs().sum(dim=-1) > 1e-6).float()
 
-            # Calculate keypoint loss
-            # 1. Add 1.0 confidence to GT
-            # Create [B, S, 2, 16, 1] of ones
-            gt_conf = torch.ones((*gt_joints.shape[:-1], 1), device=device)
-            # Concatenate to get [B, S, 2, 16, 4]
-            gt_input = torch.cat([gt_joints, gt_conf], dim=-1)
+            # Parameter loss (per-hand masked)
+            loss_param = criterion_param(pred_params, gt_params, has_hand)
 
-            # 2. Flatten for the Loss Class
-            # The loss expects [Batch, Seq, Joints, Channels]
-            # We merge Batch, Seq, and Hands into a single 'Super-Batch'
+            # 3D keypoint loss. Confidence is 1 where the hand is present, 0 otherwise —
+            # absent hands have zero GT joints but MANO's default pose would otherwise
+            # produce a constant ~0.2 residual that never decays.
             B, S, H, J, _ = pred_joints.shape
-            pred_flat = pred_joints.view(B * S * H, 1, J, 3) # [512, 1, 16, 3]
-            gt_flat = gt_input.view(B * S * H, 1, J, 4)     # [512, 1, 16, 4]
-
-            # 3. Calculate 3D Loss
-            # The loss internally centers joints based on the pelvis (root)
+            gt_conf = has_hand.unsqueeze(-1).unsqueeze(-1).expand(B, S, H, J, 1)
+            gt_input = torch.cat([gt_joints, gt_conf], dim=-1)                # [B, S, H, J, 4]
+            pred_flat = pred_joints.view(B * S * H, 1, J, 3)
+            gt_flat   = gt_input.view(B * S * H, 1, J, 4)
             loss_kp3d = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0)
 
-            loss = loss_param + loss_kp3d
-
-            # 4. Calculate 2D reprojection loss (requires camera data in batch)
+            # 2D reprojection loss. pred_joints are camera-frame (post-transform),
+            # so skip the world→camera extrinsic and project with intrinsics only.
             if "gt_joints_2d" in batch:
-                from scripts.hand_vis_utils import project_joints_torch
-                cam_extr = batch["cam_extrinsics"].to(device)  # [B, S, 4, 4]
-                cam_intr = batch["cam_intrinsics"].to(device)  # [B, 3] = [f, cx, cy]
-
-                # Merge B*S into a single leading dim for batched projection
+                cam_intr = batch["cam_intrinsics"].to(device)              # [B, 3]
                 N = B * S
-                pred_j  = pred_joints.view(N, H, J, 3)        # [N, H, J, 3]
-                T_flat  = cam_extr.view(N, 4, 4)              # [N, 4, 4]
-                focal_N = cam_intr[:, 0].unsqueeze(1).expand(B, S).reshape(N)
-                cx_N    = cam_intr[:, 1].unsqueeze(1).expand(B, S).reshape(N)
-                cy_N    = cam_intr[:, 2].unsqueeze(1).expand(B, S).reshape(N)
+                pred_j  = pred_joints.view(N, H, J, 3)                     # [N, H, J, 3]
+                focal   = cam_intr[:, 0].unsqueeze(1).expand(B, S).reshape(N, 1, 1)
+                cx      = cam_intr[:, 1].unsqueeze(1).expand(B, S).reshape(N, 1, 1)
+                cy      = cam_intr[:, 2].unsqueeze(1).expand(B, S).reshape(N, 1, 1)
 
-                pred_2d = project_joints_torch(pred_j, T_flat, focal_N, cx_N, cy_N)
-
-                # Match HaMeR convention: compute loss in normalized image coords
-                # (HaMeR normalizes GT to [-0.5, 0.5] and predicts in the same range
-                # via focal_length / IMAGE_SIZE). Raw pixel residuals are ~10^3× bigger
-                # than normalized ones and under L2 that explodes the loss.
+                # Clamp at 5 cm (below camera focal distance is nonphysical)
+                # to keep focal*x/z finite when early pred params are degenerate.
+                z = pred_j[..., 2].clamp_min(0.05)
+                col = focal * pred_j[..., 0] / z + cx
+                row = focal * pred_j[..., 1] / z + cy
                 IMAGE_WIDTH = 1408.0
+                u = (IMAGE_WIDTH - 1.0) - col
+                v = row
+                pred_2d = torch.stack([u, v], dim=-1)                      # [N, H, J, 2]
+
+                # Normalize to [-0.5, 0.5] so residuals match HaMeR's convention.
                 pred_2d_norm = pred_2d / IMAGE_WIDTH - 0.5
-                gt_2d        = batch["gt_joints_2d"].to(device)        # [B, S, H, J, 3]
+                gt_2d        = batch["gt_joints_2d"].to(device)            # [B, S, H, J, 3]
                 gt_2d_norm   = gt_2d.clone()
                 gt_2d_norm[..., :2] = gt_2d[..., :2] / IMAGE_WIDTH - 0.5
+                gt_2d_norm[..., 2]  = gt_2d_norm[..., 2] * has_hand.unsqueeze(-1)
 
                 pred_2d_flat = pred_2d_norm.view(N * H, 1, J, 2)
                 gt_2d_flat   = gt_2d_norm.view(N * H, 1, J, 3)
+                loss_kp2d    = criterion_kp2d(pred_2d_flat, gt_2d_flat)
 
-                loss_kp2d = criterion_kp2d(pred_2d_flat, gt_2d_flat)
-                loss = loss + loss_kp2d
-
+            w = cfg["loss_weights"]
+            loss = (
+                w["param"] * loss_param
+                + w["kp3d"] * loss_kp3d
+                + w["kp2d"] * loss_kp2d
+            )
 
             (loss / grad_accum_steps).backward()
             accum_loss += loss.item()
@@ -1179,7 +1231,7 @@ def train():
 
                 # --- Validation ---
                 if val_loader and (global_step % val_every == 0 or global_step == 1):
-                    val_loss, val_terms, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, val_vis_clip_indices)
+                    val_loss, val_terms, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], val_vis_clip_indices)
                     tqdm.write(
                         f"  step {global_step} | val_loss={val_loss:.4f} "
                         f"(param={val_terms['param']:.4f} kp3d={val_terms['kp3d']:.4f} kp2d={val_terms['kp2d']:.4f})"

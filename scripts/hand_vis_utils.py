@@ -41,6 +41,24 @@ def _quat_wxyz_to_rotvec(q_wxyz, eps=1e-8):
     return Rotation.from_quat(q_xyzw).as_rotvec().astype(np.float32)
 
 
+def quat_wxyz_to_axis_angle_torch(q_wxyz, eps=1e-8):
+    """Differentiable (w, x, y, z) quaternion -> axis-angle vector.
+
+    Args:
+        q_wxyz (torch.Tensor): [..., 4]
+    Returns:
+        torch.Tensor: [..., 3] rotation vector such that R = exp([v]_x).
+    """
+    q = q_wxyz / q_wxyz.norm(dim=-1, keepdim=True).clamp_min(eps)
+    w = q[..., :1]
+    xyz = q[..., 1:]
+    sin_half = xyz.norm(dim=-1, keepdim=True).clamp_min(eps)
+    angle = 2.0 * torch.atan2(sin_half, w.abs())
+    sign = torch.where(w >= 0, torch.ones_like(w), -torch.ones_like(w))
+    axis = sign * xyz / sin_half
+    return angle * axis
+
+
 class MANOModel:
     """Wrapper around smplx MANO for left/right hand mesh generation."""
 
@@ -68,6 +86,47 @@ class MANOModel:
         ):
             self.left.shapedirs[:, 0, :] *= -1
 
+        self._layer_device = torch.device("cpu")
+
+    def _ensure_device(self, device):
+        device = torch.device(device)
+        if device != self._layer_device:
+            self.left.to(device)
+            self.right.to(device)
+            self._layer_device = device
+
+    def get_joints_batched(self, params, is_right, device=None):
+        """Differentiable, batched MANO joint computation.
+
+        Args:
+            params (torch.Tensor): [N, 32] = (t_xyz[3], q_wxyz[4], pose_pca[15], betas[10]).
+            is_right (bool): True for right hand, False for left.
+            device (torch.device, optional): device to run MANO on (defaults to params.device).
+
+        Returns:
+            torch.Tensor: [N, 16, 3] joints with autograd connected to `params`.
+        """
+        device = torch.device(device) if device is not None else params.device
+        self._ensure_device(device)
+        params = params.to(device)
+
+        transl        = params[:, 0:3]
+        quat_wxyz     = params[:, 3:7]
+        hand_pose_pca = params[:, 7:22]
+        betas         = params[:, 22:32]
+
+        global_orient = quat_wxyz_to_axis_angle_torch(quat_wxyz)
+
+        layer = self.right if is_right else self.left
+        out = layer(
+            betas=betas,
+            global_orient=global_orient,
+            hand_pose=hand_pose_pca,
+            transl=transl,
+            return_verts=True,
+        )
+        return out.joints
+
     def get_mesh(self, hand_data, is_right):
         """Generate mesh from raw JSONL hand data dict.
 
@@ -79,6 +138,10 @@ class MANOModel:
             vertices: (778, 3) numpy array in world coordinates
             faces: (F, 3) numpy int array
         """
+        # CPU-side visualization path; make sure the layer isn't still on the
+        # training device from a previous get_joints_batched call.
+        self._ensure_device(torch.device("cpu"))
+
         betas = torch.tensor([hand_data["betas"]], dtype=torch.float32)
         pose = torch.tensor([hand_data["pose"]], dtype=torch.float32)
 
@@ -127,25 +190,26 @@ class MANOModel:
         return self.get_mesh(hand_data, is_right)
 
     def get_joints(self, hand_data, is_right, return_tensor=False):
-        """Generate 3D joints. 
+        """Generate 3D joints.
         If return_tensor=True, it stays a Torch tensor (for training loss).
         If False, returns a numpy array (for dataset/vis).
         """
-        # Ensure inputs are tensors and moved to the correct device
+        # This numpy/dict-based path is CPU-only; sync the layer so it can't
+        # be mid-flight on CUDA from a prior get_joints_batched call.
+        self._ensure_device(torch.device("cpu"))
+
         betas = torch.as_tensor([hand_data["betas"]], dtype=torch.float32)
         pose = torch.as_tensor([hand_data["pose"]], dtype=torch.float32)
-        
+
         wrist = hand_data["wrist_xform"]
         t_xyz = np.array(wrist["t_xyz"])
         q_wxyz = np.array(wrist["q_wxyz"])
         rotvec = _quat_wxyz_to_rotvec(q_wxyz)
 
-        global_orient = torch.from_numpy(rotvec).unsqueeze(0).to(betas.device)
-        transl = torch.tensor(t_xyz, dtype=torch.float32).unsqueeze(0).to(betas.device)
+        global_orient = torch.from_numpy(rotvec).unsqueeze(0)
+        transl = torch.tensor(t_xyz, dtype=torch.float32).unsqueeze(0)
 
         layer = self.right if is_right else self.left
-        # Move layer to match data device (crucial for GPU training)
-        layer = layer.to(betas.device)
 
         output = layer(
             betas=betas,

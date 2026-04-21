@@ -97,13 +97,16 @@ class Keypoint3DLoss(nn.Module):
         return loss.sum() / batch_size
 
 
+HAND_PARAM_DIM = 32
+NUM_HANDS = 2
+
+
 class ParameterLoss(nn.Module):
     def __init__(self):
         """
         MANO parameter loss module (pose / global orientation / betas).
 
-        Uses MSE and a binary mask to ignore examples where the ground truth
-        annotation is unavailable.
+        Uses MSE and a binary per-hand mask so absent hands don't contribute.
         """
         super(ParameterLoss, self).__init__()
         self.loss_fn = nn.MSELoss(reduction='none')
@@ -112,31 +115,25 @@ class ParameterLoss(nn.Module):
         self,
         pred_param: torch.Tensor,
         gt_param: torch.Tensor,
-        # has_param: torch.Tensor,
+        has_param: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute masked MSE loss over MANO parameters predicted by HandCropHead.
+        Compute masked MSE loss over predicted MANO parameters.
 
         Args:
-            pred_param (torch.Tensor): Shape [B, S, ...] — predicted MANO
-                parameters (position, quaternion, pose, betas).
-            gt_param (torch.Tensor): Shape [B, S, ...] — ground truth MANO
-                parameters.
+            pred_param (torch.Tensor): [B, S, 64] — two hands packed as
+                (left[32], right[32]) of (pos, quat, pose_pca, betas).
+            gt_param (torch.Tensor):   [B, S, 64] ground truth in the same layout.
+            has_param (torch.Tensor):  [B, S, 2] — 1.0 where the hand is present,
+                0.0 otherwise.
         Returns:
             torch.Tensor: Scalar parameter loss.
         """
+        B, S, D = pred_param.shape
+        assert D == NUM_HANDS * HAND_PARAM_DIM
+        pred = pred_param.view(B, S, NUM_HANDS, HAND_PARAM_DIM)
+        gt   = gt_param.view(B, S, NUM_HANDS, HAND_PARAM_DIM)
+        mask = has_param.to(pred.dtype).view(B, S, NUM_HANDS, 1)
 
-        # has_param (torch.Tensor): Shape [B, S] — binary mask; 1 if the
-        # sample has a valid ground truth annotation, 0 otherwise.
-        has_param = (gt_param.abs().sum(dim=-1) > 0).float() # [B, S]
-
-        batch_size = pred_param.shape[0]
-        num_dims = len(pred_param.shape)
-
-        # Broadcast mask over all parameter dimensions beyond [B, S]
-        mask = has_param.type(pred_param.dtype).view(
-            *has_param.shape, *([1] * (num_dims - len(has_param.shape)))
-        )
-
-        loss = (mask * self.loss_fn(pred_param, gt_param)).reshape(batch_size, -1).mean(dim=-1)
+        loss = (mask * self.loss_fn(pred, gt)).reshape(B, -1).mean(dim=-1)
         return loss.sum()
