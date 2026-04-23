@@ -153,9 +153,12 @@ def hooked_forward_crop(head: HamerManoHead, token_list, images, patch_start_idx
     print_tensor_stats("transformer output", out)
 
     out = out.reshape(N, 2, -1)
-    left_params = head._decode_hand(out[:, 0, :])
-    right_params = head._decode_hand(out[:, 1, :])
-    hand_params = torch.cat([left_params, right_params], dim=-1)
+    local_out = head.local_head(out)    # [N, 2, LOCAL_DIM]
+    global_out = head.global_head(out)  # [N, 2, GLOBAL_DIM]
+    print_tensor_stats("local_head output", local_out)
+    print_tensor_stats("global_head output", global_out)
+    # Per-hand concatenation in the canonical layout [t_xyz, q_wxyz, pose, betas]
+    hand_params = torch.cat([global_out, local_out], dim=-1).reshape(N, -1)
     print_tensor_stats("decoded hand_params (before valid mask)", hand_params)
 
     if hand_valid is not None:
@@ -189,9 +192,11 @@ def hooked_forward_fullframe(head: HamerManoHead, token_list, images, patch_star
     out = head.output_norm(out)
     print_tensor_stats("transformer output", out)
 
-    left_params = head._decode_hand(out[:, 0, :])
-    right_params = head._decode_hand(out[:, 1, :])
-    hand_params = torch.cat([left_params, right_params], dim=-1)
+    local_out = head.local_head(out)    # [N, 2, LOCAL_DIM]
+    global_out = head.global_head(out)  # [N, 2, GLOBAL_DIM]
+    print_tensor_stats("local_head output", local_out)
+    print_tensor_stats("global_head output", global_out)
+    hand_params = torch.cat([global_out, local_out], dim=-1).reshape(N, -1)
     print_tensor_stats("decoded hand_params", hand_params)
 
     return hand_params.reshape(B, S, -1)

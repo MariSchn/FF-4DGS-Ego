@@ -702,8 +702,19 @@ class GaussianSplatRenderer(nn.Module):
 
         pts3d, _, _ = depth_to_world_coords_points(depth, pose4x4, intrinsic)
         pts3d = pts3d.reshape(B, S, H * W, 3)
+
+        # Apply hand-region Δxyz refinement from Hand↔GS cross-attention.
+        if "hand_gs_offset" in predictions and "hand_gs_mask" in predictions:
+            offset = predictions["hand_gs_offset"][:, :S].reshape(B, S, H * W, 3).to(pts3d.dtype)
+            mask = predictions["hand_gs_mask"][:, :S].reshape(B, S, H * W, 1).to(pts3d.dtype)
+            pts3d = pts3d + mask * offset
+
         splats["means"] = pts3d
         splats["conf"] = conf.reshape(B, S, H * W)
+
+        # Expose dense means (post-refiner) so downstream losses (e.g. hand↔GS
+        # consistency) can select per-pixel Gaussian centers.
+        predictions["gs_means"] = pts3d
 
         splats["timestamp"] = views["timestamp"][:, :S]
         if "velocity_fwd" in predictions:

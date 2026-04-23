@@ -34,12 +34,17 @@ model:
   hand_crop_size: 8
 
   # Disable other heads
-  enable_cam: false
+  enable_cam: true
   enable_pts: false
   enable_depth: false
   enable_norm: false
   enable_motion: false
-  enable_gs: false
+  # Phase 2: re-enable GS so the Hand→GS refiner can shift Gaussian centers
+  # inside hand bboxes. The rendering path runs but does not yet feed into
+  # a loss — consistency loss lands in Phase 3.
+  enable_gs: true
+  # Phase 2: activate the hand↔GS cross-attention refiner head.
+  enable_hand_gs_refiner: true
 
   # HaMeR head architecture (only used when hand_head_type == "hamer")
   hamer_head_kwargs:
@@ -50,6 +55,18 @@ model:
     mlp_dim: 1024
     dropout: 0.0
     crop_global_depth: 1
+    # Activation checkpointing on the transformer blocks. Trades a little
+    # extra compute per step for noticeably lower peak memory so batch_size=32
+    # fits on one GPU.
+    use_gradient_checkpoint: true
+
+  # Hand↔GS refiner head: per-pixel Δxyz for Gaussians inside hand bboxes.
+  hand_gs_refiner_kwargs:
+    heads: 4
+    dim_head: 64
+    mlp_dim: 256
+    dropout: 0.0
+    max_offset: 0.05
 
 # ------------------------------------------------------------------
 # Training
@@ -58,13 +75,29 @@ training:
   lr: 1e-4
   min_lr: 1e-7           # Minimum LR for cosine annealing scheduler
   epochs: 5
-  batch_size: 32
-  grad_accum_steps: 1    # Effective batch = batch_size * grad_accum_steps
-  log_every: 500         # Steps between train loss logs (console + W&B)
+  # Phase 3: dense cross-attention in HandGSRefiner on the 224x224 grid pushes
+  # peak memory past 24GB even at BS=2. Drop to BS=1 and double accumulation to
+  # keep the same effective batch (32).
+  batch_size: 1
+  grad_accum_steps: 32   # Effective batch = batch_size * grad_accum_steps
+  log_every: 100         # Steps between train loss logs (console + W&B)
   val_every: 500         # Steps between validation runs
   save_every: 1000       # Steps between checkpoint saves
   seed: 42               # Random seed
   output_dir: "checkpoints/default"
+  grad_clip_norm: 1.0    # Max L2 norm for gradients (circuit breaker on loss spikes)
+
+  # 3D self-supervised consistency between hand head and Gaussian head.
+  # Phase 3: enabled. Pulls hand-region Gaussian centers toward predicted
+  # MANO vertices; linear warmup keeps the signal from dominating early.
+  consistency_loss:
+    enabled: true
+    weight: 0.0005
+    warmup_steps: 5000           # Linearly ramp weight 0 -> target over this many steps
+    mano_folder: "models/MANO"
+    target: "vertices"          # "vertices" (778/hand) or "joints" (21/hand)
+    mask_threshold: 0.5          # hand-region mask threshold
+    max_samples_per_frame: 128   # top-K hand GS samples per frame
 
 # ------------------------------------------------------------------
 # Visualization
@@ -98,6 +131,6 @@ wandb:
   enabled: true
   project: "hand-head-training"
   entity: 3DV-Project
-  run_name: "Large Batch Size 3 Epcochs"
+  run_name: "Phase3: Hand→GS Refiner + 3D consistency loss"
   tags: []
   notes: null

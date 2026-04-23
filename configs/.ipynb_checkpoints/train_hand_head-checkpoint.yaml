@@ -12,7 +12,7 @@ data:
   # Step between consecutive clips when sliding over a video (stride=num_frames -> non-overlapping)
   clip_stride: 8
   # Fraction of sequences used for validation (0.0 = no validation; 0.1 = 10% held out)
-  val_split: 0.05
+  val_split: 0.01
   # DataLoader workers for loading video clips
   num_workers: 4
 
@@ -32,13 +32,41 @@ model:
   use_hand_crop: true
   # Crop feature map size (output of ROI Align per hand)
   hand_crop_size: 8
+
   # Disable other heads
-  enable_cam: false
+  enable_cam: true
   enable_pts: false
   enable_depth: false
   enable_norm: false
   enable_motion: false
-  enable_gs: false
+  # Phase 2: re-enable GS so the Hand→GS refiner can shift Gaussian centers
+  # inside hand bboxes. The rendering path runs but does not yet feed into
+  # a loss — consistency loss lands in Phase 3.
+  enable_gs: true
+  # Phase 2: activate the hand↔GS cross-attention refiner head.
+  enable_hand_gs_refiner: true
+
+  # HaMeR head architecture (only used when hand_head_type == "hamer")
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+    # Activation checkpointing on the transformer blocks. Trades a little
+    # extra compute per step for noticeably lower peak memory so batch_size=32
+    # fits on one GPU.
+    use_gradient_checkpoint: true
+
+  # Hand↔GS refiner head: per-pixel Δxyz for Gaussians inside hand bboxes.
+  hand_gs_refiner_kwargs:
+    heads: 4
+    dim_head: 64
+    mlp_dim: 256
+    dropout: 0.0
+    max_offset: 0.05
 
 # ------------------------------------------------------------------
 # Training
@@ -46,14 +74,30 @@ model:
 training:
   lr: 1e-4
   min_lr: 1e-7           # Minimum LR for cosine annealing scheduler
-  epochs: 1
-  batch_size: 1
-  grad_accum_steps: 1    # Effective batch = batch_size * grad_accum_steps
-  log_every: 10          # Steps between train loss logs (console + W&B)
-  val_every: 100         # Steps between validation runs
+  epochs: 5
+  # Phase 2: GS head + renderer + refiner add significant memory pressure on
+  # top of the Phase 1 baseline. Drop the micro-batch and compensate with
+  # accumulation to keep the same effective batch (32) that Phase 1 used.
+  batch_size: 2
+  grad_accum_steps: 16   # Effective batch = batch_size * grad_accum_steps
+  log_every: 100         # Steps between train loss logs (console + W&B)
+  val_every: 500         # Steps between validation runs
   save_every: 1000       # Steps between checkpoint saves
   seed: 42               # Random seed
-  output_dir: "checkpoints/cross_attention"
+  output_dir: "checkpoints/default"
+  grad_clip_norm: 1.0    # Max L2 norm for gradients (circuit breaker on loss spikes)
+
+  # 3D self-supervised consistency between hand head and Gaussian head.
+  # Phase 3: enabled. Pulls hand-region Gaussian centers toward predicted
+  # MANO vertices; linear warmup keeps the signal from dominating early.
+  consistency_loss:
+    enabled: true
+    weight: 0.0005
+    warmup_steps: 3000           # Linearly ramp weight 0 -> target over this many steps
+    mano_folder: "models/MANO"
+    target: "vertices"          # "vertices" (778/hand) or "joints" (21/hand)
+    mask_threshold: 0.5          # hand-region mask threshold
+    max_samples_per_frame: 128   # top-K hand GS samples per frame
 
 # ------------------------------------------------------------------
 # Visualization
@@ -76,8 +120,8 @@ hand_crop:
 # Debug
 # ------------------------------------------------------------------
 debug:
-  enabled: false         # When true, apply max_sequences limit to limit the number of sequences used for training
-  max_sequences: 50      # Use only this many sequences (from data_root)
+  enabled: false          # When true, apply max_sequences limit to limit the number of sequences used for training
+  max_sequences: 5       # Use only this many sequences (from data_root)
   single_frame: false     # Overfit on a single clip from first sequence; disables validation
 
 # ------------------------------------------------------------------
@@ -87,6 +131,6 @@ wandb:
   enabled: true
   project: "hand-head-training"
   entity: 3DV-Project
-  run_name: "Cross Attention"
+  run_name: "Phase3: Hand→GS Refiner + 3D consistency loss"
   tags: []
   notes: null
