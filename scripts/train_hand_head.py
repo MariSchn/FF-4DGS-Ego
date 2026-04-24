@@ -782,7 +782,10 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
     """Run validation and optionally capture gt/pred at specific clip indices."""
     model.eval()
     val_loss = 0.0
-    val_terms = {"param": 0.0, "kp3d": 0.0, "kp2d": 0.0}
+    val_terms = {
+        "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
+        "kp3d": 0.0, "kp2d": 0.0,
+    }
     captured = {}
     batch_size = val_loader.batch_size
     with torch.no_grad():
@@ -803,7 +806,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 gt_pack = gt.view(*gt.shape[:-1], NUM_HANDS, HAND_PARAM_DIM)
                 has_hand = (gt_pack.abs().sum(dim=-1) > 1e-6).float()
 
-            loss_param = criterion_param(pred_params, gt, has_hand)
+            param_losses = criterion_param(pred_params, gt, has_hand)
 
             gt_joints = vbatch["gt_joints"].to(device)
             gt_conf = has_hand.unsqueeze(-1).unsqueeze(-1).expand(B, S, H, J, 1)
@@ -827,8 +830,9 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 col = focal * pred_j[..., 0] / z + cx
                 row = focal * pred_j[..., 1] / z + cy
                 IMAGE_WIDTH = 1408.0
-                u = (IMAGE_WIDTH - 1.0) - col
-                v = row
+                # 90° CW to match project_vertices: (col, row) → (W-1-row, col)
+                u = (IMAGE_WIDTH - 1.0) - row
+                v = col
                 pred_2d = torch.stack([u, v], dim=-1)
 
                 pred_2d_norm = pred_2d / IMAGE_WIDTH - 0.5
@@ -842,13 +846,17 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 loss_kp2d    = criterion_kp2d(pred_2d_flat, gt_2d_flat)
 
             loss = (
-                loss_weights["param"] * loss_param
-                + loss_weights["kp3d"] * loss_kp3d
-                + loss_weights["kp2d"] * loss_kp2d
+                loss_weights["transl"]        * param_losses["transl"]
+                + loss_weights["global_orient"] * param_losses["global_orient"]
+                + loss_weights["hand_pose"]     * param_losses["hand_pose"]
+                + loss_weights["betas"]         * param_losses["betas"]
+                + loss_weights["kp3d"]          * loss_kp3d
+                + loss_weights["kp2d"]          * loss_kp2d
             )
 
             val_loss += loss.item()
-            val_terms["param"] += loss_param.item()
+            for k in ("transl", "global_orient", "hand_pose", "betas"):
+                val_terms[k] += param_losses[k].item()
             val_terms["kp3d"]  += loss_kp3d.item()
             val_terms["kp2d"]  += loss_kp2d.item()
 
@@ -1091,7 +1099,7 @@ def train():
 
     # --- Sanity check: MANO path must be differentiable w.r.t. pred_params.
     # If this assert fires, loss_kp3d / loss_kp2d will silently contribute no
-    # gradient to the head and training will look fine on loss_param only.
+    # gradient to the head and training will look fine on the param losses only.
     _probe = 0.01 * torch.randn(1, num_frames, NUM_HANDS * HAND_PARAM_DIM,
                                 device=device)
     _probe = _probe.detach().clone().requires_grad_(True)
@@ -1111,7 +1119,10 @@ def train():
         model.train()
         optimizer.zero_grad()
         accum_loss = 0.0
-        accum_terms = {"param": 0.0, "kp3d": 0.0, "kp2d": 0.0}
+        accum_terms = {
+            "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
+            "kp3d": 0.0, "kp2d": 0.0,
+        }
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
             imgs = batch["img"].to(device)
@@ -1139,8 +1150,9 @@ def train():
                 gt_pack = gt_params.view(*gt_params.shape[:-1], NUM_HANDS, HAND_PARAM_DIM)
                 has_hand = (gt_pack.abs().sum(dim=-1) > 1e-6).float()
 
-            # Parameter loss (per-hand masked)
-            loss_param = criterion_param(pred_params, gt_params, has_hand)
+            # Parameter loss — split per MANO key, each masked per-hand.
+            # Returns dict with 'transl', 'global_orient', 'hand_pose', 'betas'.
+            param_losses = criterion_param(pred_params, gt_params, has_hand)
 
             # 3D keypoint loss. Confidence is 1 where the hand is present, 0 otherwise —
             # absent hands have zero GT joints but MANO's default pose would otherwise
@@ -1168,8 +1180,9 @@ def train():
                 col = focal * pred_j[..., 0] / z + cx
                 row = focal * pred_j[..., 1] / z + cy
                 IMAGE_WIDTH = 1408.0
-                u = (IMAGE_WIDTH - 1.0) - col
-                v = row
+                # 90° CW to match project_vertices: (col, row) → (W-1-row, col)
+                u = (IMAGE_WIDTH - 1.0) - row
+                v = col
                 pred_2d = torch.stack([u, v], dim=-1)                      # [N, H, J, 2]
 
                 # Normalize to [-0.5, 0.5] so residuals match HaMeR's convention.
@@ -1185,14 +1198,18 @@ def train():
 
             w = cfg["loss_weights"]
             loss = (
-                w["param"] * loss_param
-                + w["kp3d"] * loss_kp3d
-                + w["kp2d"] * loss_kp2d
+                w["transl"]        * param_losses["transl"]
+                + w["global_orient"] * param_losses["global_orient"]
+                + w["hand_pose"]     * param_losses["hand_pose"]
+                + w["betas"]         * param_losses["betas"]
+                + w["kp3d"]          * loss_kp3d
+                + w["kp2d"]          * loss_kp2d
             )
 
             (loss / grad_accum_steps).backward()
             accum_loss += loss.item()
-            accum_terms["param"] += loss_param.item()
+            for k in ("transl", "global_orient", "hand_pose", "betas"):
+                accum_terms[k] += param_losses[k].item()
             accum_terms["kp3d"]  += loss_kp3d.item()
             accum_terms["kp2d"]  += loss_kp2d.item()
 
@@ -1204,23 +1221,31 @@ def train():
                 avg_loss = accum_loss / grad_accum_steps
                 avg_terms = {k: v / grad_accum_steps for k, v in accum_terms.items()}
                 accum_loss = 0.0
-                accum_terms = {"param": 0.0, "kp3d": 0.0, "kp2d": 0.0}
+                accum_terms = {
+                    "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
+                    "kp3d": 0.0, "kp2d": 0.0,
+                }
                 global_step += 1
 
                 # --- Train logging ---
                 if use_wandb:
                     wandb.log({"train/loss": avg_loss,
-                               "train/loss_param": avg_terms["param"],
-                               "train/loss_kp3d":  avg_terms["kp3d"],
-                               "train/loss_kp2d":  avg_terms["kp2d"],
-                               "train/grad_norm":  grad_norm.item(),
+                               "train/loss_transl":        avg_terms["transl"],
+                               "train/loss_global_orient": avg_terms["global_orient"],
+                               "train/loss_hand_pose":     avg_terms["hand_pose"],
+                               "train/loss_betas":         avg_terms["betas"],
+                               "train/loss_kp3d":          avg_terms["kp3d"],
+                               "train/loss_kp2d":          avg_terms["kp2d"],
+                               "train/grad_norm":          grad_norm.item(),
                                "lr": scheduler.get_last_lr()[0]}, step=global_step)
 
                 if global_step % log_every == 0 or global_step == 1:
                     lr = scheduler.get_last_lr()[0]
                     tqdm.write(
                         f"  step {global_step} | train_loss={avg_loss:.4f} "
-                        f"(param={avg_terms['param']:.4f} kp3d={avg_terms['kp3d']:.4f} kp2d={avg_terms['kp2d']:.4f}) "
+                        f"(t={avg_terms['transl']:.4f} o={avg_terms['global_orient']:.4f} "
+                        f"p={avg_terms['hand_pose']:.4f} b={avg_terms['betas']:.4f} "
+                        f"kp3d={avg_terms['kp3d']:.4f} kp2d={avg_terms['kp2d']:.4f}) "
                         f"| grad_norm={grad_norm.item():.4f} | lr={lr:.2e}"
                     )
                     if use_wandb and train_vis_items:
@@ -1234,14 +1259,19 @@ def train():
                     val_loss, val_terms, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], val_vis_clip_indices)
                     tqdm.write(
                         f"  step {global_step} | val_loss={val_loss:.4f} "
-                        f"(param={val_terms['param']:.4f} kp3d={val_terms['kp3d']:.4f} kp2d={val_terms['kp2d']:.4f})"
+                        f"(t={val_terms['transl']:.4f} o={val_terms['global_orient']:.4f} "
+                        f"p={val_terms['hand_pose']:.4f} b={val_terms['betas']:.4f} "
+                        f"kp3d={val_terms['kp3d']:.4f} kp2d={val_terms['kp2d']:.4f})"
                     )
 
                     if use_wandb:
                         log_dict = {"val/loss": val_loss,
-                                    "val/loss_param": val_terms["param"],
-                                    "val/loss_kp3d":  val_terms["kp3d"],
-                                    "val/loss_kp2d":  val_terms["kp2d"]}
+                                    "val/loss_transl":        val_terms["transl"],
+                                    "val/loss_global_orient": val_terms["global_orient"],
+                                    "val/loss_hand_pose":     val_terms["hand_pose"],
+                                    "val/loss_betas":         val_terms["betas"],
+                                    "val/loss_kp3d":          val_terms["kp3d"],
+                                    "val/loss_kp2d":          val_terms["kp2d"]}
                         if val_vis_items:
                             pairs = [
                                 (captured[it["clip_idx"]]["gt"], captured[it["clip_idx"]]["pred"])

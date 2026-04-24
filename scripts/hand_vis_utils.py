@@ -394,9 +394,9 @@ def project_joints_torch(joints_world, T_camera_world, focal_length, cx, cy, ima
     col = f * j_cam[..., 0] / z + cx_
     row = f * j_cam[..., 1] / z + cy_
 
-    # Match project_vertices: u = (W-1) - col,  v = row
-    u = (image_width - 1) - col
-    v = row
+    # Match project_vertices: 90° CW rotation (col, row) → (W-1-row, col)
+    u = (image_width - 1) - row
+    v = col
 
     return torch.stack([u, v], dim=-1)
 

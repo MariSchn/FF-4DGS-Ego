@@ -4,7 +4,7 @@
 data:
   # Root folder containing one subdir per sequence. Each sequence must have
   # video_main_rgb.mp4 and hand_data/mano_hand_pose_trajectory.jsonl
-  data_root: "/home/user/dmonopoli/data/hot3d_aria/sequences"
+  data_root: "/home/marian/3dv/data/hot3d_aria/raw_data"
   # Number of frames per clip (sliding window over video). Full video is too long to fit in memory.
   num_frames: 16
   # [height, width] to which video frames are resized
@@ -51,13 +51,26 @@ model:
     crop_global_depth: 1
 
 # ------------------------------------------------------------------
+# Loss weights (per-term). Per-MANO-key split mirrors HaMeR's defaults
+# (hamer/configs_hydra/experiment/hamer_vit_transformer.yaml), adapted
+# to our 32-D layout (which also has `transl`; HaMeR uses weak-persp cam).
+# ------------------------------------------------------------------
+loss_weights:
+  kp3d:          0.05     # HaMeR KEYPOINTS_3D
+  kp2d:          0.01     # HaMeR KEYPOINTS_2D
+  global_orient: 0.001    # HaMeR GLOBAL_ORIENT (rotmat MSE)
+  hand_pose:     0.001    # HaMeR HAND_POSE (on our PCA coeffs)
+  betas:         0.0005   # HaMeR BETAS
+  transl:        0.001    # no HaMeR equivalent; small starting value
+
+# ------------------------------------------------------------------
 # Training
 # ------------------------------------------------------------------
 training:
   lr: 1e-4
   min_lr: 1e-7           # Minimum LR for cosine annealing scheduler
-  epochs: 5
-  batch_size: 32
+  epochs: 500
+  batch_size: 1
   grad_accum_steps: 1    # Effective batch = batch_size * grad_accum_steps
   log_every: 500         # Steps between train loss logs (console + W&B)
   val_every: 500         # Steps between validation runs
@@ -86,9 +99,9 @@ hand_crop:
 # Debug
 # ------------------------------------------------------------------
 debug:
-  enabled: false          # When true, apply max_sequences limit to limit the number of sequences used for training
+  enabled: true          # When true, apply max_sequences limit to limit the number of sequences used for training
   max_sequences: 5       # Use only this many sequences (from data_root)
-  single_frame: false     # Overfit on a single clip from first sequence; disables validation
+  single_frame: true     # Overfit on a single clip from first sequence; disables validation
 
 # ------------------------------------------------------------------
 # Weights & Biases
@@ -97,6 +110,6 @@ wandb:
   enabled: true
   project: "hand-head-training"
   entity: 3DV-Project
-  run_name: "Large Batch Size 3 Epcochs"
+  run_name: "Loss Test Single Frame"
   tags: []
   notes: null
