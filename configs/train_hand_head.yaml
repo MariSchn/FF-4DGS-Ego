@@ -51,17 +51,19 @@ model:
     crop_global_depth: 1
 
 # ------------------------------------------------------------------
-# Loss weights (per-term). Per-MANO-key split mirrors HaMeR's defaults
-# (hamer/configs_hydra/experiment/hamer_vit_transformer.yaml), adapted
-# to our 32-D layout (which also has `transl`; HaMeR uses weak-persp cam).
+# Loss weights (per-term). HaMeR's defaults were tuned for their rotmat
+# representation + weak-perspective cam head, and were too weak for our
+# 32-D layout (quat + PCA + absolute meter-scale transl). These values
+# make the overfit-on-one-clip test converge tightly (per-dim transl MSE
+# ≈ 1e-4 / wrist position within ~2 cm). See scripts/debug_hand_params.py.
 # ------------------------------------------------------------------
 loss_weights:
-  kp3d:          0.05     # HaMeR KEYPOINTS_3D
-  kp2d:          0.01     # HaMeR KEYPOINTS_2D
-  global_orient: 0.001    # HaMeR GLOBAL_ORIENT (rotmat MSE)
-  hand_pose:     0.001    # HaMeR HAND_POSE (on our PCA coeffs)
-  betas:         0.0005   # HaMeR BETAS
-  transl:        0.001    # no HaMeR equivalent; small starting value
+  kp3d:          0.05
+  kp2d:          0.05    # bumped from HaMeR's 0.01 — reinforces projection
+  global_orient: 0.01    # bumped 10x — rotmat MSE on a single 3x3
+  hand_pose:     0.01    # bumped 10x — MSE on 15 PCA coeffs
+  betas:         0.01    # bumped 20x — hand-size was converging too slowly
+  transl:        0.1     # 100x bump — meter-scale; needs real weight for depth
 
 # ------------------------------------------------------------------
 # Training
@@ -69,8 +71,8 @@ loss_weights:
 training:
   lr: 1e-4
   min_lr: 1e-7           # Minimum LR for cosine annealing scheduler
-  epochs: 500
-  batch_size: 1
+  epochs: 1
+  batch_size: 32
   grad_accum_steps: 1    # Effective batch = batch_size * grad_accum_steps
   log_every: 500         # Steps between train loss logs (console + W&B)
   val_every: 500         # Steps between validation runs
@@ -99,9 +101,9 @@ hand_crop:
 # Debug
 # ------------------------------------------------------------------
 debug:
-  enabled: true          # When true, apply max_sequences limit to limit the number of sequences used for training
+  enabled: false          # When true, apply max_sequences limit to limit the number of sequences used for training
   max_sequences: 5       # Use only this many sequences (from data_root)
-  single_frame: true     # Overfit on a single clip from first sequence; disables validation
+  single_frame: false     # Overfit on a single clip from first sequence; disables validation
 
 # ------------------------------------------------------------------
 # Weights & Biases
@@ -110,6 +112,6 @@ wandb:
   enabled: true
   project: "hand-head-training"
   entity: 3DV-Project
-  run_name: "Loss Test Single Frame"
+  run_name: "Loss Test Full Epoch"
   tags: []
   notes: null
