@@ -29,6 +29,7 @@ from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import Wor
 from diffsynth.utils.auxiliary import load_video
 
 from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
+from scripts.hand_gs_consistency import HandGSConsistencyLoss, reset_diag_flag
 
 
 HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
@@ -778,10 +779,20 @@ def render_vis_list(vis_items, gt_pred_pairs, render_fn):
 # Validation
 # ------------------------------------------------------------------
 
-def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None):
-    """Run validation and optionally capture gt/pred at specific clip indices."""
+def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None, consistency_fn=None):
+    """Run validation and optionally capture gt/pred at specific clip indices.
+
+    Returns (supervised_val_loss, val_terms, val_consistency, captured). The
+    consistency value is 0.0 when ``consistency_fn`` is None.
+    """
     model.eval()
+    # Phase 3: free cached allocator blocks before validation so the renderer
+    # has a clean slate — training accumulation leaves a lot of fragmented
+    # reserved memory behind, and GS rendering is the next peak.
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     val_loss = 0.0
+    val_consistency = 0.0
     val_terms = {
         "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
         "kp3d": 0.0, "kp2d": 0.0,
@@ -794,7 +805,8 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             gt = vbatch["gt"].to(device)
             hb = vbatch["hand_bboxes"].to(device) if "hand_bboxes" in vbatch else None
             hv = vbatch["hand_valid"].to(device)  if "hand_valid"  in vbatch else None
-            preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
+            views = build_views(imgs, num_frames, device, hb, hv)
+            preds = model(views, is_inference=False, use_motion=False)
             pred_params = preds["hand_joints"]
 
             pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
@@ -860,6 +872,9 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             val_terms["kp3d"]  += loss_kp3d.item()
             val_terms["kp2d"]  += loss_kp2d.item()
 
+            if consistency_fn is not None:
+                val_consistency += consistency_fn(preds, views).item()
+
             if vis_clip_indices:
                 # For vis we need camera-space predictions for rendering
                 vis_preds = model(build_views(imgs, num_frames, device, hb, hv, crop_local_output=False), is_inference=False, use_motion=False)
@@ -873,7 +888,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
 
     n = max(len(val_loader), 1)
     val_terms = {k: v / n for k, v in val_terms.items()}
-    return val_loss / n, val_terms, captured
+    return val_loss / n, val_terms, val_consistency / n, captured
 
 
 def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
@@ -914,6 +929,15 @@ def compute_joints_from_batch(params, mano_model, device):
     right = mano_model.get_joints_batched(flat[:, 1], is_right=True,  device=device)
     joints = torch.stack([left, right], dim=1)  # [N, 2, 16, 3]
     return joints.view(B, S, NUM_HANDS, joints.shape[-2], 3)
+
+
+def _save_hand_ckpt(model, path):
+    """Save hand-head weights, plus refiner weights when Phase 2+ is active."""
+    ckpt = {"hand_head": model.hand_head.state_dict()}
+    refiner = getattr(model, "hand_gs_refiner", None)
+    if refiner is not None:
+        ckpt["hand_gs_refiner"] = refiner.state_dict()
+    torch.save(ckpt, path)
 
 
 def _apply_overrides(cfg, overrides):
@@ -972,7 +996,35 @@ def train():
     criterion_param = ParameterLoss().to(device)
 
     hand_params = list(model.hand_head.parameters())
-    print(f"Hand head parameters: {sum(p.numel() for p in hand_params):,}")
+    refiner = getattr(model, "hand_gs_refiner", None)
+    if refiner is not None:
+        hand_params += list(refiner.parameters())
+        print(f"Hand head + refiner parameters: {sum(p.numel() for p in hand_params):,}")
+    else:
+        print(f"Hand head parameters: {sum(p.numel() for p in hand_params):,}")
+
+    grad_clip_norm = float(training_cfg.get("grad_clip_norm", 1.0))
+
+    # --- 3D self-supervised consistency loss (Phase 3) ---
+    consistency_cfg = training_cfg.get("consistency_loss", {}) or {}
+    consistency_fn = None
+    cons_weight_target = 0.0
+    cons_warmup = 0
+    if consistency_cfg.get("enabled", False):
+        if refiner is None:
+            print("[WARN] consistency_loss.enabled=true but hand_gs_refiner is absent "
+                  "(enable_gs=false or enable_hand_gs_refiner=false) — skipping.")
+        else:
+            consistency_fn = HandGSConsistencyLoss(
+                mano_folder=consistency_cfg["mano_folder"],
+                target=consistency_cfg.get("target", "vertices"),
+                mask_threshold=consistency_cfg.get("mask_threshold", 0.5),
+                max_samples_per_frame=consistency_cfg.get("max_samples_per_frame", 128),
+            ).to(device)
+            cons_weight_target = float(consistency_cfg.get("weight", 0.0005))
+            cons_warmup = int(consistency_cfg.get("warmup_steps", 0))
+            print(f"Consistency loss ENABLED | weight={cons_weight_target} "
+                  f"warmup_steps={cons_warmup} target={consistency_cfg.get('target', 'vertices')}")
 
     # --- Data ---
     all_seqs = discover_sequences(data_cfg["data_root"])
@@ -1119,10 +1171,12 @@ def train():
         model.train()
         optimizer.zero_grad()
         accum_loss = 0.0
+        accum_consistency = 0.0
         accum_terms = {
             "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
             "kp3d": 0.0, "kp2d": 0.0,
         }
+        reset_diag_flag()
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
             imgs = batch["img"].to(device)
@@ -1131,11 +1185,9 @@ def train():
 
             hb = batch["hand_bboxes"].to(device) if "hand_bboxes" in batch else None
             hv = batch["hand_valid"].to(device)  if "hand_valid"  in batch else None
-            
-            # print(f"gt_params: {gt_params}")
-            # print(f"gt_joints: {gt_joints}")
 
-            preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
+            views = build_views(imgs, num_frames, device, hb, hv)
+            preds = model(views, is_inference=False, use_motion=False)
             pred_params = preds["hand_joints"] # [B, S, 64]
 
             pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
@@ -1197,7 +1249,7 @@ def train():
                 loss_kp2d    = criterion_kp2d(pred_2d_flat, gt_2d_flat)
 
             w = cfg["loss_weights"]
-            loss = (
+            supervised_loss = (
                 w["transl"]        * param_losses["transl"]
                 + w["global_orient"] * param_losses["global_orient"]
                 + w["hand_pose"]     * param_losses["hand_pose"]
@@ -1206,21 +1258,56 @@ def train():
                 + w["kp2d"]          * loss_kp2d
             )
 
+            # 3D consistency: pulls refined Gaussian centers toward predicted
+            # MANO vertices. Ramp the weight 0 → target over warmup_steps so
+            # the supervised head stabilises before the refiner starts tugging
+            # on Gaussian positions.
+            if consistency_fn is not None:
+                ramp = min(1.0, global_step / cons_warmup) if cons_warmup > 0 else 1.0
+                cons_weight = cons_weight_target * ramp
+                consistency_loss = consistency_fn(preds, views)
+                loss = supervised_loss + cons_weight * consistency_loss
+            else:
+                cons_weight = 0.0
+                consistency_loss = supervised_loss.new_zeros(())
+                loss = supervised_loss
+
+            # Circuit breaker: skip this accumulation window if the loss is
+            # non-finite (NaN/Inf). Clears any partial grads so we don't poison
+            # the next step.
+            if not torch.isfinite(loss):
+                tqdm.write(
+                    f"[WARN] Non-finite loss at step {global_step} "
+                    f"(supervised={supervised_loss.item():.4f} "
+                    f"consistency={consistency_loss.item():.4f}) — skipping update."
+                )
+                optimizer.zero_grad()
+                accum_loss = 0.0
+                accum_consistency = 0.0
+                accum_terms = {
+                    "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
+                    "kp3d": 0.0, "kp2d": 0.0,
+                }
+                continue
+
             (loss / grad_accum_steps).backward()
             accum_loss += loss.item()
+            accum_consistency += consistency_loss.item()
             for k in ("transl", "global_orient", "hand_pose", "betas"):
                 accum_terms[k] += param_losses[k].item()
             accum_terms["kp3d"]  += loss_kp3d.item()
             accum_terms["kp2d"]  += loss_kp2d.item()
 
             if (batch_idx + 1) % grad_accum_steps == 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(hand_params, max_norm=float("inf"))
+                grad_norm = torch.nn.utils.clip_grad_norm_(hand_params, max_norm=grad_clip_norm)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
                 avg_loss = accum_loss / grad_accum_steps
+                avg_consistency = accum_consistency / grad_accum_steps
                 avg_terms = {k: v / grad_accum_steps for k, v in accum_terms.items()}
                 accum_loss = 0.0
+                accum_consistency = 0.0
                 accum_terms = {
                     "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
                     "kp3d": 0.0, "kp2d": 0.0,
@@ -1236,6 +1323,8 @@ def train():
                                "train/loss_betas":         avg_terms["betas"],
                                "train/loss_kp3d":          avg_terms["kp3d"],
                                "train/loss_kp2d":          avg_terms["kp2d"],
+                               "train/consistency_loss":   avg_consistency,
+                               "train/consistency_weight": cons_weight,
                                "train/grad_norm":          grad_norm.item(),
                                "lr": scheduler.get_last_lr()[0]}, step=global_step)
 
@@ -1245,7 +1334,8 @@ def train():
                         f"  step {global_step} | train_loss={avg_loss:.4f} "
                         f"(t={avg_terms['transl']:.4f} o={avg_terms['global_orient']:.4f} "
                         f"p={avg_terms['hand_pose']:.4f} b={avg_terms['betas']:.4f} "
-                        f"kp3d={avg_terms['kp3d']:.4f} kp2d={avg_terms['kp2d']:.4f}) "
+                        f"kp3d={avg_terms['kp3d']:.4f} kp2d={avg_terms['kp2d']:.4f} "
+                        f"cons={avg_consistency:.4f} w={cons_weight:.2e}) "
                         f"| grad_norm={grad_norm.item():.4f} | lr={lr:.2e}"
                     )
                     if use_wandb and train_vis_items:
@@ -1256,12 +1346,18 @@ def train():
 
                 # --- Validation ---
                 if val_loader and (global_step % val_every == 0 or global_step == 1):
-                    val_loss, val_terms, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], val_vis_clip_indices)
+                    val_loss, val_terms, val_consistency, captured = run_validation(
+                        model, val_loader, num_frames, device,
+                        criterion_kp3d, criterion_kp2d, criterion_param,
+                        mano_model, cfg["loss_weights"], val_vis_clip_indices,
+                        consistency_fn=consistency_fn,
+                    )
                     tqdm.write(
                         f"  step {global_step} | val_loss={val_loss:.4f} "
                         f"(t={val_terms['transl']:.4f} o={val_terms['global_orient']:.4f} "
                         f"p={val_terms['hand_pose']:.4f} b={val_terms['betas']:.4f} "
-                        f"kp3d={val_terms['kp3d']:.4f} kp2d={val_terms['kp2d']:.4f})"
+                        f"kp3d={val_terms['kp3d']:.4f} kp2d={val_terms['kp2d']:.4f}"
+                        f" cons={val_consistency:.4f})"
                     )
 
                     if use_wandb:
@@ -1272,6 +1368,8 @@ def train():
                                     "val/loss_betas":         val_terms["betas"],
                                     "val/loss_kp3d":          val_terms["kp3d"],
                                     "val/loss_kp2d":          val_terms["kp2d"]}
+                        if consistency_fn is not None:
+                            log_dict["val/consistency_loss"] = val_consistency
                         if val_vis_items:
                             pairs = [
                                 (captured[it["clip_idx"]]["gt"], captured[it["clip_idx"]]["pred"])
@@ -1284,20 +1382,21 @@ def train():
 
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
-                        torch.save(model.hand_head.state_dict(), os.path.join(output_dir, "best_val_loss.pt"))
+                        _save_hand_ckpt(model, os.path.join(output_dir, "best_val_loss.pt"))
                         tqdm.write("  -> New best. Saved.")
                     model.train()
 
                 if global_step % save_every == 0:
-                    torch.save(model.hand_head.state_dict(), os.path.join(output_dir, f"checkpoint_{global_step}.pt"))
+                    _save_hand_ckpt(model, os.path.join(output_dir, f"checkpoint_{global_step}.pt"))
 
         # Flush leftover gradients from an incomplete accumulation window
         if (batch_idx + 1) % grad_accum_steps != 0:
             optimizer.zero_grad()
 
     # --- Save final ---
-    torch.save(model.hand_head.state_dict(), os.path.join(output_dir, "hand_head_final.pt"))
-    print(f"Final weights saved to: {os.path.join(output_dir, 'hand_head_final.pt')}")
+    final_path = os.path.join(output_dir, "hand_head_final.pt")
+    _save_hand_ckpt(model, final_path)
+    print(f"Final weights saved to: {final_path}")
 
     if use_wandb:
         wandb.finish()

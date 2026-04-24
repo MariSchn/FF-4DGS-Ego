@@ -3,11 +3,13 @@ from typing import Dict, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as ckpt
 
 from .visual_transformer import VisualGeometryTransformer
 from ..heads.camera_head import CameraHead
 from ..heads.dense_head import DPTHead
 from ..heads.hamer_head import HamerManoHead
+from ..heads.hand_gs_refiner import HandGSCrossAttnRefiner
 from .rasterization import GaussianSplatRenderer
 from ..utils.camera_utils import vector_to_camera_matrices, extrinsics_to_vector
 from ..utils.priors import normalize_depth, normalize_poses
@@ -62,6 +64,8 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         self.use_hand_crop = kwargs.get("use_hand_crop", False)
         self.hand_crop_size = kwargs.get("hand_crop_size", 8)
         self.hamer_head_kwargs = kwargs.get("hamer_head_kwargs", {})
+        self.enable_hand_gs_refiner = kwargs.get("enable_hand_gs_refiner", True)
+        self.hand_gs_refiner_kwargs = kwargs.get("hand_gs_refiner_kwargs", {})
 
         self.life_span_gamma = life_span_gamma
         self.dynamic_threshold = dynamic_threshold
@@ -225,6 +229,21 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             else:
                 raise ValueError(f"Unknown hand_head_type: {self.hand_head_type}")
 
+        # Hand→GS feature refiner: attends GS features to hand tokens to
+        # predict a small 3D offset applied inside each hand's bbox.
+        self.hand_gs_refiner = None
+        if (
+            self.enable_gs
+            and self.enable_hand
+            and self.hand_head_type == "hamer"
+            and self.enable_hand_gs_refiner
+        ):
+            self.hand_gs_refiner = HandGSCrossAttnRefiner(
+                gs_feature_dim=gs_dim // 2,
+                hand_token_dim=self.hand_head.dim,
+                **self.hand_gs_refiner_kwargs,
+            )
+
     def forward(self, views: Dict[str, torch.Tensor], cond_flags: List[int]=[0, 0, 0], is_inference=True, use_motion=True):
         """
         Execute forward pass through the WorldMirror model.
@@ -301,20 +320,37 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             preds["pts3d_conf"] = pts_conf
 
         # tracking hand
+        hand_tokens = None
         if self.enable_hand:
             if self.hand_head_type == "hamer":
                 hamer_kwargs = {}
                 if self.use_hand_crop:
                     hamer_kwargs["hand_bboxes"] = views.get("hand_bboxes")
                     hamer_kwargs["hand_valid"] = views.get("hand_valid")
-                hand_params, hand_conf = self.hand_head(
+                # Only materialise per-hand tokens when a downstream consumer
+                # (hand↔GS refiner) is actually wired up; otherwise we'd pay
+                # for a [B, S, 2, dim] activation kept alive through backward
+                # for no reason.
+                needs_hand_tokens = self.hand_gs_refiner is not None
+                hand_out = self.hand_head(
                     token_list,
                     images=imgs,
                     patch_start_idx=patch_start_idx,
+                    return_tokens=needs_hand_tokens,
                     **hamer_kwargs,
                 )
-                preds["hand_joints"] = hand_params
-                preds["hand_conf"] = hand_conf
+                preds["hand_local"] = hand_out["local"]
+                preds["hand_global"] = hand_out["global"]
+                preds["hand_conf"] = hand_out["confidence"]
+                hand_tokens = hand_out.get("tokens")
+
+                # Backward-compat: concatenate per-hand as [t_xyz, q_wxyz, pose, betas]
+                B, S = hand_out["local"].shape[:2]
+                local_per_hand = hand_out["local"].reshape(B, S, 2, -1)
+                global_per_hand = hand_out["global"].reshape(B, S, 2, -1)
+                preds["hand_joints"] = torch.cat(
+                    [global_per_hand, local_per_hand], dim=-1
+                ).reshape(B, S, -1)
             elif self.hand_head_type == "hand_crop":
                 hand_bboxes = views.get("hand_bboxes", None)
                 hand_valid = views.get("hand_valid", None)
@@ -382,6 +418,39 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             )
             preds["gs_depth"] = gs_depth
             preds["gs_depth_conf"] = gs_depth_conf
+
+            # Hand→GS cross-attention refinement: Q=gs_feat tokens, KV=hand tokens.
+            # Produces a per-pixel Δxyz and a hand-region mask; applied to
+            # Gaussian means inside prepare_splats.
+            if self.hand_gs_refiner is not None and hand_tokens is not None:
+                S_gs = gs_feat.shape[1]
+                hb = views.get("hand_bboxes", None)
+                hv = views.get("hand_valid", None)
+                if hb is not None:
+                    hb = hb[:, :S_gs]
+                if hv is not None:
+                    hv = hv[:, :S_gs]
+                # Dense cross-attention on a 224x224 grid is the peak-memory
+                # hotspot in Phase 3. Checkpoint the refiner so activations are
+                # recomputed in backward rather than held across the step.
+                if self.training and torch.is_grad_enabled():
+                    delta_xyz, hand_mask = ckpt.checkpoint(
+                        self.hand_gs_refiner,
+                        gs_feat,
+                        hand_tokens[:, :S_gs],
+                        hb,
+                        hv,
+                        use_reentrant=False,
+                    )
+                else:
+                    delta_xyz, hand_mask = self.hand_gs_refiner(
+                        gs_feat,
+                        hand_tokens[:, :S_gs],
+                        hand_bboxes=hb,
+                        hand_valid=hv,
+                    )
+                preds["hand_gs_offset"] = delta_xyz
+                preds["hand_gs_mask"] = hand_mask
 
 
             # Dynamic GS attributes

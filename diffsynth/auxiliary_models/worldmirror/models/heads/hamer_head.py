@@ -6,6 +6,7 @@ Uses a single learned query token that cross-attends to backbone spatial feature
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as ckpt
 from einops import rearrange
 from torchvision.ops import roi_align
 
@@ -94,12 +95,16 @@ class HamerManoHead(nn.Module):
 
     Note: The original HaMeR head only predicts right hands and mirrors to predict left hand.
     We modify it to predict both hands by adding a second query token to avoid having to do two forward passes only for the hand head.
+
+    After the transformer, per-hand tokens are routed through two distinct pathways:
+        - Local head:  MANO pose(15) + betas(10) = 25 dims
+        - Global head: global translation t_xyz(3) + global rotation q_wxyz(4) = 7 dims
     """
 
-    # Per-hand layout: [pos(3) + rot(4) + pose(15)] = 22, [betas(10)] = 10
-    POSE_DIM = 22
-    BETAS_DIM = 10
-    HAND_PARAM_DIM = 32  # POSE_DIM + BETAS_DIM
+    # Per-hand output dims
+    LOCAL_DIM = 25   # pose(15) + betas(10)
+    GLOBAL_DIM = 7   # t_xyz(3) + q_wxyz(4)
+    HAND_PARAM_DIM = LOCAL_DIM + GLOBAL_DIM  # 32
 
     def __init__(
         self,
@@ -114,11 +119,14 @@ class HamerManoHead(nn.Module):
         crop_size=8,
         patch_size=14,
         crop_global_depth=1,
+        use_gradient_checkpoint=False,
     ):
         super().__init__()
         self.use_crop = use_crop
         self.crop_size = crop_size
         self.patch_size = patch_size
+        self.dim = dim
+        self.use_gradient_checkpoint = use_gradient_checkpoint
 
         self.context_norm = nn.LayerNorm(context_dim)
         self.context_proj = nn.Linear(context_dim, dim)
@@ -146,17 +154,24 @@ class HamerManoHead(nn.Module):
         )
         self.output_norm = nn.LayerNorm(dim)
 
-        # Separate projection heads for pose vs shape (shared across hands)
-        self.dec_pose = nn.Linear(dim, self.POSE_DIM)
-        self.dec_betas = nn.Linear(dim, self.BETAS_DIM)
+        # Two distinct pathways after the transformer (shared across hands).
+        # Each is an MLP that specialises for its prediction target.
+        self.local_head = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, self.LOCAL_DIM),
+        )
+        self.global_head = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, self.GLOBAL_DIM),
+        )
         self.head_conf = nn.Linear(dim, 1)
 
-        nn.init.xavier_uniform_(self.dec_pose.weight, gain=0.01)
-        nn.init.xavier_uniform_(self.dec_betas.weight, gain=0.01)
-
-    def _decode_hand(self, token):
-        """Decode a single hand's MANO parameters from a transformer output token."""
-        return torch.cat([self.dec_pose(token), self.dec_betas(token)], dim=-1)
+        nn.init.xavier_uniform_(self.local_head[-1].weight, gain=0.01)
+        nn.init.xavier_uniform_(self.global_head[-1].weight, gain=0.01)
 
     def _prepare_rois(self, hand_bboxes, B, S, H, W):
         """Convert normalised [0,1] bboxes to roi_align format [batch_idx, x1, y1, x2, y2] in pixels."""
@@ -170,7 +185,12 @@ class HamerManoHead(nn.Module):
         rois = torch.cat([batch_idx.reshape(-1, 1), bboxes_pixel.reshape(-1, 4)], dim=1)
         return rois  # [N*2, 5]
 
-    def forward(self, token_list, images, patch_start_idx, hand_bboxes=None, hand_valid=None):
+    def _run_transformer(self, module, x, context):
+        if self.use_gradient_checkpoint and self.training and torch.is_grad_enabled():
+            return ckpt.checkpoint(module, x, context, use_reentrant=False)
+        return module(x, context=context)
+
+    def forward(self, token_list, images, patch_start_idx, hand_bboxes=None, hand_valid=None, return_tokens=False):
         B, S = images.shape[:2]
         N = B * S
 
@@ -215,7 +235,7 @@ class HamerManoHead(nn.Module):
 
             # Crop tokens (Q) ← full-image tokens (K/V): inject global context
             # into the local crop features.
-            context = self.crop_to_global(crop_ctx, context=global_ctx)  # [N*2, crop^2, dim]
+            context = self._run_transformer(self.crop_to_global, crop_ctx, global_ctx)  # [N*2, crop^2, dim]
 
             # Reshape from [N*2, crop^2, dim] → [N, 2*crop^2, dim] so both
             # hands' crop features are concatenated.  This lets the query
@@ -236,30 +256,45 @@ class HamerManoHead(nn.Module):
             geom_emb = self.geom_proj(geom)  # [N, 2, dim]
             queries = queries + geom_emb
 
-            out = self.transformer(queries, context=context)  # [N, 2, dim]
+            out = self._run_transformer(self.transformer, queries, context)  # [N, 2, dim]
             out = self.output_norm(out)
         else:
             # --- Original full-image path (unchanged) ---
             context = self.context_proj(self.context_norm(tokens))  # [N, N_patches, dim]
             query = self.query_tokens.expand(N, -1, -1)  # [N, 2, dim]
-            out = self.transformer(query, context=context)  # [N, 2, dim]
+            out = self._run_transformer(self.transformer, query, context)  # [N, 2, dim]
             out = self.output_norm(out)
 
-        # Decode each hand from its respective query token
-        left_params = self._decode_hand(out[:, 0, :])   # [N, 32]
-        right_params = self._decode_hand(out[:, 1, :])   # [N, 32]
-        hand_params = torch.cat([left_params, right_params], dim=-1)  # [N, 64]
+        # Route per-hand tokens through the two distinct pathways
+        local_out = self.local_head(out)    # [N, 2, LOCAL_DIM]
+        global_out = self.global_head(out)  # [N, 2, GLOBAL_DIM]
+
+        # Flatten the two-hand dim: [N, 2, D] -> [N, 2*D]
+        local_params = local_out.reshape(N, -1)    # [N, 2*LOCAL_DIM]
+        global_params = global_out.reshape(N, -1)  # [N, 2*GLOBAL_DIM]
 
         # Zero out absent hands when using crop path
         if self.use_crop and hand_valid is not None:
-            valid = hand_valid.reshape(N, 2, 1).expand(-1, -1, self.HAND_PARAM_DIM).reshape(N, -1).float()
-            hand_params = hand_params * valid
+            valid_base = hand_valid.reshape(N, 2, 1).float()
+            local_params = (local_out * valid_base).reshape(N, -1)
+            global_params = (global_out * valid_base).reshape(N, -1)
 
         # Confidence from mean of both tokens
         confidence = self.head_conf(out.mean(dim=1))  # [N, 1]
 
         # Reshape back to [B, S, ...]
-        hand_params = hand_params.reshape(B, S, -1)  # [B, S, 64]
-        confidence = confidence.reshape(B, S, -1)  # [B, S, 1]
+        local_params = local_params.reshape(B, S, -1)    # [B, S, 2*LOCAL_DIM]
+        global_params = global_params.reshape(B, S, -1)  # [B, S, 2*GLOBAL_DIM]
+        confidence = confidence.reshape(B, S, -1)        # [B, S, 1]
 
-        return hand_params, confidence
+        result = {
+            "local": local_params,
+            "global": global_params,
+            "confidence": confidence,
+        }
+        if return_tokens:
+            # Expose per-hand tokens for downstream refiners (e.g. hand↔GS cross-attn).
+            # Skipped by default to avoid keeping a [B, S, 2, dim] activation alive
+            # through the whole forward pass when no refiner consumes it.
+            result["tokens"] = out.reshape(B, S, 2, -1)
+        return result
