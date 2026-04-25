@@ -29,6 +29,7 @@ from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import Wor
 from diffsynth.utils.auxiliary import load_video
 
 from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
+from scripts.hand_metrics import metric_chunks_from_batch, metrics_from_chunks
 
 
 HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
@@ -779,7 +780,13 @@ def render_vis_list(vis_items, gt_pred_pairs, render_fn):
 # ------------------------------------------------------------------
 
 def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None):
-    """Run validation and optionally capture gt/pred at specific clip indices."""
+    """Run validation and optionally capture gt/pred at specific clip indices.
+
+    Returns (val_loss, val_terms, captured, hand_metrics) where hand_metrics is
+    the same HaMeR-style metric dict produced by `scripts.eval_hand_head`
+    (computed via `scripts.hand_metrics.metrics_from_chunks`), so train-time and
+    offline numbers match exactly given the same val sequences.
+    """
     model.eval()
     val_loss = 0.0
     val_terms = {
@@ -787,6 +794,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
         "kp3d": 0.0, "kp2d": 0.0,
     }
     captured = {}
+    metric_chunks = []
     batch_size = val_loader.batch_size
     with torch.no_grad():
         for batch_idx, vbatch in enumerate(tqdm(val_loader, desc="Val", leave=False)):
@@ -796,6 +804,10 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             hv = vbatch["hand_valid"].to(device)  if "hand_valid"  in vbatch else None
             preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
             pred_params = preds["hand_joints"]
+
+            metric_chunks.append(metric_chunks_from_batch(
+                pred_params, gt, hv, mano_model, device,
+            ))
 
             pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
             B, S, H, J, _ = pred_joints.shape
@@ -873,7 +885,8 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
 
     n = max(len(val_loader), 1)
     val_terms = {k: v / n for k, v in val_terms.items()}
-    return val_loss / n, val_terms, captured
+    hand_metrics = metrics_from_chunks(metric_chunks)
+    return val_loss / n, val_terms, captured, hand_metrics
 
 
 def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
@@ -1256,13 +1269,22 @@ def train():
 
                 # --- Validation ---
                 if val_loader and (global_step % val_every == 0 or global_step == 1):
-                    val_loss, val_terms, captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], val_vis_clip_indices)
+                    val_loss, val_terms, captured, hand_metrics = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], val_vis_clip_indices)
                     tqdm.write(
                         f"  step {global_step} | val_loss={val_loss:.4f} "
                         f"(t={val_terms['transl']:.4f} o={val_terms['global_orient']:.4f} "
                         f"p={val_terms['hand_pose']:.4f} b={val_terms['betas']:.4f} "
                         f"kp3d={val_terms['kp3d']:.4f} kp2d={val_terms['kp2d']:.4f})"
                     )
+                    hm_all = hand_metrics.get("all")
+                    if hm_all is not None:
+                        tqdm.write(
+                            f"  hand_metrics(all): MPJPE={hm_all['MPJPE']:.2f}mm "
+                            f"PA={hm_all['PA_MPJPE']:.2f}mm "
+                            f"MPVPE={hm_all['MPVPE']:.2f}mm "
+                            f"PA={hm_all['PA_MPVPE']:.2f}mm "
+                            f"AUC_J={hm_all['AUC_J']:.3f} AUC_V={hm_all['AUC_V']:.3f}"
+                        )
 
                     if use_wandb:
                         log_dict = {"val/loss": val_loss,
@@ -1272,6 +1294,13 @@ def train():
                                     "val/loss_betas":         val_terms["betas"],
                                     "val/loss_kp3d":          val_terms["kp3d"],
                                     "val/loss_kp2d":          val_terms["kp2d"]}
+                        for side_label in ("left", "right", "all"):
+                            side_metrics = hand_metrics.get(side_label)
+                            if side_metrics is None:
+                                continue
+                            for k, v in side_metrics.items():
+                                log_dict[f"val/{side_label}/{k}"] = v
+                        log_dict["val/num_valid_hands"] = hand_metrics["num_valid_hands"]
                         if val_vis_items:
                             pairs = [
                                 (captured[it["clip_idx"]]["gt"], captured[it["clip_idx"]]["pred"])
