@@ -30,6 +30,12 @@ from diffsynth.utils.auxiliary import load_video
 
 from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
 from scripts.hand_metrics import metric_chunks_from_batch, metrics_from_chunks
+from scripts.gs_metrics import (
+    LPIPSScorer,
+    render_views_from_predictions,
+    metric_chunks_from_batch as gs_metric_chunks_from_batch,
+    metrics_from_chunks as gs_metrics_from_chunks,
+)
 
 
 HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
@@ -779,13 +785,16 @@ def render_vis_list(vis_items, gt_pred_pairs, render_fn):
 # Validation
 # ------------------------------------------------------------------
 
-def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None):
+def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None, lpips_scorer=None):
     """Run validation and optionally capture gt/pred at specific clip indices.
 
-    Returns (val_loss, val_terms, captured, hand_metrics) where hand_metrics is
-    the same HaMeR-style metric dict produced by `scripts.eval_hand_head`
-    (computed via `scripts.hand_metrics.metrics_from_chunks`), so train-time and
-    offline numbers match exactly given the same val sequences.
+    Returns (val_loss, val_terms, captured, hand_metrics, gs_metrics) where
+    `hand_metrics` is the same HaMeR-style metric dict produced by
+    `scripts.eval_hand_head` (computed via
+    `scripts.hand_metrics.metrics_from_chunks`) and `gs_metrics` is the
+    PSNR / SSIM / LPIPS dict from `scripts.gs_metrics.metrics_from_chunks`
+    (or None if the model has `enable_gs=False`). Both match their
+    standalone-eval counterparts bit-for-bit given the same val sequences.
     """
     model.eval()
     val_loss = 0.0
@@ -794,7 +803,10 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
         "kp3d": 0.0, "kp2d": 0.0,
     }
     captured = {}
+    gs_captured = {}
     metric_chunks = []
+    gs_chunks = []
+    eval_gs = bool(getattr(model, "enable_gs", False)) and (lpips_scorer is not None)
     batch_size = val_loader.batch_size
     with torch.no_grad():
         for batch_idx, vbatch in enumerate(tqdm(val_loader, desc="Val", leave=False)):
@@ -802,12 +814,31 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             gt = vbatch["gt"].to(device)
             hb = vbatch["hand_bboxes"].to(device) if "hand_bboxes" in vbatch else None
             hv = vbatch["hand_valid"].to(device)  if "hand_valid"  in vbatch else None
-            preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
+            views = build_views(imgs, num_frames, device, hb, hv)
+            preds = model(views, is_inference=False, use_motion=False)
             pred_params = preds["hand_joints"]
 
             metric_chunks.append(metric_chunks_from_batch(
                 pred_params, gt, hv, mano_model, device,
             ))
+
+            if eval_gs:
+                H_img, W_img = imgs.shape[-2:]
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                    rendered = render_views_from_predictions(
+                        model, preds, views, height=H_img, width=W_img,
+                    )
+                gs_chunks.append(gs_metric_chunks_from_batch(
+                    rendered, imgs, None, lpips_scorer, device,
+                ))
+                if vis_clip_indices:
+                    for item_idx in range(imgs.shape[0]):
+                        clip_idx = batch_idx * batch_size + item_idx
+                        if clip_idx in vis_clip_indices:
+                            gs_captured[clip_idx] = {
+                                "rendered": rendered[item_idx].float().cpu(),  # [S, H, W, 3]
+                                "gt":       imgs[item_idx].float().cpu(),       # [S, 3, H, W]
+                            }
 
             pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
             B, S, H, J, _ = pred_joints.shape
@@ -886,7 +917,29 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
     n = max(len(val_loader), 1)
     val_terms = {k: v / n for k, v in val_terms.items()}
     hand_metrics = metrics_from_chunks(metric_chunks)
-    return val_loss / n, val_terms, captured, hand_metrics
+    gs_metrics = gs_metrics_from_chunks(gs_chunks) if eval_gs else None
+    return val_loss / n, val_terms, captured, hand_metrics, gs_metrics, gs_captured
+
+
+def build_gs_vis_videos(vis_items, gs_captured, fps=8):
+    """Build wandb.Video side-by-side (rendered | GT) clips over all frames
+    for each captured val clip. Returns [] if nothing was captured."""
+    videos = []
+    for item in vis_items:
+        clip_idx = item["clip_idx"]
+        if clip_idx not in gs_captured:
+            continue
+        cap = gs_captured[clip_idx]
+        rendered = cap["rendered"]                            # [S, H, W, 3] in [0, 1]
+        gt = cap["gt"].permute(0, 2, 3, 1)                    # [S, H, W, 3] in [0, 1]
+        side_by_side = torch.cat([rendered, gt], dim=2)       # [S, H, 2W, 3]
+        # wandb.Video wants [T, C, H, W] uint8
+        frames = (side_by_side.clamp(0, 1) * 255).to(torch.uint8).permute(0, 3, 1, 2).numpy()
+        videos.append(wandb.Video(
+            frames, fps=fps, format="mp4",
+            caption=f"Clip {clip_idx}: Rendered | GT",
+        ))
+    return videos
 
 
 def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
@@ -1080,6 +1133,11 @@ def train():
 
     print(f"Training on {device} | {epochs} epochs | batch_size={batch_size} | grad_accum_steps={grad_accum_steps}")
 
+    # --- LPIPS scorer for GS-head image-quality metrics ---
+    # Built once and reused across every validation run (and across train_gs
+    # debug scripts). Skipped when the model was built with enable_gs=False.
+    lpips_scorer = LPIPSScorer(device=device) if model_cfg.get("enable_gs", False) else None
+
     # --- W&B ---
     use_wandb = wandb_cfg.get("enabled", False)
     if use_wandb:
@@ -1264,12 +1322,12 @@ def train():
                     if use_wandb and train_vis_items:
                         train_images = render_train_vis(model, train_vis_items, num_frames, device, render_fn)
                         if train_images:
-                            wandb.log({"train/hand_overlay": train_images}, step=global_step)
+                            wandb.log({"media/train_hand_overlay": train_images}, step=global_step)
                         model.train()
 
                 # --- Validation ---
                 if val_loader and (global_step % val_every == 0 or global_step == 1):
-                    val_loss, val_terms, captured, hand_metrics = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], val_vis_clip_indices)
+                    val_loss, val_terms, captured, hand_metrics, gs_metrics, gs_captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], val_vis_clip_indices, lpips_scorer=lpips_scorer)
                     tqdm.write(
                         f"  step {global_step} | val_loss={val_loss:.4f} "
                         f"(t={val_terms['transl']:.4f} o={val_terms['global_orient']:.4f} "
@@ -1285,6 +1343,13 @@ def train():
                             f"PA={hm_all['PA_MPVPE']:.2f}mm "
                             f"AUC_J={hm_all['AUC_J']:.3f} AUC_V={hm_all['AUC_V']:.3f}"
                         )
+                    if gs_metrics is not None and gs_metrics["num_valid_frames"] > 0:
+                        tqdm.write(
+                            f"  gs_metrics: PSNR={gs_metrics['PSNR']:.2f}dB "
+                            f"SSIM={gs_metrics['SSIM']:.4f} "
+                            f"LPIPS={gs_metrics['LPIPS']:.4f} "
+                            f"(N={gs_metrics['num_valid_frames']})"
+                        )
 
                     if use_wandb:
                         log_dict = {"val/loss": val_loss,
@@ -1299,8 +1364,13 @@ def train():
                             if side_metrics is None:
                                 continue
                             for k, v in side_metrics.items():
-                                log_dict[f"val/{side_label}/{k}"] = v
-                        log_dict["val/num_valid_hands"] = hand_metrics["num_valid_hands"]
+                                log_dict[f"hand_metrics/{side_label}/{k}"] = v
+                        log_dict["hand_metrics/num_valid_hands"] = hand_metrics["num_valid_hands"]
+                        if gs_metrics is not None and gs_metrics["num_valid_frames"] > 0:
+                            log_dict["gaussian_metrics/PSNR"]  = gs_metrics["PSNR"]
+                            log_dict["gaussian_metrics/SSIM"]  = gs_metrics["SSIM"]
+                            log_dict["gaussian_metrics/LPIPS"] = gs_metrics["LPIPS"]
+                            log_dict["gaussian_metrics/num_valid_frames"] = gs_metrics["num_valid_frames"]
                         if val_vis_items:
                             pairs = [
                                 (captured[it["clip_idx"]]["gt"], captured[it["clip_idx"]]["pred"])
@@ -1308,7 +1378,11 @@ def train():
                             ]
                             val_images = render_vis_list(val_vis_items, pairs, render_fn)
                             if val_images:
-                                log_dict["val/hand_overlay"] = val_images
+                                log_dict["media/val_hand_overlay"] = val_images
+                        if gs_captured:
+                            gs_videos = build_gs_vis_videos(val_vis_items, gs_captured)
+                            if gs_videos:
+                                log_dict["media/val_gs_overlay"] = gs_videos
                         wandb.log(log_dict, step=global_step)
 
                     if val_loss < best_val_loss:
