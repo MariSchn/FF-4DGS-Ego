@@ -9,9 +9,12 @@ __pycache__
 /models/NeoVerse
 /wandb
 /checkpoints
-/venv
+/venv/*
+!venv/lib/python3.10/site-packages/chumpy/*
+
 *.pt
 *.mp4
+*.log
 checkpoints/
 P0001_*/
 hand_data/

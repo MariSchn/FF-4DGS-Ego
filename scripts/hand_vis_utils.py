@@ -24,6 +24,41 @@ from scipy.spatial.transform import Rotation
 # MANO mesh generation
 # ---------------------------------------------------------------------------
 
+def _quat_wxyz_to_rotvec(q_wxyz, eps=1e-8):
+    """Convert a (w, x, y, z) quaternion to a rotation vector.
+
+    Predicted quaternions early in training can have vanishing norm, which
+    crashes scipy's `Rotation.from_quat`. Normalise and fall back to identity
+    when the norm is below `eps`.
+    """
+    q = np.asarray(q_wxyz, dtype=np.float64)
+    norm = np.linalg.norm(q)
+    if norm < eps:
+        q = np.array([1.0, 0.0, 0.0, 0.0])
+    else:
+        q = q / norm
+    q_xyzw = np.array([q[1], q[2], q[3], q[0]])
+    return Rotation.from_quat(q_xyzw).as_rotvec().astype(np.float32)
+
+
+def quat_wxyz_to_axis_angle_torch(q_wxyz, eps=1e-8):
+    """Differentiable (w, x, y, z) quaternion -> axis-angle vector.
+
+    Args:
+        q_wxyz (torch.Tensor): [..., 4]
+    Returns:
+        torch.Tensor: [..., 3] rotation vector such that R = exp([v]_x).
+    """
+    q = q_wxyz / q_wxyz.norm(dim=-1, keepdim=True).clamp_min(eps)
+    w = q[..., :1]
+    xyz = q[..., 1:]
+    sin_half = xyz.norm(dim=-1, keepdim=True).clamp_min(eps)
+    angle = 2.0 * torch.atan2(sin_half, w.abs())
+    sign = torch.where(w >= 0, torch.ones_like(w), -torch.ones_like(w))
+    axis = sign * xyz / sin_half
+    return angle * axis
+
+
 class MANOModel:
     """Wrapper around smplx MANO for left/right hand mesh generation."""
 
@@ -51,6 +86,47 @@ class MANOModel:
         ):
             self.left.shapedirs[:, 0, :] *= -1
 
+        self._layer_device = torch.device("cpu")
+
+    def _ensure_device(self, device):
+        device = torch.device(device)
+        if device != self._layer_device:
+            self.left.to(device)
+            self.right.to(device)
+            self._layer_device = device
+
+    def get_joints_batched(self, params, is_right, device=None):
+        """Differentiable, batched MANO joint computation.
+
+        Args:
+            params (torch.Tensor): [N, 32] = (t_xyz[3], q_wxyz[4], pose_pca[15], betas[10]).
+            is_right (bool): True for right hand, False for left.
+            device (torch.device, optional): device to run MANO on (defaults to params.device).
+
+        Returns:
+            torch.Tensor: [N, 16, 3] joints with autograd connected to `params`.
+        """
+        device = torch.device(device) if device is not None else params.device
+        self._ensure_device(device)
+        params = params.to(device)
+
+        transl        = params[:, 0:3]
+        quat_wxyz     = params[:, 3:7]
+        hand_pose_pca = params[:, 7:22]
+        betas         = params[:, 22:32]
+
+        global_orient = quat_wxyz_to_axis_angle_torch(quat_wxyz)
+
+        layer = self.right if is_right else self.left
+        out = layer(
+            betas=betas,
+            global_orient=global_orient,
+            hand_pose=hand_pose_pca,
+            transl=transl,
+            return_verts=True,
+        )
+        return out.joints
+
     def get_mesh(self, hand_data, is_right):
         """Generate mesh from raw JSONL hand data dict.
 
@@ -62,6 +138,10 @@ class MANOModel:
             vertices: (778, 3) numpy array in world coordinates
             faces: (F, 3) numpy int array
         """
+        # CPU-side visualization path; make sure the layer isn't still on the
+        # training device from a previous get_joints_batched call.
+        self._ensure_device(torch.device("cpu"))
+
         betas = torch.tensor([hand_data["betas"]], dtype=torch.float32)
         pose = torch.tensor([hand_data["pose"]], dtype=torch.float32)
 
@@ -69,8 +149,7 @@ class MANOModel:
         t_xyz = np.array(wrist["t_xyz"])
         q_wxyz = np.array(wrist["q_wxyz"])
 
-        q_xyzw = np.array([q_wxyz[1], q_wxyz[2], q_wxyz[3], q_wxyz[0]])
-        rotvec = Rotation.from_quat(q_xyzw).as_rotvec().astype(np.float32)
+        rotvec = _quat_wxyz_to_rotvec(q_wxyz)
 
         global_orient = torch.from_numpy(rotvec).unsqueeze(0)
         transl = torch.tensor(t_xyz, dtype=torch.float32).unsqueeze(0)
@@ -110,6 +189,56 @@ class MANOModel:
         }
         return self.get_mesh(hand_data, is_right)
 
+    def get_joints(self, hand_data, is_right, return_tensor=False):
+        """Generate 3D joints.
+        If return_tensor=True, it stays a Torch tensor (for training loss).
+        If False, returns a numpy array (for dataset/vis).
+        """
+        # This numpy/dict-based path is CPU-only; sync the layer so it can't
+        # be mid-flight on CUDA from a prior get_joints_batched call.
+        self._ensure_device(torch.device("cpu"))
+
+        betas = torch.as_tensor([hand_data["betas"]], dtype=torch.float32)
+        pose = torch.as_tensor([hand_data["pose"]], dtype=torch.float32)
+
+        wrist = hand_data["wrist_xform"]
+        t_xyz = np.array(wrist["t_xyz"])
+        q_wxyz = np.array(wrist["q_wxyz"])
+        rotvec = _quat_wxyz_to_rotvec(q_wxyz)
+
+        global_orient = torch.from_numpy(rotvec).unsqueeze(0)
+        transl = torch.tensor(t_xyz, dtype=torch.float32).unsqueeze(0)
+
+        layer = self.right if is_right else self.left
+
+        output = layer(
+            betas=betas,
+            global_orient=global_orient,
+            hand_pose=pose,
+            transl=transl,
+            return_verts=True,
+        )
+
+        joints = output.joints # [21, 3]
+
+        # if output.joints:
+        #     joints = output.joints[0] # [21, 3]
+        # else:
+        #     # Fallback if no joints are found
+        #     joints = torch.zeros((1, 21, 3), device=betas.device)
+        return joints if return_tensor else joints.detach().cpu().numpy()
+
+    def get_joints_from_tensor(self, params_32, is_right, return_tensor=False):
+        """Helper to convert the flat 32-dim vector directly to joints."""
+        hand_data = {
+            "wrist_xform": {
+                "t_xyz": params_32[:3].tolist(),
+                "q_wxyz": params_32[3:7].tolist(),
+            },
+            "pose": params_32[7:22].tolist(),
+            "betas": params_32[22:32].tolist(),
+        }
+        return self.get_joints(hand_data, is_right, return_tensor=return_tensor)
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -212,6 +341,64 @@ def project_vertices(vertices_world, T_world_device, T_device_camera, cam_calib,
                 valid[i] = True
 
     return pixels, depths, valid
+
+
+def project_joints_torch(joints_world, T_camera_world, focal_length, cx, cy, image_width=1408):
+    """Differentiable pinhole approximation of project_vertices.
+
+    Applies the same 90° CW coordinate flip as project_vertices so that projected
+    pixel coordinates are directly comparable to GT pixels produced by that function.
+    Fisheye distortion is ignored — the approximation is sufficient for gradient
+    direction during training.
+
+    Args:
+        joints_world (torch.Tensor): Shape [B, ..., 3] — 3D joint positions in world
+            coordinates.
+        T_camera_world (torch.Tensor): Shape [B, 4, 4] — world-to-camera extrinsic
+            matrix for each item in the leading batch dimension.
+        focal_length (torch.Tensor | float): Shape [B] or scalar — focal length f
+            (assumes fx == fy for the spherical fisheye approximation).
+        cx (torch.Tensor | float): Shape [B] or scalar — principal point x.
+        cy (torch.Tensor | float): Shape [B] or scalar — principal point y.
+        image_width (int): Sensor width in pixels used by project_vertices (default 1408).
+
+    Returns:
+        torch.Tensor: Shape [B, ..., 2] — projected [u, v] pixel coordinates.
+    """
+    B = joints_world.shape[0]
+    device = joints_world.device
+    dtype = joints_world.dtype
+    T = T_camera_world.to(device=device, dtype=dtype)       # [B, 4, 4]
+
+    ones = torch.ones(*joints_world.shape[:-1], 1, device=device, dtype=dtype)
+    j_homo = torch.cat([joints_world, ones], dim=-1)        # [B, ..., 4]
+
+    # Flatten middle dims into M so we can use batched matmul
+    leading = j_homo.shape[1:-1]                            # (...) dims tuple
+    j_flat = j_homo.reshape(B, -1, 4)                      # [B, M, 4]
+    # T @ each column vector: T [B,4,4] × j_flat.T [B,4,M] → [B,4,M] → [B,M,4]
+    j_cam = (T @ j_flat.transpose(1, 2)).transpose(1, 2)   # [B, M, 4]
+    j_cam = j_cam[..., :3].reshape(B, *leading, 3)         # [B, ..., 3]
+
+    z = j_cam[..., 2].clamp(min=1e-4)
+
+    # Broadcast per-batch intrinsics over all leading dims
+    n_leading = len(leading)
+    if isinstance(focal_length, torch.Tensor) and focal_length.ndim > 0:
+        f   = focal_length.to(device=device, dtype=dtype).view(B, *([1] * n_leading))
+        cx_ = cx.to(device=device, dtype=dtype).view(B, *([1] * n_leading))
+        cy_ = cy.to(device=device, dtype=dtype).view(B, *([1] * n_leading))
+    else:
+        f, cx_, cy_ = focal_length, cx, cy
+
+    col = f * j_cam[..., 0] / z + cx_
+    row = f * j_cam[..., 1] / z + cy_
+
+    # Match project_vertices: 90° CW rotation (col, row) → (W-1-row, col)
+    u = (image_width - 1) - row
+    v = col
+
+    return torch.stack([u, v], dim=-1)
 
 
 def project_vertices_camera_space(vertices_camera, cam_calib, image_width=1408):
