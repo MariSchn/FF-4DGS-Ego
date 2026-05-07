@@ -57,9 +57,10 @@ from scripts.hand_metrics import (
 )
 
 
-# HaMeR crop constants (ViT-H expects H=256 W=192, ImageNet normalisation)
+# HaMeR crop constants: input must be 256x256; backbone slices x[:,:,:,32:-32]
+# internally to get the 256x192 region that matches the positional embeddings.
 _HAMER_H = 256
-_HAMER_W = 192
+_HAMER_W = 256
 _HAMER_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 _HAMER_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
@@ -83,6 +84,8 @@ def _crop_hand(img_chw: torch.Tensor, bbox_cxcywh: torch.Tensor) -> torch.Tensor
 
     # Square crop (take max side) for a stable aspect ratio
     side = max(bw, bh)
+    if side < 4:  # degenerate bbox — skip
+        return None
     x0 = int(round(cx - side / 2))
     y0 = int(round(cy - side / 2))
     x1 = int(round(cx + side / 2))
@@ -132,6 +135,8 @@ def prepare_hamer_batch(imgs_bschw, hand_bboxes_bs24, hand_valid_bs2, device):
                     imgs_bschw[b, s].cpu(),
                     hand_bboxes_bs24[b, s, h].cpu(),
                 )
+                if crop is None:
+                    continue
                 is_right = (h == 1)
                 # HaMeR expects right hands; mirror left-hand crops
                 if not is_right:
