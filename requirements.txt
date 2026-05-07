@@ -54,3 +54,12 @@ pandas
 # Hand visualization (MANO)
 smplx
 projectaria-tools
+
+# HaMeR baseline (eval_hamer_baseline.py)
+# Cannot be installed via a plain pip URL — detectron2 and xtcocotools must be
+# removed from its setup.py first.  Run once after cloning the repo:
+#
+#   git clone https://github.com/geopavlakos/hamer models/hamer/repo
+#   sed -i '/detectron2/d' models/hamer/repo/setup.py
+#   sed -i '/xtcocotools/d' models/hamer/repo/setup.py
+#   pip install -e models/hamer/repo --no-build-isolation

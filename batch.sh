@@ -11,4 +11,8 @@
 #SBATCH --error=logs/%j.err
 
 source venv/bin/activate
-python3 -m scripts.train_hand_head --config configs/train_hand_head.yaml
+# python3 -m scripts.train_hand_head --config configs/train_hand_head.yaml
+python3 -m scripts.eval_hamer_baseline \
+    --config configs/train_hand_head.yaml \
+    --hamer-ckpt /work/courses/3dv/team25/models/hamer/hamer.ckpt \
+    --limit-clips 20
