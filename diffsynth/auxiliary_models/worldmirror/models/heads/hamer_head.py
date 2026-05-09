@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from torchvision.ops import roi_align
+import torch.nn.functional as F
 
 
 class FeedForward(nn.Module):
@@ -61,9 +62,7 @@ class CrossAttention(nn.Module):
         k, v = self.to_kv(context).chunk(2, dim=-1)
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), [q, k, v])
         attn = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-        attn = attn.softmax(dim=-1)
-        out = torch.matmul(attn, v)
-        out = rearrange(out, "b h n d -> b n (h d)")
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
         return self.to_out(out)
 
 
