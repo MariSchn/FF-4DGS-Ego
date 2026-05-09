@@ -38,9 +38,7 @@ class Attention(nn.Module):
     def forward(self, x):
         qkv = self.to_qkv(x).chunk(3, dim=-1)
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), qkv)
-        attn = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-        attn = attn.softmax(dim=-1)
-        out = torch.matmul(attn, v)
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
         out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
 
@@ -61,8 +59,8 @@ class CrossAttention(nn.Module):
         q = self.to_q(x)
         k, v = self.to_kv(context).chunk(2, dim=-1)
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), [q, k, v])
-        attn = torch.matmul(q, k.transpose(-1, -2)) * self.scale
         out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
 
 

@@ -33,7 +33,7 @@ model:
   hand_crop_size: 8
 
   # Disable other heads
-  enable_cam: false
+  enable_cam: true
   enable_pts: false
   enable_depth: false
   enable_norm: false
