@@ -180,6 +180,11 @@ class HamerManoHead(nn.Module):
         # Fold sequence into batch for per-frame processing
         tokens = tokens.reshape(N, -1, tokens.shape[-1])  # [N, N_patches, C]
 
+        # Per-hand crop tokens after global cross-attention; only populated on
+        # the use_crop path. Exposed in the return dict for downstream modules
+        # (e.g. hand-to-GS feature injection).
+        enhanced_crop_tokens = None
+
         if self.use_crop and hand_bboxes is not None:
             # --- Crop path: ROI Align per hand, then cross-attend ---
             H, W = images.shape[3], images.shape[4]
@@ -216,6 +221,7 @@ class HamerManoHead(nn.Module):
             # Crop tokens (Q) ← full-image tokens (K/V): inject global context
             # into the local crop features.
             context = self.crop_to_global(crop_ctx, context=global_ctx)  # [N*2, crop^2, dim]
+            enhanced_crop_tokens = context  # keep [N*2, crop^2, dim] view for downstream consumers
 
             # Reshape from [N*2, crop^2, dim] → [N, 2*crop^2, dim] so both
             # hands' crop features are concatenated.  This lets the query
@@ -262,4 +268,9 @@ class HamerManoHead(nn.Module):
         hand_params = hand_params.reshape(B, S, -1)  # [B, S, 64]
         confidence = confidence.reshape(B, S, -1)  # [B, S, 1]
 
-        return hand_params, confidence
+        return {
+            "params": hand_params,
+            "conf": confidence,
+            "enhanced_crop_tokens": enhanced_crop_tokens,
+            "crop_size": self.crop_size,
+        }

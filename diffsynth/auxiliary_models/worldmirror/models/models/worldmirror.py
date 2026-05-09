@@ -8,6 +8,7 @@ from .visual_transformer import VisualGeometryTransformer
 from ..heads.camera_head import CameraHead
 from ..heads.dense_head import DPTHead
 from ..heads.hamer_head import HamerManoHead
+from ..heads.hand_to_gs_injection import HandToGSInjection
 from .rasterization import GaussianSplatRenderer
 from ..utils.camera_utils import vector_to_camera_matrices, extrinsics_to_vector
 from ..utils.priors import normalize_depth, normalize_poses
@@ -62,6 +63,7 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         self.use_hand_crop = kwargs.get("use_hand_crop", False)
         self.hand_crop_size = kwargs.get("hand_crop_size", 8)
         self.hamer_head_kwargs = kwargs.get("hamer_head_kwargs", {})
+        self.hand_to_gs_injection_cfg = kwargs.get("hand_to_gs_injection", {})
 
         self.life_span_gamma = life_span_gamma
         self.dynamic_threshold = dynamic_threshold
@@ -225,6 +227,25 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             else:
                 raise ValueError(f"Unknown hand_head_type: {self.hand_head_type}")
 
+        # Optional: inject hamer's enhanced local crop features into the GS branch.
+        # Only meaningful when both heads exist and hamer's use_crop path is on,
+        # so the dict carries enhanced_crop_tokens.
+        if (
+            self.enable_hand
+            and self.enable_gs
+            and self.hand_head_type == "hamer"
+            and self.hand_to_gs_injection_cfg.get("enabled", False)
+        ):
+            cfg = dict(self.hand_to_gs_injection_cfg)
+            cfg.pop("enabled", None)
+            hand_dim = cfg.pop("hand_dim", self.hamer_head_kwargs.get("dim", 1024))
+            gs_feat_dim = cfg.pop("gs_dim", gs_dim // 2)
+            self.hand_to_gs_injection = HandToGSInjection(
+                hand_dim=hand_dim,
+                gs_dim=gs_feat_dim,
+                **cfg,
+            )
+
     def forward(self, views: Dict[str, torch.Tensor], cond_flags: List[int]=[0, 0, 0], is_inference=True, use_motion=True):
         """
         Execute forward pass through the WorldMirror model.
@@ -301,20 +322,22 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             preds["pts3d_conf"] = pts_conf
 
         # tracking hand
+        enhanced_crop_tokens = None
         if self.enable_hand:
             if self.hand_head_type == "hamer":
                 hamer_kwargs = {}
                 if self.use_hand_crop:
                     hamer_kwargs["hand_bboxes"] = views.get("hand_bboxes")
                     hamer_kwargs["hand_valid"] = views.get("hand_valid")
-                hand_params, hand_conf = self.hand_head(
+                hand_out = self.hand_head(
                     token_list,
                     images=imgs,
                     patch_start_idx=patch_start_idx,
                     **hamer_kwargs,
                 )
-                preds["hand_joints"] = hand_params
-                preds["hand_conf"] = hand_conf
+                preds["hand_joints"] = hand_out["params"]
+                preds["hand_conf"] = hand_out["conf"]
+                enhanced_crop_tokens = hand_out.get("enhanced_crop_tokens")
             elif self.hand_head_type == "hand_crop":
                 hand_bboxes = views.get("hand_bboxes", None)
                 hand_valid = views.get("hand_valid", None)
@@ -382,6 +405,20 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             )
             preds["gs_depth"] = gs_depth
             preds["gs_depth_conf"] = gs_depth_conf
+
+            if (
+                getattr(self, "hand_to_gs_injection", None) is not None
+                and self.hand_head_type == "hamer"
+                and enhanced_crop_tokens is not None
+                and views.get("hand_bboxes") is not None
+                and gs_feat.shape[1] == views["hand_bboxes"].shape[1]
+            ):
+                gs_feat = self.hand_to_gs_injection(
+                    enhanced_crop_tokens=enhanced_crop_tokens,
+                    hand_bboxes=views.get("hand_bboxes"),
+                    hand_valid=views.get("hand_valid"),
+                    gs_feat=gs_feat,
+                )
 
 
             # Dynamic GS attributes
