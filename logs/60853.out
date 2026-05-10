@@ -1,0 +1,65 @@
+[hamer-baseline] Loading HaMeR from /work/courses/3dv/team25/models/hamer/hamer.ckpt
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+[eval] Locked val split written to outputs/eval_val_split.json (19 sequences)
+[hamer-baseline] Val sequences: 19
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_476bae57.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_476bae57.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_23fa0ee8.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_23fa0ee8.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_e7458eb3.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Cached hand bboxes -> /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_e7458eb3/hand_data/hand_bboxes_v2_rf1.5_res224x224.pt
+Computed and saved GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_e7458eb3.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_24cb3bf0.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Cached hand bboxes -> /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_24cb3bf0/hand_data/hand_bboxes_v2_rf1.5_res224x224.pt
+Computed and saved GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_24cb3bf0.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_a9d6c83d.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Cached hand bboxes -> /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_a9d6c83d/hand_data/hand_bboxes_v2_rf1.5_res224x224.pt
+Computed and saved GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_a9d6c83d.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_99385ad8.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Cached hand bboxes -> /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_99385ad8/hand_data/hand_bboxes_v2_rf1.5_res224x224.pt
+Computed and saved GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_99385ad8.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_b2bcbe28.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Cached hand bboxes -> /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_b2bcbe28/hand_data/hand_bboxes_v2_rf1.5_res224x224.pt
+Computed and saved GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_b2bcbe28.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_1fdca00e.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Cached hand bboxes -> /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_1fdca00e/hand_data/hand_bboxes_v2_rf1.5_res224x224.pt
+Computed and saved GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_1fdca00e.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_ea91844d.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Cached hand bboxes -> /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_ea91844d/hand_data/hand_bboxes_v2_rf1.5_res224x224.pt
+Computed and saved GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_ea91844d.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_4bf4e21a.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_4bf4e21a.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_f71fc9b1.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Cached hand bboxes -> /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_f71fc9b1/hand_data/hand_bboxes_v2_rf1.5_res224x224.pt
+Computed and saved GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_f71fc9b1.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_9b7a0725.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Cached hand bboxes -> /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_9b7a0725/hand_data/hand_bboxes_v2_rf1.5_res224x224.pt
+Computed and saved GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_9b7a0725.
+[hamer-baseline] Val clips: 5397
+
+[hamer-baseline] Valid hands: 0
+  left: <no valid hands>
+  right: <no valid hands>
+  all: <no valid hands>
+
+[hamer-baseline] Results written to outputs/hamer_baseline.json

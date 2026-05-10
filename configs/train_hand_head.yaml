@@ -12,7 +12,7 @@ data:
   # Step between consecutive clips when sliding over a video (stride=num_frames -> non-overlapping)
   clip_stride: 8
   # Fraction of sequences used for validation (0.0 = no validation; 0.1 = 10% held out)
-  val_split: 0.01
+  val_split: 0.1
   # DataLoader workers for loading video clips
   num_workers: 2
 # ------------------------------------------------------------------
