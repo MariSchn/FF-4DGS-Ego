@@ -1,0 +1,124 @@
+# ------------------------------------------------------------------
+# Ablation #1: Just HaMeR baseline
+#   - ROI crop only; no global feature cross-attention; no decoupled head.
+#   - Closest equivalent to the original HaMeR head within our framework.
+# ------------------------------------------------------------------
+
+# ------------------------------------------------------------------
+# Data
+# ------------------------------------------------------------------
+data:
+  data_root: "/home/user/dmonopoli/data/hot3d_aria/sequences"
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.01
+  num_workers: 2
+
+# ------------------------------------------------------------------
+# Model
+# ------------------------------------------------------------------
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  freeze_backbone: true
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+
+  enable_cam: false
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: false
+  enable_hand_gs_refiner: false
+
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+    use_gradient_checkpoint: true
+    use_global_xattn: false
+    use_decoupled_head: false
+
+  hand_gs_refiner_kwargs:
+    heads: 4
+    dim_head: 64
+    mlp_dim: 256
+    dropout: 0.0
+    max_offset: 0.05
+
+# ------------------------------------------------------------------
+# Loss weights
+# ------------------------------------------------------------------
+loss_weights:
+  kp3d:          0.05
+  kp2d:          0.05
+  global_orient: 0.01
+  hand_pose:     0.01
+  betas:         0.01
+  transl:        0.1
+  gs_l1:         0.0
+  gs_lpips:      0.0
+
+# ------------------------------------------------------------------
+# Training
+# ------------------------------------------------------------------
+training:
+  lr: 1e-4
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 32
+  grad_accum_steps: 1
+  log_every: 100
+  val_every: 200
+  save_every: 1000
+  seed: 42
+  output_dir: "checkpoints/abl_baseline"
+  grad_clip_norm: 1.0
+
+  consistency_loss:
+    enabled: false
+    weight: 0.0005
+    warmup_steps: 3000
+    mano_folder: "models/MANO"
+    target: "vertices"
+    mask_threshold: 0.5
+    max_samples_per_frame: 128
+
+# ------------------------------------------------------------------
+# Visualization
+# ------------------------------------------------------------------
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 4
+
+# ------------------------------------------------------------------
+# Hand Crop
+# ------------------------------------------------------------------
+hand_crop:
+  rescale_factor: 1.5
+
+# ------------------------------------------------------------------
+# Debug
+# ------------------------------------------------------------------
+debug:
+  enabled: false
+  max_sequences: 5
+  single_frame: false
+
+# ------------------------------------------------------------------
+# Weights & Biases
+# ------------------------------------------------------------------
+wandb:
+  enabled: true
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "Ablation: Just HaMeR"
+  tags: ["ablation", "baseline", "no-xattn", "no-decoupled"]
+  notes: "Ablation 1/3 — vanilla HaMeR head: ROI crop only, no crop_to_global cross-attention, single combined Linear(dim->32) output (no local/global split)."

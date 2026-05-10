@@ -67,6 +67,8 @@ loss_weights:
   hand_pose:     0.01    # bumped 10x — MSE on 15 PCA coeffs
   betas:         0.01    # bumped 20x — hand-size was converging too slowly
   transl:        0.1     # 100x bump — meter-scale; needs real weight for depth
+  gs_l1:         0.1     # GS reconstruction L1 — drives the GS branch
+  gs_lpips:      0.1     # GS reconstruction LPIPS — drives the GS branch
 
 # ------------------------------------------------------------------
 # Training
