@@ -79,8 +79,8 @@ training:
   epochs: 1
   batch_size: 1
   grad_accum_steps: 32    # Effective batch = batch_size * grad_accum_steps
-  log_every: 500         # Steps between train loss logs (console + W&B)
-  val_every: 500         # Steps between validation runs
+  log_every: 50
+  val_every: 200
   save_every: 1000       # Steps between checkpoint saves
   seed: 42               # Random seed
   output_dir: "checkpoints/default"
@@ -117,6 +117,6 @@ wandb:
   enabled: true
   project: "hand-head-training"
   entity: 3DV-Project
-  run_name: "Ablation: hand to gs injection"
+  run_name: "Ablation: hand to gs injection (v2)"
   tags: []
   notes: null

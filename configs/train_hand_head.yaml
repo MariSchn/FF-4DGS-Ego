@@ -60,10 +60,11 @@ model:
 loss_weights:
   kp3d:          0.05
   kp2d:          0.05    # bumped from HaMeR's 0.01 — reinforces projection
-  global_orient: 0.01    # bumped 10x — rotmat MSE on a single 3x3
-  hand_pose:     0.01    # bumped 10x — MSE on 15 PCA coeffs
-  betas:         0.01    # bumped 20x — hand-size was converging too slowly
-  transl:        0.1     # 100x bump — meter-scale; needs real weight for depth
+  # Rescaled x32 for the sum→mean fix in ParameterLoss (was tuned at bs=32).
+  global_orient: 0.32    # was 0.01 x 32
+  hand_pose:     0.32    # was 0.01 x 32
+  betas:         0.32    # was 0.01 x 32
+  transl:        3.2     # was 0.1 x 32
   gs_l1:         0.0     # GS reconstruction L1 — off when enable_gs=false
   gs_lpips:      0.0     # GS reconstruction LPIPS — off when enable_gs=false
 
