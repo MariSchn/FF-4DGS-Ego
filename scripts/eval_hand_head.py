@@ -134,8 +134,9 @@ def build_model(cfg, device):
 
 
 def load_hand_head(model, ckpt_path, device):
-    # train_hand_head.py saves model.hand_head.state_dict() directly (a flat dict).
     sd = torch.load(ckpt_path, map_location=device)
+    if "hand_head" in sd:
+        sd = sd["hand_head"]
     model.hand_head.load_state_dict(sd, strict=True)
 
 
