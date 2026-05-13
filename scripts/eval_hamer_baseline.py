@@ -38,10 +38,11 @@ import argparse
 import json
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
-import torch.nn.functional as F
-import torchvision.transforms.functional as TVF
 import yaml
+from skimage.filters import gaussian as skimage_gaussian
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -57,70 +58,97 @@ from scripts.hand_metrics import (
 )
 
 
-# HaMeR crop constants: input must be 256x256; backbone slices x[:,:,:,32:-32]
-# internally to get the 256x192 region that matches the positional embeddings.
-_HAMER_H = 256
-_HAMER_W = 256
-_HAMER_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-_HAMER_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-
-
 # ------------------------------------------------------------------
-# Image pre-processing
+# Image pre-processing — mirrors ViTDetDataset.__getitem__ exactly
 # ------------------------------------------------------------------
 
-def _crop_hand(img_chw: torch.Tensor, bbox_cxcywh: torch.Tensor) -> torch.Tensor:
-    """Crop a single hand region and resize to HaMeR input size.
+def _crop_hand(img_chw: torch.Tensor, bbox_cxcywh: torch.Tensor,
+               img_size: int, bbox_shape, mean_255: np.ndarray,
+               std_255: np.ndarray) -> torch.Tensor:
+    """Crop a single hand region using HaMeR's ViTDetDataset pipeline.
+
+    Matches ViTDetDataset.__getitem__ (models/hamer/hamer/datasets/vitdet_dataset.py):
+      - expand_to_aspect_ratio with BBOX_SHAPE from model cfg
+      - skimage Gaussian anti-aliasing before downsampling
+      - cv2.warpAffine via generate_image_patch_cv2 (no integer rounding artefacts)
+      - uint8-scale ImageNet normalisation (mean/std in [0, 255] range)
 
     Args:
-        img_chw:    (3, H, W) float tensor in [0, 1].
-        bbox_cxcywh: (4,) tensor – cx, cy, w, h in pixel coords.
+        img_chw:      (3, H, W) float tensor in [0, 1].
+        bbox_cxcywh:  (4,) tensor — cx, cy, w, h in pixel coords.
+        img_size:     output crop side length (model_cfg.MODEL.IMAGE_SIZE, usually 256).
+        bbox_shape:   model_cfg.MODEL.BBOX_SHAPE or None — passed to expand_to_aspect_ratio.
+        mean_255:     (3,) numpy array — 255 * IMAGE_MEAN, e.g. 255*[0.485,0.456,0.406].
+        std_255:      (3,) numpy array — 255 * IMAGE_STD,  e.g. 255*[0.229,0.224,0.225].
 
     Returns:
-        (3, _HAMER_H, _HAMER_W) normalised tensor ready for HaMeR.
+        (3, img_size, img_size) float tensor normalised for HaMeR, or None for degenerate boxes.
     """
-    _, H, W = img_chw.shape
+    from hamer.datasets.utils import generate_image_patch_cv2, expand_to_aspect_ratio
+
     cx, cy, bw, bh = bbox_cxcywh.tolist()
-
-    # Square crop (take max side) for a stable aspect ratio
-    side = max(bw, bh)
-    if side < 4:  # degenerate bbox — skip
+    if max(bw, bh) < 4:
         return None
-    x0 = int(round(cx - side / 2))
-    y0 = int(round(cy - side / 2))
-    x1 = int(round(cx + side / 2))
-    y1 = int(round(cy + side / 2))
 
-    # Pad if the bbox extends beyond image borders
-    pad_left   = max(0, -x0)
-    pad_top    = max(0, -y0)
-    pad_right  = max(0, x1 - W)
-    pad_bottom = max(0, y1 - H)
-    if pad_left or pad_top or pad_right or pad_bottom:
-        img_chw = F.pad(img_chw, (pad_left, pad_right, pad_top, pad_bottom))
-        x0 += pad_left;  x1 += pad_left
-        y0 += pad_top;   y1 += pad_top
+    # Float [0,1] CHW -> uint8 HWC RGB numpy (ViTDetDataset receives uint8 RGB)
+    img_np = (img_chw.permute(1, 2, 0).numpy() * 255).clip(0, 255).astype(np.uint8)
 
-    crop = img_chw[:, y0:y1, x0:x1]
-    crop = F.interpolate(
-        crop.unsqueeze(0), size=(_HAMER_H, _HAMER_W), mode="bilinear", align_corners=False
-    ).squeeze(0)
+    # Compute bbox_size the same way ViTDetDataset does.
+    # ViTDetDataset takes [x0,y0,x1,y1] boxes and sets:
+    #   scale = rescale_factor * (br - tl) / 200   (shape [2])
+    #   bbox_size = expand_to_aspect_ratio(scale*200, BBOX_SHAPE).max()
+    # Our bboxes are already rescaled by the dataset, so rescale_factor=1 here.
+    scale_xy = np.array([bw, bh], dtype=np.float32) / 200.0
+    bbox_size = float(expand_to_aspect_ratio(scale_xy * 200.0, target_aspect_ratio=bbox_shape).max())
 
-    mean = _HAMER_MEAN.to(crop.device)
-    std  = _HAMER_STD.to(crop.device)
-    return (crop - mean) / std
+    assert bbox_size >= 4, f"bbox_size={bbox_size:.1f} is unexpectedly small after expand_to_aspect_ratio"
+
+    # Gaussian anti-aliasing (identical formula to ViTDetDataset)
+    downsampling_factor = (bbox_size / img_size) / 2.0
+    if downsampling_factor > 1.1:
+        sigma = (downsampling_factor - 1) / 2
+        # Uncomment to debug: print(f"[crop] Gaussian blur sigma={sigma:.2f} (bbox={bbox_size:.0f}px -> {img_size}px)")
+        img_np = skimage_gaussian(
+            img_np, sigma=sigma, channel_axis=2, preserve_range=True,
+        ).astype(np.uint8)
+
+    # Affine warp crop — no flip (handled in prepare_hamer_batch), no augmentation
+    img_patch_cv, _ = generate_image_patch_cv2(
+        img_np, cx, cy, bbox_size, bbox_size,
+        img_size, img_size,
+        do_flip=False, scale=1.0, rot=0,
+        border_mode=cv2.BORDER_CONSTANT,
+    )
+
+    # HWC uint8 -> CHW float32, normalise with uint8-scale mean/std
+    img_patch = img_patch_cv.astype(np.float32).transpose(2, 0, 1)  # CHW
+    for c in range(3):
+        img_patch[c] = (img_patch[c] - mean_255[c]) / std_255[c]
+
+    result = torch.from_numpy(img_patch)
+    assert result.shape == (3, img_size, img_size), (
+        f"_crop_hand output shape {tuple(result.shape)} != expected (3, {img_size}, {img_size})"
+    )
+    assert not torch.isnan(result).any(), "_crop_hand produced NaN values — check mean/std or image input"
+
+    return result
 
 
-def prepare_hamer_batch(imgs_bschw, hand_bboxes_bs24, hand_valid_bs2, device):
+def prepare_hamer_batch(imgs_bschw, hand_bboxes_bs24, hand_valid_bs2, device,
+                        img_size: int, bbox_shape, mean_255: np.ndarray, std_255: np.ndarray):
     """Extract all valid hand crops from a batch and build a HaMeR input dict.
 
     Args:
         imgs_bschw:      (B, S, 3, H, W) float [0,1].
         hand_bboxes_bs24:(B, S, 2, 4)   cx/cy/w/h pixel coords.
         hand_valid_bs2:  (B, S, 2)      bool.
+        img_size:        HaMeR input resolution (from model_cfg.MODEL.IMAGE_SIZE).
+        bbox_shape:      model_cfg.MODEL.BBOX_SHAPE or None.
+        mean_255:        (3,) uint8-scale ImageNet mean.
+        std_255:         (3,) uint8-scale ImageNet std.
 
     Returns:
-        crops:  (N, 3, _HAMER_H, _HAMER_W) on `device`.
+        crops:  (N, 3, img_size, img_size) on `device`.
         rights: (N,) bool  — True if right hand.
         index:  list of (b, s, h) tuples, one per crop (N entries).
     """
@@ -134,11 +162,13 @@ def prepare_hamer_batch(imgs_bschw, hand_bboxes_bs24, hand_valid_bs2, device):
                 crop = _crop_hand(
                     imgs_bschw[b, s].cpu(),
                     hand_bboxes_bs24[b, s, h].cpu(),
+                    img_size=img_size, bbox_shape=bbox_shape,
+                    mean_255=mean_255, std_255=std_255,
                 )
                 if crop is None:
                     continue
                 is_right = (h == 1)
-                # HaMeR expects right hands; mirror left-hand crops
+                # HaMeR expects right hands; mirror left-hand crops horizontally
                 if not is_right:
                     crop = torch.flip(crop, dims=[-1])
                 crops.append(crop)
@@ -178,11 +208,19 @@ def _wrist_relative(joints_n163, verts_n7783):
 # ------------------------------------------------------------------
 
 @torch.no_grad()
-def run_hamer_inference(hamer_model, val_loader, mano_model, device, pelvis_ind=0):
+def run_hamer_inference(hamer_model, model_cfg, val_loader, mano_model, device, pelvis_ind=0):
     """Run original HaMeR on every valid hand crop in the val set.
 
     Returns a list of per-batch chunk dicts compatible with metrics_from_chunks.
     """
+    # Crop params derived from model_cfg — mirrors ViTDetDataset.__init__
+    img_size   = model_cfg.MODEL.IMAGE_SIZE
+    bbox_shape = model_cfg.MODEL.get("BBOX_SHAPE", None)
+    mean_255   = np.array(model_cfg.MODEL.IMAGE_MEAN, dtype=np.float32) * 255.0
+    std_255    = np.array(model_cfg.MODEL.IMAGE_STD,  dtype=np.float32) * 255.0
+    print(f"[hamer-baseline] Crop pipeline: img_size={img_size}, bbox_shape={bbox_shape}, "
+          f"mean={mean_255.tolist()}, std={std_255.tolist()}")
+
     NUM_MANO_JOINTS = 16
     assert 0 <= pelvis_ind < NUM_MANO_JOINTS, (
         f"pelvis_ind={pelvis_ind} is out of range for {NUM_MANO_JOINTS} MANO joints. "
@@ -215,7 +253,11 @@ def run_hamer_inference(hamer_model, val_loader, mano_model, device, pelvis_ind=
         # (B, S, 2, 16, 3) / (B, S, 2, 778, 3)
 
         # --- HaMeR predictions ---
-        crops, rights, index = prepare_hamer_batch(imgs, hb, hv, device)
+        crops, rights, index = prepare_hamer_batch(
+            imgs, hb, hv, device,
+            img_size=img_size, bbox_shape=bbox_shape,
+            mean_255=mean_255, std_255=std_255,
+        )
 
         # pred_j_map[b][s][h] = (16, 3) joints tensor; None if invalid
         pred_j_map = [[[None] * NUM_HANDS for _ in range(S)] for _ in range(B)]
@@ -406,7 +448,7 @@ def main():
     print(f"[hamer-baseline] Val clips: {len(val_set)}")
 
     # --- Inference ---
-    chunks = run_hamer_inference(hamer_model, val_loader, mano_model, args.device, pelvis_ind=pelvis_ind)
+    chunks = run_hamer_inference(hamer_model, model_cfg, val_loader, mano_model, args.device, pelvis_ind=pelvis_ind)
     result = metrics_from_chunks(chunks)
 
     # --- Print ---
@@ -432,7 +474,7 @@ def main():
         "val_split":        str(args.val_list),
         "num_clips":        len(val_set),
         "num_valid_hands":  result["num_valid_hands"],
-        "note":             "wrist-relative MPJPE/MPVPE; PA metrics are Procrustes-aligned",
+        "note":             f"pelvis_ind={pelvis_ind}-relative MPJPE/MPVPE; PA metrics are Procrustes-aligned",
         "metrics":          {k: result[k] for k in ("left", "right", "all")},
     }
     with open(out_path, "w") as f:
