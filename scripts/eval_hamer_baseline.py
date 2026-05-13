@@ -35,6 +35,7 @@ Usage
 """
 
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 
@@ -45,6 +46,15 @@ import yaml
 from skimage.filters import gaussian as skimage_gaussian
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+# Import HaMeR dataset utils directly from the source file to avoid the
+# package __init__.py, which pulls in `webdataset` (not installed here).
+_hamer_utils_path = Path(__file__).parent.parent / "models/hamer/hamer/datasets/utils.py"
+_spec = importlib.util.spec_from_file_location("hamer_dataset_utils", _hamer_utils_path)
+_hamer_utils = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_hamer_utils)
+_generate_image_patch_cv2 = _hamer_utils.generate_image_patch_cv2
+_expand_to_aspect_ratio   = _hamer_utils.expand_to_aspect_ratio
 
 from scripts.eval_hand_head import resolve_val_split
 from scripts.train_hand_head import HOT3DHandDataset, discover_sequences
@@ -84,8 +94,6 @@ def _crop_hand(img_chw: torch.Tensor, bbox_cxcywh: torch.Tensor,
     Returns:
         (3, img_size, img_size) float tensor normalised for HaMeR, or None for degenerate boxes.
     """
-    from hamer.datasets.utils import generate_image_patch_cv2, expand_to_aspect_ratio
-
     cx, cy, bw, bh = bbox_cxcywh.tolist()
     if max(bw, bh) < 4:
         return None
@@ -99,7 +107,7 @@ def _crop_hand(img_chw: torch.Tensor, bbox_cxcywh: torch.Tensor,
     #   bbox_size = expand_to_aspect_ratio(scale*200, BBOX_SHAPE).max()
     # Our bboxes are already rescaled by the dataset, so rescale_factor=1 here.
     scale_xy = np.array([bw, bh], dtype=np.float32) / 200.0
-    bbox_size = float(expand_to_aspect_ratio(scale_xy * 200.0, target_aspect_ratio=bbox_shape).max())
+    bbox_size = float(_expand_to_aspect_ratio(scale_xy * 200.0, target_aspect_ratio=bbox_shape).max())
 
     assert bbox_size >= 4, f"bbox_size={bbox_size:.1f} is unexpectedly small after expand_to_aspect_ratio"
 
@@ -113,7 +121,7 @@ def _crop_hand(img_chw: torch.Tensor, bbox_cxcywh: torch.Tensor,
         ).astype(np.uint8)
 
     # Affine warp crop — no flip (handled in prepare_hamer_batch), no augmentation
-    img_patch_cv, _ = generate_image_patch_cv2(
+    img_patch_cv, _ = _generate_image_patch_cv2(
         img_np, cx, cy, bbox_size, bbox_size,
         img_size, img_size,
         do_flip=False, scale=1.0, rot=0,
@@ -154,14 +162,41 @@ def prepare_hamer_batch(imgs_bschw, hand_bboxes_bs24, hand_valid_bs2, device,
     """
     crops, rights, index = [], [], []
     B, S = imgs_bschw.shape[:2]
+    H_img, W_img = imgs_bschw.shape[-2], imgs_bschw.shape[-1]
+    _logged_first_bbox = False
     for b in range(B):
         for s in range(S):
             for h in range(NUM_HANDS):
                 if not hand_valid_bs2[b, s, h]:
                     continue
+                # Dataset stores bboxes as normalised [x1, y1, x2, y2]; convert
+                # to pixel [cx, cy, w, h] that _crop_hand expects.
+                bbox_norm = hand_bboxes_bs24[b, s, h].cpu()
+                x1, y1, x2, y2 = bbox_norm.tolist()
+                cx = (x1 + x2) / 2 * W_img
+                cy = (y1 + y2) / 2 * H_img
+                bw = (x2 - x1) * W_img
+                bh = (y2 - y1) * H_img
+                bbox_pixel = torch.tensor([cx, cy, bw, bh])
+
+                if not _logged_first_bbox:
+                    print(
+                        f"[prepare_hamer_batch] First valid bbox — "
+                        f"norm x1y1x2y2=[{x1:.3f},{y1:.3f},{x2:.3f},{y2:.3f}] → "
+                        f"pixel cx/cy/w/h=[{cx:.1f},{cy:.1f},{bw:.1f},{bh:.1f}] "
+                        f"(img {W_img}×{H_img})"
+                    )
+                    assert bw > 4 and bh > 4, (
+                        f"Converted bbox is degenerate: w={bw:.2f}, h={bh:.2f}. "
+                        f"Raw normalised bbox was [{x1:.4f},{y1:.4f},{x2:.4f},{y2:.4f}]. "
+                        f"If these look like pixel coords instead of [0,1] values the "
+                        f"conversion in prepare_hamer_batch is wrong."
+                    )
+                    _logged_first_bbox = True
+
                 crop = _crop_hand(
                     imgs_bschw[b, s].cpu(),
-                    hand_bboxes_bs24[b, s, h].cpu(),
+                    bbox_pixel,
                     img_size=img_size, bbox_shape=bbox_shape,
                     mean_255=mean_255, std_255=std_255,
                 )
@@ -232,6 +267,9 @@ def run_hamer_inference(hamer_model, model_cfg, val_loader, mano_model, device, 
     _root_check_done = False   # verify root-zeroing on first valid batch
     total_valid = 0
     total_hands = 0
+    _batch_idx = 0
+    _first_hv_batch_done = False  # have we seen at least one batch with hand_valid=True?
+    n_batches = len(val_loader)
 
     for batch in tqdm(val_loader, desc="hamer-baseline"):
         imgs       = batch["img"].to(device)          # (B, S, 3, H, W)
@@ -324,6 +362,39 @@ def run_hamer_inference(hamer_model, model_cfg, val_loader, mano_model, device, 
                     if valid:
                         total_valid += 1
                     total_hands += 1
+
+        _batch_idx += 1
+        batch_hv_count = int(hv.sum().item())
+
+        # After the first batch that contains any hand_valid=True entries,
+        # assert that at least one crop succeeded.  If this fires, the bbox
+        # conversion pipeline is broken (e.g. normalised coords passed where
+        # pixel coords are expected — the bug that caused 0/172704 valid hands).
+        if not _first_hv_batch_done and batch_hv_count > 0:
+            batch_valid = sum(valid_list)
+            assert batch_valid > 0, (
+                f"First batch with hand_valid=True ({batch_hv_count} flags set) "
+                f"produced 0 successful crops.\n"
+                f"  This almost certainly means the bbox format is wrong.\n"
+                f"  hand_bboxes must be normalised [x1,y1,x2,y2] in [0,1]; "
+                f"prepare_hamer_batch converts them to pixel cx/cy/w/h.\n"
+                f"  Check that the conversion W={imgs.shape[-1]}, H={imgs.shape[-2]} "
+                f"is applied before _crop_hand."
+            )
+            print(
+                f"[hamer-baseline] Sanity check passed on batch 0 with hand_valid: "
+                f"{batch_valid}/{batch_hv_count} crops succeeded."
+            )
+            _first_hv_batch_done = True
+
+        # Mid-run sanity: after ~5% of batches, warn loudly if still 0 valid.
+        if _batch_idx == max(1, n_batches // 20) and total_valid == 0:
+            raise RuntimeError(
+                f"[hamer-baseline] After {_batch_idx}/{n_batches} batches, "
+                f"total_valid=0 (total_hands={total_hands}).\n"
+                f"  Aborting early — re-check bbox format and hand_valid flags.\n"
+                f"  See prepare_hamer_batch for the normalised→pixel conversion."
+            )
 
         # Verify root joint is at the origin after subtraction (first valid batch only)
         if not _root_check_done and any(valid_list):
