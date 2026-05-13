@@ -178,13 +178,22 @@ def _wrist_relative(joints_n163, verts_n7783):
 # ------------------------------------------------------------------
 
 @torch.no_grad()
-def run_hamer_inference(hamer_model, val_loader, mano_model, device):
+def run_hamer_inference(hamer_model, val_loader, mano_model, device, pelvis_ind=0):
     """Run original HaMeR on every valid hand crop in the val set.
 
     Returns a list of per-batch chunk dicts compatible with metrics_from_chunks.
     """
+    NUM_MANO_JOINTS = 16
+    assert 0 <= pelvis_ind < NUM_MANO_JOINTS, (
+        f"pelvis_ind={pelvis_ind} is out of range for {NUM_MANO_JOINTS} MANO joints. "
+        f"Check model_cfg.EXTRA.PELVIS_IND."
+    )
+
     hamer_model.eval()
     chunks = []
+    _root_check_done = False   # verify root-zeroing on first valid batch
+    total_valid = 0
+    total_hands = 0
 
     for batch in tqdm(val_loader, desc="hamer-baseline"):
         imgs       = batch["img"].to(device)          # (B, S, 3, H, W)
@@ -255,20 +264,44 @@ def run_hamer_inference(hamer_model, val_loader, mano_model, device):
                         pj = torch.zeros_like(gj)
                         pv = torch.zeros_like(gv)
 
-                    # Make wrist-relative so MPJPE is not inflated by the
-                    # global translation difference between weak-perspective
-                    # HaMeR output and camera-space GT.
-                    wrist_p = pj[0:1]
-                    wrist_g = gj[0:1]
-                    pj = pj - wrist_p
-                    pv = pv - wrist_p
-                    gj = gj - wrist_g
-                    gv = gv - wrist_g
+                    # Make pelvis-relative (pelvis_ind from model_cfg.EXTRA.PELVIS_IND)
+                    # so MPJPE is not inflated by the global translation difference
+                    # between weak-perspective HaMeR output and camera-space GT.
+                    root_p = pj[pelvis_ind:pelvis_ind + 1]
+                    root_g = gj[pelvis_ind:pelvis_ind + 1]
+                    pj = pj - root_p
+                    pv = pv - root_p
+                    gj = gj - root_g
+                    gv = gv - root_g
 
                     pred_j_list.append(pj)
                     pred_v_list.append(pv)
                     gt_j_list.append(gj)
                     gt_v_list.append(gv)
+
+                    if valid:
+                        total_valid += 1
+                    total_hands += 1
+
+        # Verify root joint is at the origin after subtraction (first valid batch only)
+        if not _root_check_done and any(valid_list):
+            stacked_pj = torch.stack(pred_j_list)   # (N, 16, 3)
+            stacked_gj = torch.stack(gt_j_list)
+            valid_mask = torch.tensor(valid_list)
+            if valid_mask.any():
+                max_pred_root = stacked_pj[valid_mask, pelvis_ind, :].abs().max().item()
+                max_gt_root   = stacked_gj[valid_mask, pelvis_ind, :].abs().max().item()
+                assert max_pred_root < 1e-5, (
+                    f"Pred root joint not zeroed after subtraction (max={max_pred_root:.2e}). "
+                    f"pelvis_ind={pelvis_ind} may be wrong."
+                )
+                assert max_gt_root < 1e-5, (
+                    f"GT root joint not zeroed after subtraction (max={max_gt_root:.2e}). "
+                    f"pelvis_ind={pelvis_ind} may be wrong."
+                )
+                print(f"[hamer-baseline] Root-zeroing check passed (pelvis_ind={pelvis_ind}, "
+                      f"max residual pred={max_pred_root:.2e}, gt={max_gt_root:.2e})")
+                _root_check_done = True
 
         chunks.append({
             "pred_j": torch.stack(pred_j_list),
@@ -278,6 +311,9 @@ def run_hamer_inference(hamer_model, val_loader, mano_model, device):
             "side":   torch.tensor(side_list, dtype=torch.long),
             "valid":  torch.tensor(valid_list, dtype=torch.bool),
         })
+
+    valid_pct = 100.0 * total_valid / total_hands if total_hands > 0 else 0.0
+    print(f"[hamer-baseline] Valid hands: {total_valid}/{total_hands} ({valid_pct:.1f}%)")
 
     return chunks
 
@@ -322,7 +358,9 @@ def main():
         )
 
     print(f"[hamer-baseline] Loading HaMeR from {ckpt_path}")
-    hamer_model, _hamer_cfg = load_hamer(str(ckpt_path))
+    hamer_model, model_cfg = load_hamer(str(ckpt_path))
+    pelvis_ind = model_cfg.EXTRA.PELVIS_IND
+    print(f"[hamer-baseline] Using pelvis_ind={pelvis_ind} for alignment")
     hamer_model = hamer_model.to(args.device)
     hamer_model.eval()
 
@@ -368,7 +406,7 @@ def main():
     print(f"[hamer-baseline] Val clips: {len(val_set)}")
 
     # --- Inference ---
-    chunks = run_hamer_inference(hamer_model, val_loader, mano_model, args.device)
+    chunks = run_hamer_inference(hamer_model, val_loader, mano_model, args.device, pelvis_ind=pelvis_ind)
     result = metrics_from_chunks(chunks)
 
     # --- Print ---
