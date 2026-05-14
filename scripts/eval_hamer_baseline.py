@@ -98,6 +98,11 @@ def _crop_hand(img_chw: torch.Tensor, bbox_cxcywh: torch.Tensor,
     if max(bw, bh) < 4:
         return None
 
+    # DEBUG — remove after confirming the fix
+    if not getattr(_crop_hand, "_logged", False):
+        print(f"[_crop_hand DEBUG] cx={cx:.1f} cy={cy:.1f} bw={bw:.1f} bh={bh:.1f}")
+        _crop_hand._logged = True
+
     # Float [0,1] CHW -> uint8 HWC RGB numpy (ViTDetDataset receives uint8 RGB)
     img_np = (img_chw.permute(1, 2, 0).numpy() * 255).clip(0, 255).astype(np.uint8)
 
@@ -138,6 +143,12 @@ def _crop_hand(img_chw: torch.Tensor, bbox_cxcywh: torch.Tensor,
         f"_crop_hand output shape {tuple(result.shape)} != expected (3, {img_size}, {img_size})"
     )
     assert not torch.isnan(result).any(), "_crop_hand produced NaN values — check mean/std or image input"
+
+    # DEBUG — remove after confirming the fix
+    if not getattr(_crop_hand, "_logged_out", False):
+        print(f"[_crop_hand DEBUG] crop succeeded → shape={tuple(result.shape)} "
+              f"min={result.min():.2f} max={result.max():.2f}")
+        _crop_hand._logged_out = True
 
     return result
 
@@ -186,11 +197,13 @@ def prepare_hamer_batch(imgs_bschw, hand_bboxes_bs24, hand_valid_bs2, device,
                         f"pixel cx/cy/w/h=[{cx:.1f},{cy:.1f},{bw:.1f},{bh:.1f}] "
                         f"(img {W_img}×{H_img})"
                     )
-                    assert bw > 4 and bh > 4, (
-                        f"Converted bbox is degenerate: w={bw:.2f}, h={bh:.2f}. "
-                        f"Raw normalised bbox was [{x1:.4f},{y1:.4f},{x2:.4f},{y2:.4f}]. "
-                        f"If these look like pixel coords instead of [0,1] values the "
-                        f"conversion in prepare_hamer_batch is wrong."
+                    # Check format, not size — _crop_hand handles small/degenerate
+                    # boxes by returning None. What we want to catch is the bug where
+                    # raw pixel coords are passed instead of normalised [0,1] values.
+                    assert max(x1, y1, x2, y2) <= 1.0 + 1e-3, (
+                        f"Raw bbox values [{x1:.4f},{y1:.4f},{x2:.4f},{y2:.4f}] look like "
+                        f"pixel coords, not normalised [0,1]. The dataset must return "
+                        f"normalised bboxes; check _compute_projected_bboxes."
                     )
                     _logged_first_bbox = True
 
