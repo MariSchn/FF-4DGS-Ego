@@ -15,4 +15,5 @@ source venv/bin/activate
 python3 -m scripts.eval_hamer_baseline \
     --config configs/train_hand_head.yaml \
     --hamer-ckpt /work/courses/3dv/team25/models/hamer/hamer.ckpt \
-    # --limit-clips 20
+    --num-workers 2 \
+#     --limit-clips 20
