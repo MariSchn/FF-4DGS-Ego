@@ -317,12 +317,24 @@ def run_hamer_inference(hamer_model, model_cfg, val_loader, mano_model, device, 
         if crops is not None and len(crops) > 0:
             hamer_out = hamer_model({"img": crops, "right": rights})
 
-            # HaMeR output keys (adjust if the installed version differs):
-            #   pred_keypoints_3d : (N, 21, 3)  – MANO joints in local frame
-            #   pred_vertices     : (N, 778, 3) – mesh vertices
-            # The first 16 rows of pred_keypoints_3d are the MANO joints.
-            raw_joints = hamer_out["pred_keypoints_3d"][:, :16, :]  # (N, 16, 3)
-            raw_verts  = hamer_out["pred_vertices"]                  # (N, 778, 3)
+            # HaMeR's MANO.forward re-orders joints into OpenPose convention
+            # (see models/hamer/hamer/models/mano_wrapper.py:21,35) via:
+            #   mano_to_openpose = [0, 13, 14, 15, 16, 1, 2, 3, 17, 4, 5, 6,
+            #                       18, 10, 11, 12, 19, 7, 8, 9, 20]
+            # So pred_keypoints_3d[:, :16] is NOT MANO-order — it's the first
+            # 16 entries of OpenPose-order, which contains fingertip vertices
+            # at positions 4, 8, 12 and misorders the finger joints. Our GT
+            # (smplx MANO via _layer_joints_and_vertices) is in plain MANO
+            # order, so taking [:, :16] gives a permutation mismatch that
+            # blows up PA-MPJPE / AUC_J (PA-MPVPE / AUC_V stay correct because
+            # vertices share the same template). Recover the original MANO
+            # order with the inverse permutation:
+            _openpose_to_mano = torch.tensor(
+                [0, 5, 6, 7, 9, 10, 11, 17, 18, 19, 13, 14, 15, 1, 2, 3],
+                device=hamer_out["pred_keypoints_3d"].device,
+            )
+            raw_joints = hamer_out["pred_keypoints_3d"][:, _openpose_to_mano, :]  # (N, 16, 3)
+            raw_verts  = hamer_out["pred_vertices"]                                # (N, 778, 3)
 
             for crop_idx, (b, s, h) in enumerate(index):
                 j = raw_joints[crop_idx]   # (16, 3)
@@ -357,16 +369,17 @@ def run_hamer_inference(hamer_model, model_cfg, val_loader, mano_model, device, 
                         pj = torch.zeros_like(gj)
                         pv = torch.zeros_like(gv)
 
-                    # Make pelvis-relative (pelvis_ind from model_cfg.EXTRA.PELVIS_IND)
-                    # so MPJPE is not inflated by the global translation difference
-                    # between weak-perspective HaMeR output and camera-space GT.
-                    root_p = pj[pelvis_ind:pelvis_ind + 1]
-                    root_g = gj[pelvis_ind:pelvis_ind + 1]
-                    pj = pj - root_p
-                    pv = pv - root_p
-                    gj = gj - root_g
-                    gv = gv - root_g
-
+                    # NOTE: we deliberately do NOT subtract the root joint here.
+                    # train_hand_head.py's validation logs absolute MPJPE/MPVPE
+                    # under hand_metrics/* (no root subtraction — see
+                    # scripts/hand_metrics.py:99-120). To make this baseline
+                    # comparable on wandb under the same key family, we use the
+                    # same absolute convention. HaMeR's pred_keypoints_3d is in
+                    # MANO local frame (wrist near origin), so absolute MPJPE
+                    # will reflect both the missing global position AND the
+                    # frame-mismatch rotation — typically several hundred mm.
+                    # PA-MPJPE / PA-MPVPE are translation+rotation invariant
+                    # and remain the meaningful pose-quality readout.
                     pred_j_list.append(pj)
                     pred_v_list.append(pv)
                     gt_j_list.append(gj)
@@ -409,24 +422,24 @@ def run_hamer_inference(hamer_model, model_cfg, val_loader, mano_model, device, 
                 f"  See prepare_hamer_batch for the normalised→pixel conversion."
             )
 
-        # Verify root joint is at the origin after subtraction (first valid batch only)
+        # Sanity-print the frame-mismatch magnitude on the first valid batch.
+        # We do NOT subtract the root here (intentional — see note in the loop
+        # body), so pred and GT live in different frames. Logging their
+        # respective wrist magnitudes makes the frame mismatch visible and
+        # confirms that we're getting the expected huge absolute MPJPE.
         if not _root_check_done and any(valid_list):
             stacked_pj = torch.stack(pred_j_list)   # (N, 16, 3)
             stacked_gj = torch.stack(gt_j_list)
             valid_mask = torch.tensor(valid_list)
             if valid_mask.any():
-                max_pred_root = stacked_pj[valid_mask, pelvis_ind, :].abs().max().item()
-                max_gt_root   = stacked_gj[valid_mask, pelvis_ind, :].abs().max().item()
-                assert max_pred_root < 1e-5, (
-                    f"Pred root joint not zeroed after subtraction (max={max_pred_root:.2e}). "
-                    f"pelvis_ind={pelvis_ind} may be wrong."
-                )
-                assert max_gt_root < 1e-5, (
-                    f"GT root joint not zeroed after subtraction (max={max_gt_root:.2e}). "
-                    f"pelvis_ind={pelvis_ind} may be wrong."
-                )
-                print(f"[hamer-baseline] Root-zeroing check passed (pelvis_ind={pelvis_ind}, "
-                      f"max residual pred={max_pred_root:.2e}, gt={max_gt_root:.2e})")
+                pred_wrist_norm = stacked_pj[valid_mask, pelvis_ind, :].norm(dim=-1).mean().item()
+                gt_wrist_norm   = stacked_gj[valid_mask, pelvis_ind, :].norm(dim=-1).mean().item()
+                print(f"[hamer-baseline] Frame-mismatch check (no root subtraction): "
+                      f"pred wrist |.| mean={pred_wrist_norm*1000:.1f}mm, "
+                      f"gt wrist |.| mean={gt_wrist_norm*1000:.1f}mm "
+                      f"(pelvis_ind={pelvis_ind}). "
+                      f"Large GT wrist norm + small pred wrist norm = expected "
+                      f"frame mismatch → inflated absolute MPJPE.")
                 _root_check_done = True
 
         chunks.append({
@@ -453,7 +466,7 @@ def main():
         description="Evaluate original HaMeR checkpoint as baseline on HOT3D val split."
     )
     parser.add_argument("--config",      default="configs/train_hand_head.yaml")
-    parser.add_argument("--hamer-ckpt",  default="models/hamer/hamer.ckpt",
+    parser.add_argument("--hamer-ckpt",  default="models/hamer/hamer/hamer.ckpt",
                         help="Path to the original HaMeR Lightning checkpoint.")
     parser.add_argument("--val-list",    default="outputs/eval_val_split.json",
                         help="Same locked val-split JSON used by eval_hand_head.py.")
@@ -463,10 +476,37 @@ def main():
     parser.add_argument("--limit-clips", type=int, default=None,
                         help="Evaluate only the first N clips (quick smoke-test).")
     parser.add_argument("--device",      default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--wandb-project", default="hand-head-training",
+                        help="W&B project name. Use --no-wandb to disable logging.")
+    parser.add_argument("--wandb-entity",  default="3DV-Project",
+                        help="W&B entity / team.")
+    parser.add_argument("--wandb-run-name", default="Baseline: HaMeR pretrained",
+                        help="W&B run name shown in the runs table.")
+    parser.add_argument("--no-wandb", action="store_true",
+                        help="Disable W&B logging (writes JSON only).")
+    parser.add_argument("--data-root", default=None,
+                        help="Override data.data_root from the config — useful when "
+                             "running the same config on machines with different paths.")
     args = parser.parse_args()
 
     # --- Load HaMeR ---
     try:
+        # HaMeR's __init__ instantiates pyrender-based visualisation renderers
+        # which require an OpenGL/EGL context. We only need inference here, so
+        # neuter both renderers before importing load_hamer to avoid the
+        # init-time crash on headless cluster nodes.
+        from hamer.utils import renderer as _hamer_renderer_mod
+        from hamer.utils import mesh_renderer as _hamer_mesh_mod
+        def _noop_init(self, *args, **kwargs):
+            self.cfg = args[0] if args else kwargs.get("cfg")
+        _hamer_renderer_mod.Renderer.__init__   = _noop_init  # SkeletonRenderer wraps this
+        _hamer_mesh_mod.MeshRenderer.__init__   = _noop_init
+        # SkeletonRenderer (in renderer.py? actually skeleton_renderer.py) — patch too
+        try:
+            from hamer.utils.skeleton_renderer import SkeletonRenderer as _SkelR
+            _SkelR.__init__ = _noop_init
+        except ImportError:
+            pass
         from hamer.models import load_hamer
     except ImportError:
         raise ImportError(
@@ -497,6 +537,10 @@ def main():
     data_cfg = cfg["data"]
     vis_cfg  = cfg.get("visualization", {})
     seed     = cfg.get("training", {}).get("seed", 42)
+
+    if args.data_root is not None:
+        print(f"[hamer-baseline] Overriding data_root: {data_cfg['data_root']} -> {args.data_root}")
+        data_cfg["data_root"] = args.data_root
 
     val_seqs = resolve_val_split(
         data_root=data_cfg["data_root"],
@@ -531,6 +575,38 @@ def main():
     )
     print(f"[hamer-baseline] Val clips: {len(val_set)}")
 
+    # --- W&B init (early, so a crash mid-run still logs config) ---
+    use_wandb = not args.no_wandb
+    if use_wandb:
+        import wandb
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity or None,
+            name=args.wandb_run_name,
+            tags=["baseline", "hamer-pretrained"],
+            notes=(
+                "Pretrained HaMeR evaluated on the locked Hot3D val split. "
+                "MPJPE/MPVPE are absolute camera-frame (no root subtraction), "
+                "matching train_hand_head.py's hand_metrics/* convention so this "
+                "run is directly comparable with our trained-head runs in wandb. "
+                "PA-MPJPE / PA-MPVPE are Procrustes-aligned and meaningful as "
+                "pose-quality metrics."
+            ),
+            config={
+                "hamer_ckpt":      str(ckpt_path),
+                "config":          str(args.config),
+                "val_list":        str(args.val_list),
+                "batch_size":      args.batch_size,
+                "rescale_factor":  rescale_factor,
+                "num_frames":      num_frames,
+                "resolution":      res,
+                "pelvis_ind":      pelvis_ind,
+                "limit_clips":     args.limit_clips,
+                "data_cfg":        data_cfg,
+                "hand_crop_cfg":   cfg.get("hand_crop", {}),
+            },
+        )
+
     # --- Inference ---
     chunks = run_hamer_inference(hamer_model, model_cfg, val_loader, mano_model, args.device, pelvis_ind=pelvis_ind)
     result = metrics_from_chunks(chunks)
@@ -549,7 +625,7 @@ def main():
                 f"AUC_J={m['AUC_J']:.3f}  AUC_V={m['AUC_V']:.3f}"
             )
 
-    # --- Save ---
+    # --- Save JSON ---
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -558,12 +634,26 @@ def main():
         "val_split":        str(args.val_list),
         "num_clips":        len(val_set),
         "num_valid_hands":  result["num_valid_hands"],
-        "note":             f"pelvis_ind={pelvis_ind}-relative MPJPE/MPVPE; PA metrics are Procrustes-aligned",
+        "note":             "absolute camera-frame MPJPE/MPVPE (no root subtraction); PA metrics are Procrustes-aligned",
         "metrics":          {k: result[k] for k in ("left", "right", "all")},
     }
     with open(out_path, "w") as f:
         json.dump(payload, f, indent=2)
     print(f"\n[hamer-baseline] Results written to {out_path}")
+
+    # --- W&B log (single step, mirrors train_hand_head.py validation schema) ---
+    if use_wandb:
+        log_dict = {"hand_metrics/num_valid_hands": result["num_valid_hands"]}
+        for side_label in ("left", "right", "all"):
+            side_metrics = result.get(side_label)
+            if side_metrics is None:
+                continue
+            for k, v in side_metrics.items():
+                log_dict[f"hand_metrics/{side_label}/{k}"] = v
+        wandb.log(log_dict)
+        wandb.finish()
+        print(f"[hamer-baseline] Logged {len(log_dict)} metrics to W&B "
+              f"(run: {args.wandb_run_name}).")
 
 
 if __name__ == "__main__":

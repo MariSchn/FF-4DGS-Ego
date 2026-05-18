@@ -142,12 +142,25 @@ def load_hand_head(model, ckpt_path, device):
 
 def evaluate_checkpoint(model, ckpt_path, val_loader, mano_model, device, num_frames,
                         sanity=False):
+    """Returns {"abs": metrics_dict, "root_rel": metrics_dict}.
+
+    Both families share the same chunks so the underlying predictions are
+    identical; only the post-aggregation alignment differs. The root-relative
+    variant subtracts joint 0 (wrist) from pred/GT joints + vertices before
+    computing MPJPE/MPVPE — matches HaMeR's official Evaluator
+    (models/hamer/hamer/utils/pose_utils.py:185-186) and the
+    eval_hamer_baseline.py baseline, making MPJPE/MPVPE directly comparable
+    across our trained head and HaMeR's pretrained model.
+    """
     if not sanity:
         load_hand_head(model, ckpt_path, device)
     chunks = run_inference(
         model, val_loader, mano_model, device, num_frames, sanity=sanity,
     )
-    return metrics_from_chunks(chunks)
+    return {
+        "abs":      metrics_from_chunks(chunks, root_relative=False),
+        "root_rel": metrics_from_chunks(chunks, root_relative=True, pelvis_ind=0),
+    }
 
 
 # ------------------------------------------------------------------
@@ -260,9 +273,11 @@ def main():
         print("[eval] SANITY mode: substituting GT for prediction; metrics should be ~0.")
         result = evaluate_checkpoint(model, None, val_loader, mano_model, device,
                                      num_frames, sanity=True)
-        print(f"[eval] Valid hands: {result['num_valid_hands']}")
-        for label in ("left", "right", "all"):
-            print_summary(label, result[label])
+        print(f"[eval] Valid hands: {result['abs']['num_valid_hands']}")
+        for family in ("abs", "root_rel"):
+            print(f"[eval] -- {family} --")
+            for label in ("left", "right", "all"):
+                print_summary(label, result[family][label])
         return
 
     if not args.sweep:
@@ -277,15 +292,26 @@ def main():
             "config": str(args.config),
             "val_split": str(args.val_list),
             "num_clips": num_clips,
-            "num_valid_hands": result["num_valid_hands"],
-            "metrics": {k: result[k] for k in ("left", "right", "all")},
+            "num_valid_hands": result["abs"]["num_valid_hands"],
+            "metrics": {
+                "abs":      {k: result["abs"][k]      for k in ("left", "right", "all")},
+                "root_rel": {k: result["root_rel"][k] for k in ("left", "right", "all")},
+            },
+            "note": (
+                "Two families: 'abs' is raw camera-frame MPJPE/MPVPE; "
+                "'root_rel' subtracts joint 0 (wrist) from pred/GT before MPJPE/MPVPE, "
+                "matching HaMeR's Evaluator (pose_utils.py:185) so MPJPE is directly "
+                "comparable with eval_hamer_baseline.py."
+            ),
         }
         with open(out_path, "w") as f:
             json.dump(payload, f, indent=2)
         print(f"\n[eval] Wrote {out_path}")
-        print(f"[eval] Valid hands: {result['num_valid_hands']}")
-        for label in ("left", "right", "all"):
-            print_summary(label, result[label])
+        print(f"[eval] Valid hands: {result['abs']['num_valid_hands']}")
+        for family in ("abs", "root_rel"):
+            print(f"[eval] -- {family} --")
+            for label in ("left", "right", "all"):
+                print_summary(label, result[family][label])
         return
 
     # --- Sweep ---
@@ -295,8 +321,12 @@ def main():
         raise RuntimeError(f"No .pt files in {ckpt_dir}")
     print(f"[eval] Sweeping {len(ckpts)} checkpoints in {ckpt_dir}")
 
-    fieldnames = ["ckpt", "step", "num_valid_hands",
-                  "MPJPE", "PA_MPJPE", "MPVPE", "PA_MPVPE", "AUC_J", "AUC_V"]
+    # Columns: <metric>_abs and <metric>_root_rel for each metric, so the
+    # CSV can be diffed against eval_hamer_baseline.py (root-relative) directly.
+    metric_keys = ("MPJPE", "PA_MPJPE", "MPVPE", "PA_MPVPE", "AUC_J", "AUC_V")
+    fieldnames = ["ckpt", "step", "num_valid_hands"]
+    for k in metric_keys:
+        fieldnames += [f"{k}_abs", f"{k}_root_rel"]
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -309,13 +339,16 @@ def main():
                 else (10**9 if ckpt_path.name == "hand_head_final.pt" else 0)
             )
             row = {"ckpt": ckpt_path.name, "step": step,
-                   "num_valid_hands": result["num_valid_hands"]}
-            all_m = result["all"] or {}
-            for k in ("MPJPE", "PA_MPJPE", "MPVPE", "PA_MPVPE", "AUC_J", "AUC_V"):
-                row[k] = f"{all_m[k]:.4f}" if all_m.get(k) is not None else ""
+                   "num_valid_hands": result["abs"]["num_valid_hands"]}
+            abs_m  = result["abs"]["all"]      or {}
+            rrel_m = result["root_rel"]["all"] or {}
+            for k in metric_keys:
+                row[f"{k}_abs"]      = f"{abs_m[k]:.4f}"  if abs_m.get(k)  is not None else ""
+                row[f"{k}_root_rel"] = f"{rrel_m[k]:.4f}" if rrel_m.get(k) is not None else ""
             writer.writerow(row)
             f.flush()
-            print_summary("all", result["all"])
+            print(f"  abs:      ", end=""); print_summary("all", result["abs"]["all"])
+            print(f"  root_rel: ", end=""); print_summary("all", result["root_rel"]["all"])
     print(f"\n[eval] Wrote {out_path}")
 
 

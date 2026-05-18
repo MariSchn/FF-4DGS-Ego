@@ -179,8 +179,17 @@ def metric_chunks_from_batch(pred_params, gt_params, hand_valid, mano_model, dev
     }
 
 
-def metrics_from_chunks(chunks):
+def metrics_from_chunks(chunks, root_relative: bool = False, pelvis_ind: int = 0):
     """Concatenate per-batch chunks and produce per-side and combined metrics.
+
+    When `root_relative=True`, joint `pelvis_ind` (default 0 = wrist) is
+    subtracted from both pred and GT joints AND vertices before computing
+    MPJPE / MPVPE. PA metrics (Procrustes) are unaffected by the choice
+    since Procrustes already removes translation.
+
+    Use `root_relative=True` to make MPJPE comparable across models that
+    output in different global frames (e.g. HaMeR's crop-canonical frame
+    vs. a camera-frame-trained head).
 
     Returns:
         {"num_valid_hands": int,
@@ -203,8 +212,16 @@ def metrics_from_chunks(chunks):
         if mask.sum() == 0:
             out[name] = None
             continue
-        out[name] = aggregate(
-            cat["pred_j"][mask], cat["gt_j"][mask],
-            cat["pred_v"][mask], cat["gt_v"][mask],
-        )
+        pj = cat["pred_j"][mask]
+        gj = cat["gt_j"][mask]
+        pv = cat["pred_v"][mask]
+        gv = cat["gt_v"][mask]
+        if root_relative:
+            p_root = pj[:, pelvis_ind:pelvis_ind + 1, :]  # (N, 1, 3)
+            g_root = gj[:, pelvis_ind:pelvis_ind + 1, :]
+            pj = pj - p_root
+            gj = gj - g_root
+            pv = pv - p_root  # broadcasts (N, 778, 3) - (N, 1, 3)
+            gv = gv - g_root
+        out[name] = aggregate(pj, gj, pv, gv)
     return out
