@@ -159,6 +159,26 @@ class HOT3DHandDataset(Dataset):
             cam_extr_cache_path = os.path.join(hand_data_root, "cam_extrinsics_cache.pt")
             cam_intr_cache_path = os.path.join(hand_data_root, "cam_intrinsics.pt")
 
+            # Defensive guard: if this sequence was preprocessed to a pinhole
+            # representation, the on-the-fly cache rebuilds below would use the
+            # fisheye projection and silently corrupt the dataset. Refuse to
+            # proceed in that case — the user should re-run preprocessing with
+            # the right rescale_factor / resolution.
+            preproc_meta_path = os.path.join(seq_path, ".preprocessing_meta.json")
+            if os.path.exists(preproc_meta_path):
+                missing = [p for p in
+                           (cam_2d_cache_path, cam_extr_cache_path, cam_intr_cache_path)
+                           if not os.path.exists(p)]
+                if missing:
+                    raise RuntimeError(
+                        f"Sequence {seq_path} has .preprocessing_meta.json (pinhole-"
+                        f"preprocessed dataset) but is missing required cache(s): "
+                        f"{missing}. The dataset would otherwise recompute them with "
+                        f"the FISHEYE projection, corrupting the pinhole pipeline. "
+                        f"Re-run scripts/preprocessing/preprocess_undistort.py for "
+                        f"this sequence."
+                    )
+
             if (os.path.exists(cam_2d_cache_path)
                     and os.path.exists(cam_extr_cache_path)
                     and os.path.exists(cam_intr_cache_path)):
@@ -187,6 +207,17 @@ class HOT3DHandDataset(Dataset):
             if self.use_hand_crop:
                 cache_name = f"hand_bboxes_v2_rf{self.rescale_factor}_res{res[0]}x{res[1]}.pt"
                 bbox_cache_path = os.path.join(seq_path, "hand_data", cache_name)
+
+                # Same guard as above: don't allow fisheye-based bbox recompute
+                # on a preprocessed pinhole dataset.
+                if not os.path.exists(bbox_cache_path) and os.path.exists(preproc_meta_path):
+                    raise RuntimeError(
+                        f"Sequence {seq_path} has .preprocessing_meta.json but is "
+                        f"missing bbox cache for rescale_factor={self.rescale_factor}, "
+                        f"resolution={res[0]}x{res[1]} ({cache_name}). Re-run "
+                        f"scripts/preprocessing/preprocess_undistort.py with these "
+                        f"params so the bbox is built with pinhole projection."
+                    )
 
                 if os.path.exists(bbox_cache_path):
                     cached = torch.load(bbox_cache_path, weights_only=True)
