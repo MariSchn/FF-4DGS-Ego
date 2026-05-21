@@ -1,5 +1,5 @@
 # inspired by https://github.com/DepthAnything/Depth-Anything-V2
-from typing import List, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -111,6 +111,7 @@ class DPTHead(nn.Module):
         images: torch.Tensor,
         patch_start_idx: int,
         frames_chunk_size: int = 8,
+        feature_hook: Optional[Callable[[List[torch.Tensor], int, int], List[torch.Tensor]]] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward pass with optional frame chunking for memory efficiency.
@@ -121,6 +122,12 @@ class DPTHead(nn.Module):
             patch_start_idx: Starting index of patch tokens
             frames_chunk_size: Number of frames per chunk. If None or >= S, process all at once
             gradient_checkpoint: Whether to use gradient checkpointing
+            feature_hook: Optional callable applied to the per-layer projected
+                feature list (post-projects, pre-fusion). Receives
+                (feats, frame_start, frame_end) where the frame range is the
+                slice of the original [B, S] sequence currently being processed,
+                and returns List[Tensor] of identical shapes. None preserves
+                baseline behavior.
 
         Returns:
             For is_gsdpt: predictions [B, S, ...]
@@ -130,7 +137,7 @@ class DPTHead(nn.Module):
 
         # Process all frames together if chunk size not specified or large enough
         if frames_chunk_size is None or frames_chunk_size >= S:
-            return self._forward_impl(token_list, images, patch_start_idx)
+            return self._forward_impl(token_list, images, patch_start_idx, feature_hook=feature_hook)
 
         assert frames_chunk_size > 0
 
@@ -144,14 +151,16 @@ class DPTHead(nn.Module):
 
             if self.is_gsdpt:
                 gs, preds, conf = self._forward_impl(
-                    token_list, images, patch_start_idx, frame_start, frame_end
+                    token_list, images, patch_start_idx, frame_start, frame_end,
+                    feature_hook=feature_hook,
                 )
                 gs_chunks.append(gs)
                 preds_chunks.append(preds)
                 conf_chunks.append(conf)
             else:
                 preds, conf = self._forward_impl(
-                    token_list, images, patch_start_idx, frame_start, frame_end
+                    token_list, images, patch_start_idx, frame_start, frame_end,
+                    feature_hook=feature_hook,
                 )
                 preds_chunks.append(preds)
                 conf_chunks.append(conf)
@@ -169,6 +178,7 @@ class DPTHead(nn.Module):
         patch_start_idx: int,
         frame_start: int = None,
         frame_end: int = None,
+        feature_hook: Optional[Callable[[List[torch.Tensor], int, int], List[torch.Tensor]]] = None,
     ) -> torch.Tensor:
         """
         Core forward implementation for DPT head.
@@ -212,6 +222,17 @@ class DPTHead(nn.Module):
                 feat = self._apply_pos_embed(feat, W, H)
             feat = resize(feat)
             feats.append(feat)
+
+        # Optional per-layer feature modification before fusion (e.g., hand-aware
+        # injection). Hook receives (feats, frame_start, frame_end) for the
+        # current chunk and returns List[Tensor] of identical shapes. When
+        # chunking is disabled, the slice is the full sequence [0, S).
+        if feature_hook is not None:
+            if frame_start is None:
+                fs, fe = 0, images.shape[1]
+            else:
+                fs, fe = frame_start, frame_end
+            feats = feature_hook(feats, fs, fe)
 
         # Fuse multi-level features
         fused = self.scratch_forward(feats)

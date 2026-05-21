@@ -151,14 +151,9 @@ class ParameterLoss(nn.Module):
 
     @staticmethod
     def _masked_mean(err: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """(mask * err) averaged over non-batch dims, summed over batch.
-
-        Matches HaMeR's existing ParameterLoss reduction: a sum over the
-        batch of per-sample means so gradient magnitude is proportional to
-        (approximately) the number of valid hands in the batch.
-        """
+        """(mask * err) averaged over non-batch dims, then over batch."""
         per_sample = (mask * err).reshape(err.shape[0], -1).mean(dim=-1)
-        return per_sample.sum()
+        return per_sample.mean()
 
     def forward(
         self,
@@ -175,8 +170,7 @@ class ParameterLoss(nn.Module):
 
         Returns:
             dict with scalar entries 'transl', 'global_orient', 'hand_pose',
-            'betas'. Summed over the batch (HaMeR convention); caller applies
-            per-key weights.
+            'betas'. Averaged over the batch; caller applies per-key weights.
         """
         B, S, D = pred_param.shape
         assert D == NUM_HANDS * HAND_PARAM_DIM
