@@ -29,6 +29,7 @@ from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import Wor
 from diffsynth.utils.auxiliary import load_video
 
 from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
+from scripts.hand_depth_anchor_loss import hand_depth_anchor_loss
 from scripts.hand_metrics import metric_chunks_from_batch, metrics_from_chunks
 from scripts.gs_metrics import (
     LPIPSScorer,
@@ -802,6 +803,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
         "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
         "kp3d": 0.0, "kp2d": 0.0,
         "gs_l1": 0.0, "gs_lpips": 0.0,
+        "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
     }
     captured = {}
     gs_captured = {}
@@ -899,6 +901,16 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 gt_2d_flat   = gt_2d_norm.view(N * H, 1, J, 3)
                 loss_kp2d    = criterion_kp2d(pred_2d_flat, gt_2d_flat)
 
+            # L1 HDGLA metric anchor (mirror of the train loop; default kwargs).
+            loss_hand_anchor = torch.zeros((), device=device)
+            anchor_residual_m = 0.0
+            gs_depth_pred = preds.get("gs_depth")
+            if gs_depth_pred is not None and "cam_intrinsics" in vbatch:
+                loss_hand_anchor, _anchor_info = hand_depth_anchor_loss(
+                    pred_joints, gs_depth_pred, has_hand, vbatch["cam_intrinsics"].to(device),
+                )
+                anchor_residual_m = _anchor_info["hand_depth_residual_m"]
+
             loss = (
                 loss_weights["transl"]        * param_losses["transl"]
                 + loss_weights["global_orient"] * param_losses["global_orient"]
@@ -908,6 +920,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 + loss_weights["kp2d"]          * loss_kp2d
                 + loss_weights.get("gs_l1", 0.0)    * loss_gs_l1
                 + loss_weights.get("gs_lpips", 0.0) * loss_gs_lpips
+                + loss_weights.get("hand_depth_anchor", 0.0) * loss_hand_anchor
             )
 
             val_loss += loss.item()
@@ -917,6 +930,8 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             val_terms["kp2d"]  += loss_kp2d.item()
             val_terms["gs_l1"]    += loss_gs_l1.item()
             val_terms["gs_lpips"] += loss_gs_lpips.item()
+            val_terms["hand_depth_anchor"]    += loss_hand_anchor.item()
+            val_terms["hand_depth_residual_m"] += anchor_residual_m
 
             if vis_clip_indices:
                 # For vis we need camera-space predictions for rendering
@@ -1095,6 +1110,14 @@ def train():
     use_hand_crop = model_cfg.get("hand_head_type") == "hand_crop" or model_cfg.get("use_hand_crop", False)
     rescale_factor = cfg.get("hand_crop", {}).get("rescale_factor", 2.0)
 
+    # L1 HDGLA metric anchor config (pulls gs_depth toward metric hand depth).
+    anchor_cfg = cfg.get("hand_depth_anchor", {})
+    w_anchor = cfg["loss_weights"].get("hand_depth_anchor", 0.0)
+    anchor_margin = anchor_cfg.get("margin", 0.02)
+    anchor_depth_min = anchor_cfg.get("depth_min", 0.01)
+    anchor_conf_thresh = anchor_cfg.get("conf_thresh", 0.0)
+    anchor_warmup_steps = int(anchor_cfg.get("warmup_steps", 800))
+
     ds_kwargs = dict(
         num_frames=num_frames, res=res, clip_stride=clip_stride,
         use_hand_crop=use_hand_crop, rescale_factor=rescale_factor,
@@ -1227,6 +1250,7 @@ def train():
             "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
             "kp3d": 0.0, "kp2d": 0.0,
             "gs_l1": 0.0, "gs_lpips": 0.0,
+            "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
         }
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
@@ -1321,6 +1345,19 @@ def train():
                 gt_2d_flat   = gt_2d_norm.view(N * H, 1, J, 3)
                 loss_kp2d    = criterion_kp2d(pred_2d_flat, gt_2d_flat)
 
+            # L1 HDGLA metric anchor: pull gs_depth toward metric hand depth at the joints.
+            loss_hand_anchor = torch.zeros((), device=device)
+            anchor_residual_m = 0.0
+            gs_depth_pred = preds.get("gs_depth")
+            if w_anchor > 0.0 and gs_depth_pred is not None and "cam_intrinsics" in batch:
+                loss_hand_anchor, _anchor_info = hand_depth_anchor_loss(
+                    pred_joints, gs_depth_pred, has_hand, batch["cam_intrinsics"].to(device),
+                    margin=anchor_margin, depth_min=anchor_depth_min,
+                    gs_depth_conf=preds.get("gs_depth_conf"), conf_thresh=anchor_conf_thresh,
+                )
+                anchor_residual_m = _anchor_info["hand_depth_residual_m"]
+            anchor_ramp = min(1.0, global_step / anchor_warmup_steps) if anchor_warmup_steps > 0 else 1.0
+
             w = cfg["loss_weights"]
             loss = (
                 w["transl"]        * param_losses["transl"]
@@ -1331,6 +1368,7 @@ def train():
                 + w["kp2d"]          * loss_kp2d
                 + w.get("gs_l1", 0.0)    * loss_gs_l1
                 + w.get("gs_lpips", 0.0) * loss_gs_lpips
+                + w.get("hand_depth_anchor", 0.0) * anchor_ramp * loss_hand_anchor
             )
 
             (loss / grad_accum_steps).backward()
@@ -1341,6 +1379,8 @@ def train():
             accum_terms["kp2d"]  += loss_kp2d.item()
             accum_terms["gs_l1"]    += loss_gs_l1.item()
             accum_terms["gs_lpips"] += loss_gs_lpips.item()
+            accum_terms["hand_depth_anchor"]    += loss_hand_anchor.item()
+            accum_terms["hand_depth_residual_m"] += anchor_residual_m
 
             if (batch_idx + 1) % grad_accum_steps == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=float("inf"))
@@ -1354,6 +1394,7 @@ def train():
                     "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
                     "kp3d": 0.0, "kp2d": 0.0,
                     "gs_l1": 0.0, "gs_lpips": 0.0,
+                    "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
                 }
                 global_step += 1
 
@@ -1368,6 +1409,8 @@ def train():
                                "train/loss_kp2d":          avg_terms["kp2d"],
                                "train/loss_gs_l1":         avg_terms["gs_l1"],
                                "train/loss_gs_lpips":      avg_terms["gs_lpips"],
+                               "train/loss_hand_depth_anchor": avg_terms["hand_depth_anchor"],
+                               "train/hand_depth_residual_m":  avg_terms["hand_depth_residual_m"],
                                "train/grad_norm":          grad_norm.item(),
                                "lr": scheduler.get_last_lr()[0]}, step=global_step)
 
@@ -1423,7 +1466,9 @@ def train():
                                     "val/loss_kp3d":          val_terms["kp3d"],
                                     "val/loss_kp2d":          val_terms["kp2d"],
                                     "val/loss_gs_l1":         val_terms["gs_l1"],
-                                    "val/loss_gs_lpips":      val_terms["gs_lpips"]}
+                                    "val/loss_gs_lpips":      val_terms["gs_lpips"],
+                                    "val/loss_hand_depth_anchor": val_terms["hand_depth_anchor"],
+                                    "val/hand_depth_residual_m":  val_terms["hand_depth_residual_m"]}
                         for side_label in ("left", "right", "all"):
                             side_metrics = hand_metrics.get(side_label)
                             if side_metrics is None:
