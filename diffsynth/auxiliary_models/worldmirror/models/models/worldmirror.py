@@ -440,6 +440,11 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             preds["gs_depth"] = gs_depth
             preds["gs_depth_conf"] = gs_depth_conf
 
+            # Fast path for the L1 metric anchor / L2 scale eval: gs_depth (above)
+            # is all they need. Skip the expensive splat build + voxel prune +
+            # rasterization. Off by default; inference always renders.
+            if not is_inference and getattr(self, "gs_anchor_only", False):
+                return preds
 
             # Dynamic GS attributes
             if self.enable_dynamic_gs_attr and use_motion:
