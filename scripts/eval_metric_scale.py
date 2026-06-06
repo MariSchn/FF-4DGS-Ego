@@ -70,6 +70,8 @@ def main() -> None:
     ap.add_argument("--checkpoint", required=True,
                     help="Trained checkpoint (best_val_loss.pt / latest.pt / a raw hand-head .pt)")
     ap.add_argument("--num_clips", type=int, default=30)
+    ap.add_argument("--max_seqs", type=int, default=15,
+                    help="Only build the dataset from this many sequences (faster startup).")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -100,6 +102,8 @@ def main() -> None:
         raise SystemExit(f"No sequences under {data_cfg['data_root']}")
     random.seed(args.seed)
     random.shuffle(seqs)
+    seqs = seqs[:args.max_seqs]
+    print(f"Building dataset from {len(seqs)} sequence(s) (first run caches bboxes/joints).")
     dataset = HOT3DHandDataset(
         seqs, mano_model,
         num_frames=num_frames, res=res,
