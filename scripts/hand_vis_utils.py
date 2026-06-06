@@ -15,8 +15,8 @@ import numpy as np
 import smplx
 import torch
 from decord import VideoReader
-from projectaria_tools.core.calibration import CameraCalibration, FISHEYE624
-from projectaria_tools.core.sophus import SE3
+# bypassed global import
+# bypassed global import
 from scipy.spatial.transform import Rotation
 
 
@@ -245,6 +245,8 @@ class MANOModel:
 # ---------------------------------------------------------------------------
 
 def load_camera_calibration(jsonl_path, camera_label="camera-rgb"):
+    from projectaria_tools.core.calibration import CameraCalibration, FISHEYE624
+    from projectaria_tools.core.sophus import SE3
     """Load camera-rgb calibration from online_calibration.jsonl (first entry)."""
     with open(jsonl_path) as f:
         entry = json.loads(f.readline())
@@ -527,6 +529,7 @@ def _frame_to_timecode(frame_idx, n_video, hand_ts_sorted):
 
 
 def render_hand_comparison(vis_context, frame_idx, gt_params, pred_params):
+    from projectaria_tools.core.sophus import SE3
     """Render GT and predicted MANO hands overlaid on a full-resolution frame.
 
     GT hands are rendered from the raw JSONL data (matching the standalone script's

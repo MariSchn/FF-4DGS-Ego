@@ -1,0 +1,320 @@
+==================================================
+Job        : 96810 on studgpu-spark01.inf.ethz.ch
+GPU(s)     : 0
+Config     : configs/ablation_hand_to_gs_injection.yaml
+Git        : 3994377 (feat/hand-scene-metric-coupling)
+Started    : Fri Jun  5 23:28:10 CEST 2026
+==================================================
+Fri Jun  5 23:28:10 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.126.09             Driver Version: 580.126.09     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GB10                    On  |   0000000F:01:00.0  On |                  N/A |
+| N/A   41C    P8              4W /  N/A  | Not Supported          |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+torch 2.7.1+cu128 | device NVIDIA GB10 | capability (12, 1)
+Loaded checkpoint. New (hand head) keys: 142
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Trainable parameters: hand=46,257,185 gs_head=32,673,506 injection=2,886,400 total=81,817,091
+Found 198 sequences
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_23fa0ee8.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_23fa0ee8.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_e7458eb3.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_e7458eb3.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_24cb3bf0.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_24cb3bf0.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_a9d6c83d.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_a9d6c83d.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_99385ad8.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_99385ad8.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_b2bcbe28.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_b2bcbe28.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_1fdca00e.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_1fdca00e.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_ea91844d.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_ea91844d.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_4bf4e21a.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_4bf4e21a.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_f71fc9b1.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_f71fc9b1.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_9b7a0725.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_9b7a0725.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_624f2ba9.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_624f2ba9.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_247b5403.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_247b5403.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_11475e24.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_11475e24.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_b152143e.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_b152143e.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_b1e71d7f.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_b1e71d7f.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_1c9fe708.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_1c9fe708.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_0de48e2c.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_0de48e2c.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_e846d3cc.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_e846d3cc.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_924e574e.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_924e574e.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_cf323827.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_cf323827.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_1b21bb01.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_1b21bb01.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_9c030609.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_9c030609.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_8c95667c.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_8c95667c.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_8254f925.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_8254f925.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_ff7cfc3a.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_ff7cfc3a.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_ad5f7dee.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_ad5f7dee.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_4e5d1c14.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_4e5d1c14.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_d0f907a0.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_d0f907a0.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_3f46732d.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_3f46732d.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_911a4ba5.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_911a4ba5.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_10a27bf7.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_10a27bf7.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0002_016222d1.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0002_016222d1.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_ca1f6626.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_ca1f6626.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_dbf1ebb7.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_dbf1ebb7.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_6e4f7815.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_6e4f7815.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_e5cb6a80.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_e5cb6a80.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_e97d31b6.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_e97d31b6.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_73e66984.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_73e66984.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0002_65085bfc.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0002_65085bfc.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_f6cc0cc8.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_f6cc0cc8.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_0323d770.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_0323d770.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_b7d8c222.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_b7d8c222.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_0a21e4c2.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_0a21e4c2.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_60573a3b.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_60573a3b.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_6d15aa57.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_6d15aa57.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_24af5475.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_24af5475.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_7e95628d.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_7e95628d.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_f7e3880b.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_f7e3880b.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_b8fc4c1b.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_b8fc4c1b.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_119de519.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_119de519.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_915e71c6.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_915e71c6.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_3a9bb2ae.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_3a9bb2ae.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0002_59a84a3a.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0002_59a84a3a.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_1eb4f17f.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_1eb4f17f.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_d85e10f6.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_d85e10f6.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_9e03121a.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_9e03121a.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_0c2d00ed.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_0c2d00ed.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_9a25ec6a.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_9a25ec6a.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_cc739faa.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_cc739faa.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_160e551c.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_160e551c.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_ebdc6ff7.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_ebdc6ff7.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_44c5f677.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_44c5f677.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_0e02bf39.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_0e02bf39.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_550ea2ac.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_550ea2ac.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_cee8fe4f.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_cee8fe4f.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_cd22f5e0.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_cd22f5e0.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_db543fe8.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_db543fe8.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_84ea2dcc.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_84ea2dcc.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_cc5dfd13.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_cc5dfd13.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_7fc6548d.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_7fc6548d.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_f1a33781.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_f1a33781.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_e40eec5d.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_e40eec5d.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_f7ba43e0.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_f7ba43e0.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_745920f0.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_745920f0.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_6db96fd0.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_6db96fd0.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_e71e2f24.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_e71e2f24.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_1fa0bb65.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_1fa0bb65.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_e481fd15.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_e481fd15.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_8ff3e5c4.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_8ff3e5c4.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_9b6feab7.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_9b6feab7.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_fd1891a8.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_fd1891a8.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_d6272ce1.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_d6272ce1.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_4dcdcfec.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_4dcdcfec.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_2255f410.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_2255f410.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_72efb935.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_72efb935.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_a497658f.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_a497658f.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_7c7e8d86.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_7c7e8d86.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_c06d939b.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_c06d939b.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_e3f96b3f.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_e3f96b3f.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_cbd17f20.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_cbd17f20.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_53358a64.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_53358a64.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_41c4c626.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_41c4c626.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_88a58b3b.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_88a58b3b.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0002_2ea9af5b.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0002_2ea9af5b.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_7a8886e7.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_7a8886e7.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_573b2de6.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_573b2de6.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_3c7f5241.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_3c7f5241.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0002_c68438ce.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0002_c68438ce.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_b0c895c1.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_b0c895c1.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_179e1b84.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_179e1b84.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_c4353c31.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_c4353c31.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_a68492d5.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_a68492d5.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_e27ad19f.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_e27ad19f.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_47878e48.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_47878e48.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_76ea6d47.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_76ea6d47.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_c701bd11.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_c701bd11.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_ccc678c7.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_ccc678c7.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_30a5b61d.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_30a5b61d.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_451a7734.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0011_451a7734.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_15c4300c.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_15c4300c.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_1573a837.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_1573a837.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_b0c5102b.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_b0c5102b.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_af3dab9a.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_af3dab9a.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_5bb7cc2a.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_5bb7cc2a.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_130a66e1.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_130a66e1.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_02511c2f.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_02511c2f.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_42b8b389.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_42b8b389.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_dbe00981.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_dbe00981.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_65c6a968.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0014_65c6a968.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_8c0caf6c.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_8c0caf6c.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_37e30628.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_37e30628.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_743d3087.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_743d3087.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_8d136980.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_8d136980.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_95eabc0a.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_95eabc0a.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_1c45bbd9.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_1c45bbd9.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_c3e1f590.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_c3e1f590.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_5766eae8.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_5766eae8.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_367cc58d.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0015_367cc58d.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_e3a74169.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_e3a74169.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_5f2583e0.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_5f2583e0.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_927973d7.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0009_927973d7.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_0ecbf39f.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0010_0ecbf39f.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_83b755aa.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_83b755aa.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_f4730606.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0003_f4730606.
+Loaded 2D GT joints + cam data for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_476bae57.
+Loaded GT joints for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_476bae57.
+Train clips: 29732 | Val clips: 223
+[VIS] WARNING: Skipping visualization context for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_476bae57 due to missing dependency: No module named '_core_pybinds'
+[VIS] WARNING: Skipping visualization context for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_23fa0ee8 due to missing dependency: No module named '_core_pybinds'
+[VIS] WARNING: Skipping visualization context for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_ca1f6626 due to missing dependency: No module named '_core_pybinds'
+[VIS] WARNING: Skipping visualization context for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0012_db543fe8 due to missing dependency: No module named '_core_pybinds'
+[VIS] WARNING: Skipping visualization context for /work/courses/3dv/team25/data/hot3d_aria/sequences/P0001_a68492d5 due to missing dependency: No module named '_core_pybinds'
+Training on cuda | 1 epochs | batch_size=4 | grad_accum_steps=8
+[DIAG] left hand GT t_cam: min=-0.0569 max=0.4840 mean=0.2273 std=0.1602 (N=64)
+[DIAG] right hand GT t_cam: min=-0.4597 max=0.4360 mean=0.0659 std=0.2592 (N=48)
+Resuming from checkpoint: checkpoints/default/latest.pt
+Resumed successfully. global_step=1, start_epoch=1, best_val_loss=1.7651
+[1;34mwandb[0m: 
+[1;34mwandb[0m: 🚀 View run [33mAblation: hand to gs injection (v2)[0m at: [34mhttps://wandb.ai/3DV-Project/hand-head-training/runs/ssjualx2[0m
+[1;34mwandb[0m: Find logs at: [1;35m../../../work/scratch/dmonopoli/wandb/wandb/run-20260605_232954-ssjualx2/logs[0m
+Setting up [LPIPS] perceptual loss: trunk [alex], v[0.1], spatial [off]

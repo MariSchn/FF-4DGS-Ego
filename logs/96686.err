@@ -1,0 +1,32 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 28, in <module>
+    from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/__init__.py", line 2, in <module>
+    from .models import *
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/models/__init__.py", line 1, in <module>
+    from .model_manager import *
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/models/model_manager.py", line 4, in <module>
+    from .downloader import download_models, download_customized_models, Preset_model_id, Preset_model_website
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/models/downloader.py", line 6, in <module>
+    from ..configs.model_config import preset_models_on_huggingface, preset_models_on_modelscope, Preset_model_id
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/configs/model_config.py", line 13, in <module>
+    from ..models.sd3_text_encoder import SD3TextEncoder1, SD3TextEncoder2, SD3TextEncoder3
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/models/sd3_text_encoder.py", line 2, in <module>
+    from transformers import T5EncoderModel, T5Config
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/transformers/__init__.py", line 27, in <module>
+    from . import dependency_versions_check
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/transformers/dependency_versions_check.py", line 16, in <module>
+    from .utils.versions import require_version, require_version_core
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/transformers/utils/__init__.py", line 24, in <module>
+    from .auto_docstring import (
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/transformers/utils/auto_docstring.py", line 22, in <module>
+    import regex as re
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/regex/__init__.py", line 1, in <module>
+    import regex._main
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/regex/_main.py", line 427, in <module>
+    from regex import _regex_core
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/regex/_regex_core.py", line 21, in <module>
+    from regex import _regex
+ImportError: cannot import name '_regex' from partially initialized module 'regex' (most likely due to a circular import) (/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/regex/__init__.py)

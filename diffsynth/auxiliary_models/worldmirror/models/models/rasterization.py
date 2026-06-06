@@ -369,6 +369,25 @@ class Rasterizer:
             opacities = torch.cat([splat.opacities for splat in splats], dim=0)
             colors = torch.cat([splat.harmonics for splat in splats], dim=0)
 
+            # Debug NaN/Inf check
+            import os
+            if os.environ.get("DEBUG_GS", "False") == "True":
+                non_finite_detected = False
+                for name, tensor in [("means", means), ("quats", quats), ("scales", scales), ("opacities", opacities), ("colors", colors)]:
+                    if not torch.isfinite(tensor).all():
+                        non_finite_detected = True
+                        nan_count = torch.isnan(tensor).sum().item()
+                        inf_count = torch.isinf(tensor).sum().item()
+                        print(f"[DEBUG_GS] {name} has non-finite values! NaNs: {nan_count}, Infs: {inf_count}", flush=True)
+                        flat = tensor.view(-1)
+                        finite_vals = flat[torch.isfinite(flat)]
+                        if len(finite_vals) > 0:
+                            print(f"[DEBUG_GS] {name} finite range: [{finite_vals.min().item()}, {finite_vals.max().item()}]", flush=True)
+                        else:
+                            print(f"[DEBUG_GS] {name} has NO finite values!", flush=True)
+                if non_finite_detected:
+                    raise ValueError("Detected non-finite values in Gaussian splats parameters right before rasterization!")
+
         if len(splats) == 0 or means.shape[0] == 0:
             return (
                 torch.zeros((1, height, width, 3), dtype=torch.float32, device=viewmats.device),

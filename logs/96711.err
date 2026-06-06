@@ -1,0 +1,30 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 1520, in <module>
+    train()
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 1064, in train
+    mano_model = MANOModel(mano_folder)
+                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/hand_vis_utils.py", line 66, in __init__
+    self.left = smplx.create(
+                ^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/smplx/body_models.py", line 2406, in create
+    return MANO(model_path, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/smplx/body_models.py", line 1562, in __init__
+    model_data = pickle.load(mano_file, encoding='latin1')
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/chumpy/__init__.py", line 1, in <module>
+    from .ch import *
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/chumpy/ch.py", line 1319, in <module>
+    from . import linalg
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/chumpy/linalg.py", line 178, in <module>
+    class SvdD(Ch):
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/chumpy/linalg.py", line 181, in SvdD
+    @depends_on('x')
+     ^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/chumpy/ch.py", line 1203, in _depends_on
+    want_out = 'out' in inspect.getargspec(func).args
+                        ^^^^^^^^^^^^^^^^^^
+AttributeError: module 'inspect' has no attribute 'getargspec'. Did you mean: 'getargs'?

@@ -1,0 +1,72 @@
+  0%|          | 0/197 [00:00<?, ?it/s]  1%|          | 2/197 [00:00<00:39,  4.93it/s]  2%|▏         | 3/197 [00:00<00:48,  4.00it/s]  2%|▏         | 4/197 [00:01<00:51,  3.76it/s]  3%|▎         | 5/197 [00:01<00:45,  4.21it/s]  3%|▎         | 6/197 [00:01<00:49,  3.83it/s]  4%|▎         | 7/197 [00:01<00:53,  3.54it/s]  4%|▍         | 8/197 [00:02<00:53,  3.55it/s]  5%|▍         | 9/197 [00:02<00:52,  3.56it/s]  5%|▌         | 10/197 [00:02<00:49,  3.80it/s]  8%|▊         | 15/197 [00:02<00:20,  8.86it/s]  9%|▉         | 18/197 [00:03<00:19,  9.16it/s] 10%|█         | 20/197 [00:03<00:21,  8.06it/s] 11%|█         | 21/197 [00:03<00:26,  6.63it/s] 11%|█         | 22/197 [00:04<00:29,  5.99it/s] 12%|█▏        | 23/197 [00:04<00:30,  5.68it/s] 12%|█▏        | 24/197 [00:04<00:35,  4.88it/s] 13%|█▎        | 25/197 [00:04<00:40,  4.26it/s] 14%|█▎        | 27/197 [00:05<00:34,  4.99it/s] 14%|█▍        | 28/197 [00:05<00:32,  5.14it/s] 16%|█▌        | 31/197 [00:05<00:27,  6.14it/s] 18%|█▊        | 35/197 [00:06<00:20,  8.02it/s] 19%|█▉        | 38/197 [00:06<00:19,  8.14it/s] 20%|█▉        | 39/197 [00:06<00:20,  7.59it/s] 21%|██▏       | 42/197 [00:06<00:18,  8.19it/s] 22%|██▏       | 43/197 [00:07<00:19,  7.71it/s] 23%|██▎       | 46/197 [00:07<00:19,  7.71it/s] 24%|██▍       | 47/197 [00:07<00:20,  7.35it/s] 24%|██▍       | 48/197 [00:07<00:25,  5.84it/s] 25%|██▍       | 49/197 [00:08<00:30,  4.86it/s] 25%|██▌       | 50/197 [00:08<00:29,  4.99it/s] 26%|██▋       | 52/197 [00:08<00:26,  5.50it/s] 27%|██▋       | 53/197 [00:08<00:26,  5.49it/s] 27%|██▋       | 54/197 [00:09<00:29,  4.80it/s] 28%|██▊       | 55/197 [00:09<00:25,  5.49it/s] 29%|██▉       | 58/197 [00:09<00:16,  8.30it/s] 30%|███       | 60/197 [00:09<00:17,  7.61it/s] 32%|███▏      | 63/197 [00:10<00:13,  9.89it/s] 33%|███▎      | 65/197 [00:10<00:19,  6.78it/s] 35%|███▍      | 68/197 [00:10<00:17,  7.25it/s] 35%|███▌      | 69/197 [00:11<00:18,  6.96it/s] 36%|███▌      | 71/197 [00:11<00:18,  6.77it/s] 37%|███▋      | 73/197 [00:11<00:15,  7.86it/s] 38%|███▊      | 74/197 [00:11<00:16,  7.36it/s] 38%|███▊      | 75/197 [00:12<00:21,  5.78it/s] 39%|███▊      | 76/197 [00:12<00:22,  5.39it/s] 39%|███▉      | 77/197 [00:12<00:23,  5.01it/s] 40%|███▉      | 78/197 [00:12<00:23,  5.17it/s] 40%|████      | 79/197 [00:12<00:21,  5.39it/s] 41%|████      | 80/197 [00:13<00:25,  4.53it/s] 42%|████▏     | 82/197 [00:13<00:16,  6.84it/s] 42%|████▏     | 83/197 [00:13<00:17,  6.64it/s] 43%|████▎     | 84/197 [00:13<00:20,  5.45it/s] 43%|████▎     | 85/197 [00:13<00:20,  5.56it/s] 44%|████▍     | 87/197 [00:14<00:15,  7.21it/s] 45%|████▍     | 88/197 [00:14<00:21,  5.19it/s] 46%|████▌     | 90/197 [00:14<00:16,  6.55it/s] 46%|████▌     | 91/197 [00:15<00:21,  4.98it/s] 47%|████▋     | 92/197 [00:15<00:21,  4.87it/s] 47%|████▋     | 93/197 [00:15<00:21,  4.94it/s] 48%|████▊     | 95/197 [00:15<00:19,  5.14it/s] 49%|████▊     | 96/197 [00:16<00:19,  5.06it/s] 50%|████▉     | 98/197 [00:16<00:15,  6.31it/s] 51%|█████▏    | 101/197 [00:16<00:13,  7.36it/s] 52%|█████▏    | 102/197 [00:16<00:13,  7.00it/s] 53%|█████▎    | 104/197 [00:16<00:11,  8.06it/s] 54%|█████▍    | 106/197 [00:17<00:13,  6.56it/s] 54%|█████▍    | 107/197 [00:17<00:14,  6.39it/s] 55%|█████▍    | 108/197 [00:17<00:17,  4.95it/s] 55%|█████▌    | 109/197 [00:18<00:17,  5.15it/s] 56%|█████▋    | 111/197 [00:18<00:14,  6.07it/s] 57%|█████▋    | 112/197 [00:18<00:17,  4.84it/s] 58%|█████▊    | 114/197 [00:18<00:14,  5.56it/s] 58%|█████▊    | 115/197 [00:19<00:18,  4.45it/s] 59%|█████▉    | 116/197 [00:19<00:17,  4.67it/s] 59%|█████▉    | 117/197 [00:19<00:18,  4.43it/s] 60%|█████▉    | 118/197 [00:20<00:21,  3.71it/s] 60%|██████    | 119/197 [00:20<00:19,  3.99it/s] 61%|██████    | 120/197 [00:20<00:18,  4.10it/s] 62%|██████▏   | 122/197 [00:20<00:14,  5.08it/s] 62%|██████▏   | 123/197 [00:21<00:14,  4.97it/s] 63%|██████▎   | 125/197 [00:21<00:11,  6.44it/s] 64%|██████▍   | 127/197 [00:21<00:09,  7.72it/s] 65%|██████▍   | 128/197 [00:21<00:12,  5.70it/s] 66%|██████▌   | 130/197 [00:21<00:09,  7.03it/s] 66%|██████▋   | 131/197 [00:22<00:09,  6.64it/s] 68%|██████▊   | 133/197 [00:22<00:10,  5.99it/s] 68%|██████▊   | 134/197 [00:22<00:10,  5.75it/s] 69%|██████▉   | 136/197 [00:22<00:08,  6.79it/s] 70%|███████   | 138/197 [00:23<00:10,  5.88it/s] 71%|███████   | 140/197 [00:23<00:08,  6.99it/s] 72%|███████▏  | 142/197 [00:23<00:06,  8.01it/s] 73%|███████▎  | 143/197 [00:23<00:07,  7.32it/s] 74%|███████▎  | 145/197 [00:24<00:08,  6.00it/s] 74%|███████▍  | 146/197 [00:24<00:08,  5.90it/s] 76%|███████▌  | 149/197 [00:24<00:06,  7.54it/s] 76%|███████▌  | 150/197 [00:25<00:08,  5.38it/s] 77%|███████▋  | 152/197 [00:25<00:07,  5.87it/s] 78%|███████▊  | 153/197 [00:25<00:08,  5.47it/s] 78%|███████▊  | 154/197 [00:26<00:09,  4.42it/s] 79%|███████▊  | 155/197 [00:26<00:09,  4.46it/s] 80%|████████  | 158/197 [00:26<00:05,  7.20it/s] 82%|████████▏ | 162/197 [00:26<00:03, 10.88it/s] 84%|████████▍ | 165/197 [00:27<00:03,  9.29it/s] 85%|████████▍ | 167/197 [00:27<00:03,  7.83it/s] 85%|████████▌ | 168/197 [00:27<00:03,  7.36it/s] 86%|████████▌ | 169/197 [00:27<00:04,  6.87it/s] 86%|████████▋ | 170/197 [00:28<00:05,  5.19it/s] 88%|████████▊ | 173/197 [00:28<00:03,  7.52it/s] 88%|████████▊ | 174/197 [00:28<00:03,  6.82it/s] 89%|████████▉ | 176/197 [00:28<00:02,  8.77it/s] 90%|█████████ | 178/197 [00:29<00:03,  5.77it/s] 91%|█████████ | 179/197 [00:29<00:03,  5.45it/s] 91%|█████████▏| 180/197 [00:29<00:03,  5.43it/s] 92%|█████████▏| 181/197 [00:30<00:03,  4.15it/s] 92%|█████████▏| 182/197 [00:30<00:03,  4.15it/s] 93%|█████████▎| 183/197 [00:30<00:03,  4.39it/s] 93%|█████████▎| 184/197 [00:30<00:02,  4.48it/s] 94%|█████████▍| 185/197 [00:31<00:03,  3.64it/s] 94%|█████████▍| 186/197 [00:31<00:02,  4.06it/s] 95%|█████████▌| 188/197 [00:31<00:01,  5.67it/s] 97%|█████████▋| 191/197 [00:31<00:00,  8.46it/s] 97%|█████████▋| 192/197 [00:31<00:00,  7.60it/s] 98%|█████████▊| 193/197 [00:32<00:00,  5.19it/s] 99%|█████████▉| 195/197 [00:32<00:00,  6.12it/s] 99%|█████████▉| 196/197 [00:32<00:00,  5.92it/s]100%|██████████| 197/197 [00:32<00:00,  6.02it/s]
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:00<00:00,  6.00it/s]100%|██████████| 1/1 [00:00<00:00,  5.99it/s]
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/dmonopoli/.netrc.
+wandb: Currently logged in as: dario-monopoli to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.27.1
+wandb: Run data is saved locally in /work/scratch/dmonopoli/wandb/wandb/run-20260605_211618-7byicitu
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run Ablation: hand to gs injection (v2)
+wandb: ⭐️ View project at https://wandb.ai/3DV-Project/hand-head-training
+wandb: 🚀 View run at https://wandb.ai/3DV-Project/hand-head-training/runs/7byicitu
+Epochs:   0%|          | 0/1 [00:00<?, ?it/s]
+Train 1:   0%|          | 0/7424 [00:00<?, ?it/s][A
+Train 1:   0%|          | 1/7424 [00:03<7:33:58,  3.67s/it][A
+Train 1:   0%|          | 2/7424 [00:04<3:55:19,  1.90s/it][A
+Train 1:   0%|          | 3/7424 [00:07<5:02:58,  2.45s/it][A
+Train 1:   0%|          | 4/7424 [00:08<4:05:08,  1.98s/it][A
+                                                           [AEpochs:   0%|          | 0/1 [01:48<?, ?it/s]
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 1558, in <module>
+    train()
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 1319, in train
+    rendered = render_views_from_predictions(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/gs_metrics.py", line 97, in render_views_from_predictions
+    rendered, _depth, _alpha = model.gs_renderer.rasterizer.forward(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/auxiliary_models/worldmirror/models/models/rasterization.py", line 341, in forward
+    rendered_colors, rendered_depths, rendered_alphas = self.rasterize_splats(
+                                                        ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/auxiliary_models/worldmirror/models/models/rasterization.py", line 379, in rasterize_splats
+    render_colors, render_alphas, _ = rasterization(
+                                      ^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/rendering.py", line 634, in rasterization
+    tiles_per_gauss, isect_ids, flatten_ids = isect_tiles(
+                                              ^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/cuda/_wrapper.py", line 504, in isect_tiles
+    tiles_per_gauss, isect_ids, flatten_ids = _make_lazy_cuda_func("intersect_tile")(
+                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/cuda/_wrapper.py", line 17, in call_cuda
+    return getattr(_C, name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: Trying to create tensor with negative dimension -54565393021600: [-54565393021600]
+Exception raised from check_size_nonnegative at /pytorch/aten/src/ATen/EmptyTensor.h:8 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0xd4 (0xfb5c6b9b3ea4 in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libc10.so)
+frame #1: c10::detail::torchCheckFail(char const*, char const*, unsigned int, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) + 0xe4 (0xfb5c6b953e44 in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libc10.so)
+frame #2: <unknown function> + 0x11e0f04 (0xfb5c96f10f04 in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #3: <unknown function> + 0x11e2f24 (0xfb5c96f12f24 in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #4: at::detail::empty_generic(c10::ArrayRef<long>, c10::Allocator*, c10::DispatchKeySet, c10::ScalarType, std::optional<c10::MemoryFormat>) + 0x14 (0xfb5c96f13984 in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #5: at::detail::empty_cuda(c10::ArrayRef<long>, c10::ScalarType, std::optional<c10::Device>, std::optional<c10::MemoryFormat>) + 0xc8 (0xfb5c6c45a428 in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #6: at::detail::empty_cuda(c10::ArrayRef<long>, std::optional<c10::ScalarType>, std::optional<c10::Layout>, std::optional<c10::Device>, std::optional<bool>, std::optional<c10::MemoryFormat>) + 0x70 (0xfb5c6c45a5f0 in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #7: at::native::empty_cuda(c10::ArrayRef<long>, std::optional<c10::ScalarType>, std::optional<c10::Layout>, std::optional<c10::Device>, std::optional<bool>, std::optional<c10::MemoryFormat>) + 0x2c (0xfb5c6c82462c in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #8: <unknown function> + 0xd75f34 (0xfb5c6c475f34 in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #9: <unknown function> + 0xd76040 (0xfb5c6c476040 in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+frame #10: at::_ops::empty_memory_format::redispatch(c10::DispatchKeySet, c10::ArrayRef<c10::SymInt>, std::optional<c10::ScalarType>, std::optional<c10::Layout>, std::optional<c10::Device>, std::optional<bool>, std::optional<c10::MemoryFormat>) + 0xfc (0xfb5c96f6084c in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #11: <unknown function> + 0x123e9b0 (0xfb5c96f6e9b0 in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #12: at::_ops::empty_memory_format::call(c10::ArrayRef<c10::SymInt>, std::optional<c10::ScalarType>, std::optional<c10::Layout>, std::optional<c10::Device>, std::optional<bool>, std::optional<c10::MemoryFormat>) + 0x12c (0xfb5c96f61f1c in /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so)
+frame #13: gsplat::intersect_tile(at::Tensor, at::Tensor, at::Tensor, std::optional<at::Tensor>, std::optional<at::Tensor>, unsigned int, unsigned int, unsigned int, unsigned int, bool, bool) + 0xadc (0xfb5bbf626e4c in /work/scratch/dmonopoli/xdg_cache/torch_extensions/py312_cu128/gsplat_cuda/gsplat_cuda.so)
+frame #14: <unknown function> + 0x10c874 (0xfb5bbf65c874 in /work/scratch/dmonopoli/xdg_cache/torch_extensions/py312_cu128/gsplat_cuda/gsplat_cuda.so)
+frame #15: <unknown function> + 0x104380 (0xfb5bbf654380 in /work/scratch/dmonopoli/xdg_cache/torch_extensions/py312_cu128/gsplat_cuda/gsplat_cuda.so)
+frame #16: python3() [0x504674]
+<omitting python frames>
+frame #20: python3() [0x55fd08]
+frame #21: python3() [0x50446c]
+frame #24: python3() [0x68bd58]
+frame #27: <unknown function> + 0x284c4 (0xfb5cb3d084c4 in /lib/aarch64-linux-gnu/libc.so.6)
+frame #28: __libc_start_main + 0x98 (0xfb5cb3d08598 in /lib/aarch64-linux-gnu/libc.so.6)
+

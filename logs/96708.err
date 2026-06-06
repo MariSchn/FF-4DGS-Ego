@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 33, in <module>
+    from scripts.hand_metrics import metric_chunks_from_batch, metrics_from_chunks
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/hand_metrics.py", line 20, in <module>
+    from scripts.hand_vis_utils import quat_wxyz_to_axis_angle_torch
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/hand_vis_utils.py", line 18, in <module>
+    from projectaria_tools.core.calibration import CameraCalibration, FISHEYE624
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/projectaria_tools/__init__.py", line 16, in <module>
+    from . import core  # noqa
+    ^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/projectaria_tools/core/__init__.py", line 21, in <module>
+    from . import (  # noqa
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/projectaria_tools/core/calibration.py", line 19, in <module>
+    from _core_pybinds.calibration import *  # noqa
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ModuleNotFoundError: No module named '_core_pybinds'

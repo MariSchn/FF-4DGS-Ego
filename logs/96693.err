@@ -1,0 +1,30 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 28, in <module>
+    from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/__init__.py", line 2, in <module>
+    from .models import *
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/models/__init__.py", line 1, in <module>
+    from .model_manager import *
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/models/model_manager.py", line 4, in <module>
+    from .downloader import download_models, download_customized_models, Preset_model_id, Preset_model_website
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/models/downloader.py", line 6, in <module>
+    from ..configs.model_config import preset_models_on_huggingface, preset_models_on_modelscope, Preset_model_id
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/configs/model_config.py", line 13, in <module>
+    from ..models.sd3_text_encoder import SD3TextEncoder1, SD3TextEncoder2, SD3TextEncoder3
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/models/sd3_text_encoder.py", line 2, in <module>
+    from transformers import T5EncoderModel, T5Config
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/transformers/__init__.py", line 27, in <module>
+    from . import dependency_versions_check
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/transformers/dependency_versions_check.py", line 57, in <module>
+    require_version_core(deps[pkg])
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/transformers/utils/versions.py", line 117, in require_version_core
+    return require_version(requirement, hint)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/transformers/utils/versions.py", line 111, in require_version
+    _compare_versions(op, got_ver, want_ver, requirement, pkg, hint)
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/transformers/utils/versions.py", line 44, in _compare_versions
+    raise ImportError(
+ImportError: tokenizers>=0.22.0,<=0.23.0 is required for a normal functioning of this module, but found tokenizers==0.23.1.
+Try: `pip install transformers -U` or `pip install -e '.[dev]'` if you're working with git main

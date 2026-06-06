@@ -18,8 +18,8 @@
 #SBATCH --job-name=ff4dgs-gb10
 #SBATCH --account=3dv
 #SBATCH --gpus=gb10:1
-#SBATCH --cpus-per-task=8
-#SBATCH --time=24:00:00
+#SBATCH --mem=32G
+#SBATCH --time=72:00:00
 #SBATCH --output=logs/%j.out
 #SBATCH --error=logs/%j.err
 
@@ -44,11 +44,25 @@ if [[ ! -f venv_gb10/bin/activate ]]; then
 fi
 source venv_gb10/bin/activate
 
+# --- Ensure ninja matches the compute node's architecture (aarch64) -------
+if [[ "$(uname -m)" == "aarch64" ]]; then
+  NINJA_PATH="$(which ninja 2>/dev/null || true)"
+  if [[ -z "${NINJA_PATH}" ]] || { type file &>/dev/null && file "${NINJA_PATH}" | grep -q "x86-64"; }; then
+    echo "Ninja is missing or has incorrect architecture for aarch64 node. Reinstalling..."
+    pip install --force-reinstall ninja
+  fi
+fi
+
+
 # GB10 has ~128 GB unified (Grace+Blackwell) memory; reduce allocator
 # fragmentation so large batches survive transient peaks.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export TORCH_SHOW_CPP_STACKTRACES=1
+export TORCH_CUDA_ARCH_LIST="12.1"
+
+export WANDB_ENTITY="roman-zberg-uzh-organization-org"
+export WANDB_DIR="/work/scratch/dmonopoli/wandb"
 
 # --- Fail fast, before the GPU slot is wasted -----------------------------
 python - <<'PY'

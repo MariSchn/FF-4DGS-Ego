@@ -1,0 +1,65 @@
+  0%|          | 0/197 [00:00<?, ?it/s]  1%|          | 2/197 [00:00<00:58,  3.32it/s]  2%|▏         | 3/197 [00:01<01:14,  2.61it/s]  2%|▏         | 4/197 [00:01<01:16,  2.53it/s]  3%|▎         | 5/197 [00:02<01:24,  2.28it/s]  3%|▎         | 6/197 [00:02<01:31,  2.09it/s]  4%|▎         | 7/197 [00:03<01:40,  1.89it/s]  4%|▍         | 8/197 [00:03<01:30,  2.08it/s]  5%|▍         | 9/197 [00:04<01:28,  2.12it/s]  5%|▌         | 10/197 [00:04<01:22,  2.28it/s]  8%|▊         | 15/197 [00:04<00:35,  5.06it/s]  9%|▉         | 18/197 [00:05<00:32,  5.49it/s] 10%|█         | 20/197 [00:05<00:36,  4.82it/s] 11%|█         | 21/197 [00:06<00:46,  3.77it/s] 11%|█         | 22/197 [00:06<00:52,  3.31it/s] 12%|█▏        | 23/197 [00:07<01:02,  2.81it/s] 12%|█▏        | 24/197 [00:08<01:07,  2.55it/s] 13%|█▎        | 25/197 [00:08<01:16,  2.24it/s] 14%|█▎        | 27/197 [00:09<01:01,  2.75it/s] 14%|█▍        | 28/197 [00:09<01:04,  2.63it/s] 15%|█▍        | 29/197 [00:09<01:03,  2.65it/s] 16%|█▌        | 31/197 [00:10<00:52,  3.15it/s] 18%|█▊        | 35/197 [00:10<00:35,  4.56it/s] 19%|█▉        | 38/197 [00:11<00:33,  4.71it/s] 20%|█▉        | 39/197 [00:11<00:39,  3.99it/s] 21%|██▏       | 42/197 [00:12<00:34,  4.46it/s] 22%|██▏       | 43/197 [00:13<00:43,  3.57it/s] 23%|██▎       | 45/197 [00:13<00:34,  4.38it/s] 23%|██▎       | 46/197 [00:13<00:41,  3.62it/s] 24%|██▍       | 47/197 [00:14<00:48,  3.12it/s] 24%|██▍       | 48/197 [00:14<00:50,  2.96it/s] 25%|██▍       | 49/197 [00:15<00:57,  2.58it/s] 25%|██▌       | 50/197 [00:15<00:58,  2.51it/s] 26%|██▋       | 52/197 [00:16<00:50,  2.86it/s] 27%|██▋       | 53/197 [00:16<00:53,  2.67it/s] 27%|██▋       | 54/197 [00:17<00:58,  2.46it/s] 28%|██▊       | 55/197 [00:17<00:53,  2.65it/s] 29%|██▉       | 58/197 [00:18<00:38,  3.60it/s] 30%|███       | 60/197 [00:18<00:36,  3.80it/s] 32%|███▏      | 63/197 [00:18<00:27,  4.84it/s] 32%|███▏      | 64/197 [00:19<00:34,  3.82it/s] 33%|███▎      | 65/197 [00:20<00:42,  3.12it/s] 35%|███▍      | 68/197 [00:20<00:31,  4.14it/s] 35%|███▌      | 69/197 [00:21<00:39,  3.28it/s] 36%|███▌      | 71/197 [00:21<00:33,  3.80it/s] 37%|███▋      | 73/197 [00:21<00:29,  4.13it/s] 38%|███▊      | 74/197 [00:22<00:38,  3.20it/s] 38%|███▊      | 75/197 [00:22<00:39,  3.11it/s] 39%|███▊      | 76/197 [00:23<00:46,  2.61it/s] 39%|███▉      | 77/197 [00:23<00:42,  2.85it/s] 40%|███▉      | 78/197 [00:24<00:49,  2.39it/s] 40%|████      | 79/197 [00:24<00:48,  2.46it/s] 41%|████      | 80/197 [00:24<00:45,  2.55it/s] 41%|████      | 81/197 [00:25<00:41,  2.82it/s] 42%|████▏     | 83/197 [00:25<00:35,  3.17it/s] 43%|████▎     | 84/197 [00:26<00:36,  3.07it/s] 43%|████▎     | 85/197 [00:26<00:40,  2.77it/s] 44%|████▍     | 87/197 [00:27<00:35,  3.08it/s] 45%|████▍     | 88/197 [00:27<00:37,  2.91it/s] 46%|████▌     | 90/197 [00:28<00:33,  3.20it/s] 46%|████▌     | 91/197 [00:28<00:38,  2.79it/s] 47%|████▋     | 92/197 [00:29<00:45,  2.32it/s] 47%|████▋     | 93/197 [00:29<00:44,  2.33it/s] 48%|████▊     | 95/197 [00:30<00:39,  2.55it/s] 49%|████▊     | 96/197 [00:30<00:42,  2.37it/s] 50%|████▉     | 98/197 [00:31<00:34,  2.89it/s] 51%|█████▏    | 101/197 [00:31<00:25,  3.73it/s] 52%|█████▏    | 102/197 [00:32<00:27,  3.47it/s] 53%|█████▎    | 104/197 [00:32<00:24,  3.73it/s] 54%|█████▍    | 106/197 [00:33<00:26,  3.41it/s] 54%|█████▍    | 107/197 [00:33<00:27,  3.26it/s] 55%|█████▍    | 108/197 [00:34<00:32,  2.72it/s] 55%|█████▌    | 109/197 [00:34<00:32,  2.71it/s] 56%|█████▋    | 111/197 [00:35<00:27,  3.17it/s] 57%|█████▋    | 112/197 [00:35<00:31,  2.72it/s] 57%|█████▋    | 113/197 [00:35<00:27,  3.02it/s] 58%|█████▊    | 114/197 [00:36<00:29,  2.83it/s] 58%|█████▊    | 115/197 [00:37<00:35,  2.29it/s] 59%|█████▉    | 116/197 [00:37<00:33,  2.41it/s] 59%|█████▉    | 117/197 [00:37<00:36,  2.20it/s] 60%|█████▉    | 118/197 [00:38<00:40,  1.95it/s] 60%|██████    | 119/197 [00:39<00:38,  2.05it/s] 61%|██████    | 120/197 [00:39<00:37,  2.04it/s] 62%|██████▏   | 122/197 [00:40<00:27,  2.70it/s] 62%|██████▏   | 123/197 [00:40<00:27,  2.65it/s] 63%|██████▎   | 125/197 [00:40<00:21,  3.35it/s] 64%|██████▍   | 127/197 [00:41<00:20,  3.35it/s] 65%|██████▍   | 128/197 [00:41<00:21,  3.16it/s] 66%|██████▌   | 130/197 [00:42<00:18,  3.70it/s] 66%|██████▋   | 131/197 [00:42<00:19,  3.37it/s] 68%|██████▊   | 133/197 [00:43<00:19,  3.35it/s] 68%|██████▊   | 134/197 [00:43<00:20,  3.06it/s] 69%|██████▉   | 136/197 [00:44<00:17,  3.39it/s] 70%|██████▉   | 137/197 [00:44<00:19,  3.12it/s] 70%|███████   | 138/197 [00:44<00:20,  2.93it/s] 71%|███████   | 140/197 [00:45<00:16,  3.46it/s] 72%|███████▏  | 142/197 [00:45<00:14,  3.87it/s] 73%|███████▎  | 143/197 [00:46<00:18,  2.96it/s] 73%|███████▎  | 144/197 [00:46<00:16,  3.15it/s] 74%|███████▎  | 145/197 [00:47<00:17,  2.95it/s] 74%|███████▍  | 146/197 [00:47<00:18,  2.78it/s] 75%|███████▌  | 148/197 [00:47<00:12,  4.06it/s] 76%|███████▌  | 149/197 [00:48<00:15,  3.03it/s] 76%|███████▌  | 150/197 [00:48<00:16,  2.77it/s] 77%|███████▋  | 151/197 [00:48<00:15,  2.98it/s] 77%|███████▋  | 152/197 [00:49<00:15,  2.90it/s] 78%|███████▊  | 153/197 [00:50<00:19,  2.28it/s] 78%|███████▊  | 154/197 [00:50<00:18,  2.39it/s] 79%|███████▊  | 155/197 [00:50<00:17,  2.38it/s] 80%|████████  | 158/197 [00:51<00:11,  3.38it/s] 82%|████████▏ | 162/197 [00:51<00:06,  5.09it/s] 84%|████████▍ | 165/197 [00:52<00:05,  5.46it/s] 84%|████████▍ | 166/197 [00:52<00:06,  4.53it/s] 85%|████████▍ | 167/197 [00:53<00:08,  3.55it/s] 85%|████████▌ | 168/197 [00:53<00:09,  3.15it/s] 86%|████████▌ | 169/197 [00:54<00:09,  2.83it/s] 86%|████████▋ | 170/197 [00:54<00:09,  2.76it/s] 88%|████████▊ | 173/197 [00:55<00:07,  3.34it/s] 88%|████████▊ | 174/197 [00:55<00:07,  3.08it/s] 89%|████████▉ | 176/197 [00:56<00:05,  3.98it/s] 90%|████████▉ | 177/197 [00:56<00:05,  3.57it/s] 90%|█████████ | 178/197 [00:56<00:05,  3.17it/s] 91%|█████████ | 179/197 [00:57<00:07,  2.52it/s] 91%|█████████▏| 180/197 [00:57<00:06,  2.54it/s] 92%|█████████▏| 181/197 [00:58<00:06,  2.51it/s] 92%|█████████▏| 182/197 [00:58<00:07,  2.07it/s] 93%|█████████▎| 183/197 [00:59<00:06,  2.19it/s] 93%|█████████▎| 184/197 [00:59<00:05,  2.26it/s] 94%|█████████▍| 185/197 [01:00<00:05,  2.20it/s] 94%|█████████▍| 186/197 [01:00<00:05,  1.99it/s] 95%|█████████▌| 188/197 [01:01<00:03,  2.60it/s] 97%|█████████▋| 191/197 [01:01<00:01,  3.71it/s] 97%|█████████▋| 192/197 [01:02<00:01,  3.21it/s] 98%|█████████▊| 193/197 [01:02<00:01,  2.93it/s] 99%|█████████▉| 195/197 [01:03<00:00,  2.91it/s] 99%|█████████▉| 196/197 [01:03<00:00,  2.71it/s]100%|██████████| 197/197 [01:03<00:00,  3.08it/s]
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:00<00:00,  2.17it/s]100%|██████████| 1/1 [00:00<00:00,  2.12it/s]
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/dmonopoli/.netrc.
+wandb: Currently logged in as: dario-monopoli to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.27.1
+wandb: Run data is saved locally in /work/scratch/dmonopoli/wandb/wandb/run-20260605_232954-ssjualx2
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run Ablation: hand to gs injection (v2)
+wandb: ⭐️ View project at https://wandb.ai/3DV-Project/hand-head-training
+wandb: 🚀 View run at https://wandb.ai/3DV-Project/hand-head-training/runs/ssjualx2
+Epochs:   0%|          | 0/1 [00:00<?, ?it/s]
+Train 1:   0%|          | 0/7433 [00:00<?, ?it/s][A
+Train 1:   0%|          | 1/7433 [00:03<6:35:10,  3.19s/it][A
+Train 1:   0%|          | 2/7433 [00:04<4:22:22,  2.12s/it][A
+Train 1:   0%|          | 3/7433 [00:07<5:22:54,  2.61s/it][A
+Train 1:   0%|          | 4/7433 [00:11<6:26:50,  3.12s/it][A
+Train 1:   0%|          | 5/7433 [00:13<5:18:14,  2.57s/it][A
+Train 1:   0%|          | 6/7433 [00:15<5:04:35,  2.46s/it][A
+Train 1:   0%|          | 7/7433 [00:19<5:53:30,  2.86s/it][A
+Train 1:   0%|          | 8/7433 [00:21<5:48:15,  2.81s/it][A/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torchvision/models/_utils.py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and may be removed in the future, please use 'weights' instead.
+  warnings.warn(
+/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torchvision/models/_utils.py:223: UserWarning: Arguments other than a weight enum or `None` for 'weights' are deprecated since 0.13 and may be removed in the future. The current behavior is equivalent to passing `weights=AlexNet_Weights.IMAGENET1K_V1`. You can also use `weights=AlexNet_Weights.DEFAULT` to get the most up-to-date weights.
+  warnings.warn(msg)
+
+                                                           [AEpochs:   0%|          | 0/1 [01:53<?, ?it/s]
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 1569, in <module>
+    train()
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 1338, in train
+    lpips_model = lpips_scorer._ensure()
+                  ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/gs_metrics.py", line 46, in _ensure
+    self._model = lpips.LPIPS(net=self.net).to(self.device)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/lpips/lpips.py", line 84, in __init__
+    self.net = net_type(pretrained=not self.pnet_rand, requires_grad=self.pnet_tune)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/lpips/pretrained_networks.py", line 59, in __init__
+    alexnet_pretrained_features = tv.alexnet(pretrained=pretrained).features
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torchvision/models/_utils.py", line 142, in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torchvision/models/_utils.py", line 228, in inner_wrapper
+    return builder(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torchvision/models/alexnet.py", line 114, in alexnet
+    model = AlexNet(**kwargs)
+            ^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torchvision/models/alexnet.py", line 44, in __init__
+    nn.Linear(4096, num_classes),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/nn/modules/linear.py", line 112, in __init__
+    self.reset_parameters()
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/nn/modules/linear.py", line 118, in reset_parameters
+    init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/nn/init.py", line 518, in kaiming_uniform_
+    return tensor.uniform_(-bound, bound, generator=generator)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/utils/data/_utils/signal_handling.py", line 73, in handler
+    _error_if_any_worker_fails()
+RuntimeError: DataLoader worker (pid 588111) is killed by signal: Killed. 
+[2026-06-05T23:32:16.382] error: Detected 1 oom_kill event in StepId=96810.batch. Some of the step tasks have been OOM Killed.

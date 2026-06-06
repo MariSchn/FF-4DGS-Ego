@@ -97,11 +97,14 @@ def sample_depth_at_joints(
         in_frame: [B, S, H, J] bool, True where the joint projects inside [0, 1]^2.
     """
     if gs_depth.dim() == 5:
-        if gs_depth.shape[2] != 1:
+        if gs_depth.shape[2] == 1:
+            gs_depth = gs_depth[:, :, 0]
+        elif gs_depth.shape[4] == 1:
+            gs_depth = gs_depth[:, :, :, :, 0]
+        else:
             raise ValueError(f"expected gs_depth channel dim 1, got {tuple(gs_depth.shape)}")
-        gs_depth = gs_depth[:, :, 0]
     if gs_depth.dim() != 4:
-        raise ValueError(f"gs_depth must be [B,S,1,Hd,Wd] or [B,S,Hd,Wd], got {tuple(gs_depth.shape)}")
+        raise ValueError(f"gs_depth must be [B,S,1,Hd,Wd], [B,S,Hd,Wd,1] or [B,S,Hd,Wd], got {tuple(gs_depth.shape)}")
 
     B, S, Hd, Wd = gs_depth.shape
     H, J = grid_xy.shape[2], grid_xy.shape[3]

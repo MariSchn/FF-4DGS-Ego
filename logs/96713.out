@@ -1,0 +1,32 @@
+==================================================
+Job        : 96713 on studgpu-spark01.inf.ethz.ch
+GPU(s)     : 0
+Config     : configs/ablation_hand_to_gs_injection.yaml
+Git        : 3994377 (feat/hand-scene-metric-coupling)
+Started    : Fri Jun  5 16:23:12 CEST 2026
+==================================================
+Fri Jun  5 16:23:12 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.126.09             Driver Version: 580.126.09     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GB10                    On  |   0000000F:01:00.0  On |                  N/A |
+| N/A   46C    P8              4W /  N/A  | Not Supported          |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+torch 2.7.1+cu128 | device NVIDIA GB10 | capability (12, 1)
+Loaded checkpoint. New (hand head) keys: 142
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+WARNING: You are using a MANO model, with only 10 shape coefficients.
+Trainable parameters: hand=46,257,185 gs_head=32,673,506 injection=2,886,400 total=81,817,091

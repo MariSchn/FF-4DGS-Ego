@@ -1,0 +1,73 @@
+  0%|          | 0/197 [00:00<?, ?it/s]  1%|          | 2/197 [00:00<00:57,  3.38it/s]  2%|▏         | 3/197 [00:01<01:13,  2.66it/s]  2%|▏         | 4/197 [00:01<01:20,  2.39it/s]  3%|▎         | 5/197 [00:01<01:20,  2.39it/s]  3%|▎         | 6/197 [00:02<01:29,  2.14it/s]  4%|▎         | 7/197 [00:03<01:32,  2.06it/s]  4%|▍         | 8/197 [00:03<01:29,  2.11it/s]  5%|▍         | 9/197 [00:03<01:27,  2.15it/s]  5%|▌         | 10/197 [00:04<01:21,  2.30it/s]  8%|▊         | 15/197 [00:04<00:35,  5.07it/s]  9%|▉         | 18/197 [00:05<00:32,  5.55it/s] 10%|█         | 20/197 [00:05<00:36,  4.91it/s] 11%|█         | 21/197 [00:06<00:45,  3.83it/s] 11%|█         | 22/197 [00:06<00:51,  3.38it/s] 12%|█▏        | 23/197 [00:07<00:57,  3.04it/s] 12%|█▏        | 24/197 [00:07<01:06,  2.59it/s] 13%|█▎        | 25/197 [00:08<01:15,  2.29it/s] 14%|█▎        | 27/197 [00:08<01:00,  2.80it/s] 14%|█▍        | 28/197 [00:09<01:02,  2.70it/s] 15%|█▍        | 29/197 [00:09<00:57,  2.92it/s] 16%|█▌        | 31/197 [00:10<00:52,  3.17it/s] 18%|█▊        | 35/197 [00:10<00:35,  4.59it/s] 19%|█▉        | 38/197 [00:11<00:32,  4.86it/s] 20%|█▉        | 39/197 [00:11<00:38,  4.15it/s] 21%|██▏       | 42/197 [00:12<00:33,  4.60it/s] 22%|██▏       | 43/197 [00:12<00:38,  4.03it/s] 23%|██▎       | 45/197 [00:12<00:31,  4.88it/s] 23%|██▎       | 46/197 [00:13<00:38,  3.95it/s] 24%|██▍       | 47/197 [00:13<00:41,  3.64it/s] 24%|██▍       | 48/197 [00:14<00:48,  3.09it/s] 25%|██▍       | 49/197 [00:14<00:54,  2.72it/s] 25%|██▌       | 50/197 [00:15<00:55,  2.66it/s] 26%|██▋       | 52/197 [00:15<00:47,  3.03it/s] 27%|██▋       | 53/197 [00:16<00:51,  2.81it/s] 27%|██▋       | 54/197 [00:16<00:56,  2.54it/s] 28%|██▊       | 55/197 [00:16<00:51,  2.74it/s] 29%|██▉       | 58/197 [00:17<00:34,  4.08it/s] 30%|███       | 60/197 [00:17<00:35,  3.81it/s] 32%|███▏      | 63/197 [00:18<00:27,  4.88it/s] 32%|███▏      | 64/197 [00:18<00:34,  3.87it/s] 33%|███▎      | 65/197 [00:19<00:38,  3.46it/s] 35%|███▍      | 68/197 [00:19<00:31,  4.08it/s] 35%|███▌      | 69/197 [00:20<00:35,  3.58it/s] 36%|███▌      | 71/197 [00:20<00:33,  3.78it/s] 37%|███▋      | 73/197 [00:21<00:29,  4.17it/s] 38%|███▊      | 74/197 [00:21<00:34,  3.59it/s] 38%|███▊      | 75/197 [00:21<00:39,  3.09it/s] 39%|███▊      | 76/197 [00:22<00:41,  2.92it/s] 39%|███▉      | 77/197 [00:22<00:42,  2.83it/s] 40%|███▉      | 78/197 [00:23<00:45,  2.64it/s] 40%|████      | 79/197 [00:23<00:44,  2.68it/s] 41%|████      | 80/197 [00:24<00:47,  2.45it/s] 41%|████      | 81/197 [00:24<00:41,  2.76it/s] 42%|████▏     | 83/197 [00:24<00:32,  3.51it/s] 43%|████▎     | 84/197 [00:25<00:38,  2.96it/s] 43%|████▎     | 85/197 [00:25<00:40,  2.74it/s] 44%|████▍     | 87/197 [00:26<00:31,  3.45it/s] 45%|████▍     | 88/197 [00:26<00:38,  2.86it/s] 46%|████▌     | 90/197 [00:26<00:30,  3.56it/s] 46%|████▌     | 91/197 [00:27<00:38,  2.75it/s] 47%|████▋     | 92/197 [00:28<00:41,  2.54it/s] 47%|████▋     | 93/197 [00:28<00:41,  2.51it/s] 48%|████▊     | 95/197 [00:29<00:37,  2.72it/s] 49%|████▊     | 96/197 [00:29<00:39,  2.55it/s] 50%|████▉     | 98/197 [00:30<00:31,  3.10it/s] 51%|█████▏    | 101/197 [00:30<00:24,  3.96it/s] 52%|█████▏    | 102/197 [00:30<00:25,  3.68it/s] 53%|█████▎    | 104/197 [00:31<00:23,  3.97it/s] 54%|█████▍    | 106/197 [00:31<00:24,  3.68it/s] 54%|█████▍    | 107/197 [00:32<00:25,  3.49it/s] 55%|█████▍    | 108/197 [00:32<00:30,  2.91it/s] 55%|█████▌    | 109/197 [00:33<00:29,  2.94it/s] 56%|█████▋    | 111/197 [00:33<00:25,  3.41it/s] 57%|█████▋    | 112/197 [00:34<00:29,  2.92it/s] 57%|█████▋    | 113/197 [00:34<00:25,  3.24it/s] 58%|█████▊    | 114/197 [00:34<00:26,  3.10it/s] 58%|█████▊    | 115/197 [00:35<00:33,  2.45it/s] 59%|█████▉    | 116/197 [00:35<00:31,  2.56it/s] 59%|█████▉    | 117/197 [00:36<00:34,  2.33it/s] 60%|█████▉    | 118/197 [00:36<00:38,  2.06it/s] 60%|██████    | 119/197 [00:37<00:35,  2.18it/s] 61%|██████    | 120/197 [00:37<00:35,  2.15it/s] 62%|██████▏   | 122/197 [00:38<00:26,  2.83it/s] 62%|██████▏   | 123/197 [00:38<00:26,  2.78it/s] 63%|██████▎   | 125/197 [00:38<00:20,  3.48it/s] 64%|██████▍   | 127/197 [00:39<00:17,  3.94it/s] 65%|██████▍   | 128/197 [00:39<00:21,  3.19it/s] 66%|██████▌   | 130/197 [00:40<00:17,  3.75it/s] 66%|██████▋   | 131/197 [00:40<00:18,  3.48it/s] 68%|██████▊   | 133/197 [00:41<00:18,  3.47it/s] 68%|██████▊   | 134/197 [00:41<00:19,  3.19it/s] 69%|██████▉   | 136/197 [00:42<00:17,  3.55it/s] 70%|██████▉   | 137/197 [00:42<00:15,  3.81it/s] 70%|███████   | 138/197 [00:42<00:20,  2.92it/s] 71%|███████   | 140/197 [00:43<00:16,  3.52it/s] 72%|███████▏  | 142/197 [00:43<00:13,  3.95it/s] 73%|███████▎  | 143/197 [00:44<00:15,  3.46it/s] 73%|███████▎  | 144/197 [00:44<00:14,  3.56it/s] 74%|███████▎  | 145/197 [00:44<00:18,  2.85it/s] 74%|███████▍  | 146/197 [00:45<00:18,  2.74it/s] 75%|███████▌  | 148/197 [00:45<00:12,  4.06it/s] 76%|███████▌  | 149/197 [00:45<00:13,  3.59it/s] 76%|███████▌  | 150/197 [00:46<00:17,  2.73it/s] 77%|███████▋  | 151/197 [00:46<00:15,  2.98it/s] 77%|███████▋  | 152/197 [00:47<00:15,  2.92it/s] 78%|███████▊  | 153/197 [00:47<00:16,  2.62it/s] 78%|███████▊  | 154/197 [00:48<00:18,  2.31it/s] 79%|███████▊  | 155/197 [00:48<00:17,  2.35it/s] 80%|████████  | 158/197 [00:48<00:10,  3.87it/s] 82%|████████▏ | 162/197 [00:49<00:06,  5.65it/s] 84%|████████▍ | 165/197 [00:49<00:06,  5.31it/s] 84%|████████▍ | 166/197 [00:50<00:06,  4.54it/s] 85%|████████▍ | 167/197 [00:50<00:07,  4.12it/s] 85%|████████▌ | 168/197 [00:51<00:08,  3.52it/s] 86%|████████▌ | 169/197 [00:51<00:08,  3.12it/s] 86%|████████▋ | 170/197 [00:52<00:10,  2.67it/s] 88%|████████▊ | 173/197 [00:52<00:06,  3.78it/s] 88%|████████▊ | 174/197 [00:52<00:06,  3.43it/s] 89%|████████▉ | 176/197 [00:53<00:04,  4.38it/s] 90%|████████▉ | 177/197 [00:53<00:05,  3.35it/s] 90%|█████████ | 178/197 [00:54<00:06,  3.10it/s] 91%|█████████ | 179/197 [00:54<00:06,  2.88it/s] 91%|█████████▏| 180/197 [00:55<00:06,  2.82it/s] 92%|█████████▏| 181/197 [00:55<00:06,  2.36it/s] 92%|█████████▏| 182/197 [00:56<00:06,  2.33it/s] 93%|█████████▎| 183/197 [00:56<00:05,  2.44it/s] 93%|█████████▎| 184/197 [00:56<00:05,  2.50it/s] 94%|█████████▍| 185/197 [00:57<00:05,  2.11it/s] 94%|█████████▍| 186/197 [00:57<00:04,  2.25it/s] 95%|█████████▌| 188/197 [00:58<00:03,  2.88it/s] 97%|█████████▋| 191/197 [00:58<00:01,  4.10it/s] 97%|█████████▋| 192/197 [00:59<00:01,  3.46it/s] 98%|█████████▊| 193/197 [00:59<00:01,  2.75it/s] 99%|█████████▉| 195/197 [01:00<00:00,  3.20it/s] 99%|█████████▉| 196/197 [01:00<00:00,  2.94it/s]100%|██████████| 197/197 [01:00<00:00,  3.24it/s]
+  0%|          | 0/1 [00:00<?, ?it/s]100%|██████████| 1/1 [00:00<00:00,  2.30it/s]100%|██████████| 1/1 [00:00<00:00,  2.30it/s]
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/dmonopoli/.netrc.
+wandb: Currently logged in as: dario-monopoli to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run 2rilecsg
+wandb: Tracking run with wandb version 0.27.1
+wandb: Run data is saved locally in /work/scratch/dmonopoli/wandb/wandb/run-20260605_171041-2rilecsg
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run Ablation: hand to gs injection (v2)
+wandb: ⭐️ View project at https://wandb.ai/3DV-Project/hand-head-training
+wandb: 🚀 View run at https://wandb.ai/3DV-Project/hand-head-training/runs/2rilecsg
+Epochs:   0%|          | 0/1 [00:00<?, ?it/s]
+Train 1:   0%|          | 0/7424 [00:00<?, ?it/s][A
+                                                 [AEpochs:   0%|          | 0/1 [00:48<?, ?it/s]
+Traceback (most recent call last):
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/cuda/_backend.py", line 166, in <module>
+    from gsplat import csrc as _C
+ImportError: cannot import name 'csrc' from 'gsplat' (/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/__init__.py)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/cuda/_backend.py", line 79, in load_extension
+    compiled = _jit_compile(
+               ^^^^^^^^^^^^^
+TypeError: _jit_compile() missing 2 required positional arguments: 'verbose' and 'with_sycl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 1524, in <module>
+    train()
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 1285, in train
+    rendered = render_views_from_predictions(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/gs_metrics.py", line 97, in render_views_from_predictions
+    rendered, _depth, _alpha = model.gs_renderer.rasterizer.forward(
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/auxiliary_models/worldmirror/models/models/rasterization.py", line 341, in forward
+    rendered_colors, rendered_depths, rendered_alphas = self.rasterize_splats(
+                                                        ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dmonopoli/FF-4DGS-Ego/diffsynth/auxiliary_models/worldmirror/models/models/rasterization.py", line 379, in rasterize_splats
+    render_colors, render_alphas, _ = rasterization(
+                                      ^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/rendering.py", line 409, in rasterization
+    proj_results = fully_fused_projection(
+                   ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/cuda/_wrapper.py", line 423, in fully_fused_projection
+    return _FullyFusedProjection.apply(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/autograd/function.py", line 575, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/cuda/_wrapper.py", line 1056, in forward
+    camera_model_type = _make_lazy_cuda_obj(
+                        ^^^^^^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/cuda/_wrapper.py", line 24, in _make_lazy_cuda_obj
+    from ._backend import _C
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/cuda/_backend.py", line 217, in <module>
+    _C = load_extension(
+         ^^^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/gsplat/cuda/_backend.py", line 98, in load_extension
+    compiled = _jit_compile(
+               ^^^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2076, in _jit_compile
+    _write_ninja_file_and_build_library(
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2180, in _write_ninja_file_and_build_library
+    verify_ninja_availability()
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/torch/utils/cpp_extension.py", line 2241, in verify_ninja_availability
+    raise RuntimeError("Ninja is required to load C++ extensions")
+RuntimeError: Ninja is required to load C++ extensions

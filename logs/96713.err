@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 1520, in <module>
+    train()
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 1092, in train
+    all_seqs = discover_sequences(data_cfg["data_root"])
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 686, in discover_sequences
+    for name in sorted(os.listdir(data_root)):
+                       ^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/user/dmonopoli/data/hot3d_aria/sequences'

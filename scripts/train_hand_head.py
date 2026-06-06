@@ -76,6 +76,8 @@ class HOT3DHandDataset(Dataset):
         self.use_hand_crop = use_hand_crop
         self.rescale_factor = rescale_factor
         self.clips = []
+        from collections import OrderedDict
+        self.video_readers = OrderedDict()
         
         if clip_stride is None:
             clip_stride = num_frames
@@ -237,18 +239,19 @@ class HOT3DHandDataset(Dataset):
                 clip = {
                     "video_path":   video_path,
                     "gt_frames":    gt_per_frame[start : end],
-                    "gt_joints":    seq_gt_joints[start : end],
+                    "gt_joints":    seq_gt_joints[start : end].clone(),
                     "frame_offset": start,
                     "seq_path":     seq_path,
                 }
                 if self.use_hand_crop:
-                    clip["hand_bboxes"] = bbox_frames[start : start + num_frames]
-                    clip["hand_valid"]  = valid_frames[start : start + num_frames]
+                    clip["hand_bboxes"] = [b.clone() for b in bbox_frames[start : start + num_frames]]
+                    clip["hand_valid"]  = [v.clone() for v in valid_frames[start : start + num_frames]]
                 if seq_gt_joints_2d is not None:
-                    clip["gt_joints_2d"]   = seq_gt_joints_2d[start : end]    # [S, 2, 16, 3]
-                    clip["cam_extrinsics"] = seq_cam_extrinsics[start : end]  # [S, 4, 4]
+                    clip["gt_joints_2d"]   = seq_gt_joints_2d[start : end].clone()    # [S, 2, 16, 3]
+                    clip["cam_extrinsics"] = seq_cam_extrinsics[start : end].clone()  # [S, 4, 4]
                     clip["cam_intrinsics"] = seq_cam_intrinsics                # [3]
                 self.clips.append(clip)
+        self.mano_model = None
 
     def _compute_seq_joints_from_params(self, gt_per_frame):
         """Run MANO once per (frame, hand) to produce [N, 2, 16, 3] joints.
@@ -281,8 +284,11 @@ class HOT3DHandDataset(Dataset):
 
     def __getitem__(self, idx):
         clip = self.clips[idx]
+        video_path = clip["video_path"]
+        video_reader = VideoReader(video_path)
+        
         pil_images = load_video(
-            clip["video_path"],
+            video_reader,
             num_frames=self.num_frames,
             resolution=self.res,
             sampling="first",
@@ -742,7 +748,11 @@ def setup_vis_items(dataset, num_vis_frames, seq_cache, mano_model, preload=Fals
         clip = dataset.clips[clip_idx]
         seq_path = clip["seq_path"]
         if seq_path not in seq_cache:
-            seq_cache[seq_path] = setup_vis_context(seq_path, mano_model=mano_model)
+            try:
+                seq_cache[seq_path] = setup_vis_context(seq_path, mano_model=mano_model)
+            except Exception as e:
+                print(f"[VIS] WARNING: Skipping visualization context for {seq_path} due to missing dependency: {e}")
+                seq_cache[seq_path] = None
         ctx = seq_cache[seq_path]
         if ctx is None:
             continue
@@ -1240,9 +1250,41 @@ def train():
 
     best_val_loss = float("inf")
     global_step = 0
+    start_epoch = 1
+
+    def save_checkpoint(step, epoch_idx, is_best=False, name=None):
+        checkpoint_state = {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "global_step": step,
+            "epoch": epoch_idx,
+            "best_val_loss": best_val_loss,
+        }
+        if name is not None:
+            filename = name
+        elif is_best:
+            filename = "best_val_loss.pt"
+        else:
+            filename = f"checkpoint_{step}.pt"
+        path = os.path.join(output_dir, filename)
+        torch.save(checkpoint_state, path)
+        torch.save(checkpoint_state, os.path.join(output_dir, "latest.pt"))
+
+    latest_path = os.path.join(output_dir, "latest.pt")
+    if os.path.exists(latest_path):
+        print(f"Resuming from checkpoint: {latest_path}")
+        ckpt_state = torch.load(latest_path, map_location=device)
+        model.load_state_dict(ckpt_state["model_state_dict"])
+        optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
+        global_step = ckpt_state["global_step"]
+        start_epoch = ckpt_state["epoch"]
+        best_val_loss = ckpt_state["best_val_loss"]
+        print(f"Resumed successfully. global_step={global_step}, start_epoch={start_epoch}, best_val_loss={best_val_loss:.4f}")
 
     # --- Training loop ---
-    for epoch in tqdm(range(1, epochs + 1), desc="Epochs"):
+    for epoch in tqdm(range(start_epoch, epochs + 1), desc="Epochs"):
         model.train()
         optimizer.zero_grad()
         accum_loss = 0.0
@@ -1254,6 +1296,8 @@ def train():
         }
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
+            if epoch == start_epoch and batch_idx < (global_step % steps_per_epoch) * grad_accum_steps:
+                continue
             imgs = batch["img"].to(device)
             gt_params = batch["gt"].to(device)
             gt_joints = batch["gt_joints"].to(device)
@@ -1497,19 +1541,19 @@ def train():
 
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
-                        torch.save(model.hand_head.state_dict(), os.path.join(output_dir, "best_val_loss.pt"))
+                        save_checkpoint(global_step, epoch, is_best=True)
                         tqdm.write("  -> New best. Saved.")
                     model.train()
 
                 if global_step % save_every == 0:
-                    torch.save(model.hand_head.state_dict(), os.path.join(output_dir, f"checkpoint_{global_step}.pt"))
+                    save_checkpoint(global_step, epoch)
 
         # Flush leftover gradients from an incomplete accumulation window
         if (batch_idx + 1) % grad_accum_steps != 0:
             optimizer.zero_grad()
 
     # --- Save final ---
-    torch.save(model.hand_head.state_dict(), os.path.join(output_dir, "hand_head_final.pt"))
+    save_checkpoint(global_step, epoch, name="hand_head_final.pt")
     print(f"Final weights saved to: {os.path.join(output_dir, 'hand_head_final.pt')}")
 
     if use_wandb:

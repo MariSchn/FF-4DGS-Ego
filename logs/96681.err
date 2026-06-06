@@ -1,0 +1,19 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/dmonopoli/FF-4DGS-Ego/scripts/train_hand_head.py", line 21, in <module>
+    from decord import VideoReader
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/decord/__init__.py", line 4, in <module>
+    from ._ffi.runtime_ctypes import TypeCode
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/decord/_ffi/runtime_ctypes.py", line 8, in <module>
+    from .base import _LIB, check_call
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/decord/_ffi/base.py", line 47, in <module>
+    _LIB, _LIB_NAME = _load_lib()
+                      ^^^^^^^^^^^
+  File "/work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/decord/_ffi/base.py", line 39, in _load_lib
+    lib = ctypes.CDLL(lib_path[0], ctypes.RTLD_GLOBAL)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/ctypes/__init__.py", line 379, in __init__
+    self._handle = _dlopen(self._name, mode)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+OSError: /work/scratch/dmonopoli/venv_gb10/lib/python3.12/site-packages/decord/libdecord.so: cannot open shared object file: No such file or directory

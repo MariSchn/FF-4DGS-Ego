@@ -133,7 +133,7 @@ def center_crop(image, resolution):
     scale_final = max(scale_width, scale_height)
     output_width = int(width * scale_final)
     output_height = int(height * scale_final)
-    scaled_image = image.resize((output_width, output_height), resample=Image.LANCZOS)
+    scaled_image = image.resize((output_width, output_height), resample=Image.BILINEAR)
 
     left = (output_width - target_width) // 2
     top = (output_height - target_height) // 2
@@ -159,7 +159,7 @@ def load_video(data, num_frames, resolution=(560, 336), resize_mode="center_crop
     """
     def _process_frame(image):
         if resize_mode == "resize":
-            return image.resize(resolution, resample=Image.LANCZOS)
+            return image.resize(resolution, resample=Image.BILINEAR)
         return center_crop(image, resolution)
 
     def _sample_indices(total, n):
@@ -172,7 +172,7 @@ def load_video(data, num_frames, resolution=(560, 336), resize_mode="center_crop
             return np.arange(frame_offset, frame_offset + min(n, available))
         return np.linspace(frame_offset, total - 1, n, dtype=int)
 
-    assert isinstance(data, (str, list)), f"data must be a string path or a list of image paths, got {type(data)}"
+    assert isinstance(data, (str, list, VideoReader)), f"data must be a string path or a list of image paths or a VideoReader, got {type(data)}"
     if isinstance(data, str) and data.endswith((".jpg", ".jpeg", ".png")):
         data = [data]
 
@@ -182,20 +182,20 @@ def load_video(data, num_frames, resolution=(560, 336), resize_mode="center_crop
         images = []
         for idx in sample_indices:
             images.append(_process_frame(Image.open(image_paths[idx])))
-    elif os.path.isdir(data):
+    elif isinstance(data, str) and os.path.isdir(data):
         image_names = sorted(os.listdir(data))
         sample_indices = _sample_indices(len(image_names), num_frames)
         images = []
         for idx in sample_indices:
             img_path = os.path.join(data, image_names[idx])
             images.append(_process_frame(Image.open(img_path)))
-    elif os.path.isfile(data):
-        video_reader = VideoReader(data)
+    elif isinstance(data, VideoReader) or (isinstance(data, str) and os.path.isfile(data)):
+        video_reader = data if isinstance(data, VideoReader) else VideoReader(data)
         sample_indices = _sample_indices(len(video_reader), num_frames)
         raw_frames = video_reader.get_batch(sample_indices).asnumpy()
         images = [_process_frame(Image.fromarray(f)) for f in raw_frames]
     else:
-        raise ValueError(f"Invalid data input: {data} (must be video file, image directory, or list of images)")
+        raise ValueError(f"Invalid data input: {data} (must be video file, image directory, list of images, or VideoReader)")
     return images
 
 
