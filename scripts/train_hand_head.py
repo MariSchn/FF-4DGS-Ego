@@ -1350,6 +1350,24 @@ def train():
             _t0 = _lap()
 
             views_train = build_views(imgs, num_frames, device, hb, hv)
+
+            # PROFILE_TORCH=1 (with PROFILE_STEPS>0): op-level breakdown of ONE
+            # forward to find what the flat-under-bf16 20s actually is. Prints
+            # top ops by CUDA and CPU self-time, then exits.
+            if os.environ.get("PROFILE_TORCH") and _prof:
+                from torch.profiler import profile, ProfilerActivity
+                with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                             record_shapes=True) as _tp:
+                    with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
+                        _ = model(views_train, is_inference=False, use_motion=False)
+                    torch.cuda.synchronize()
+                ka = _tp.key_averages()
+                tqdm.write("\n[TORCH-PROFILE] ===== top 18 by CUDA self-time =====")
+                tqdm.write(ka.table(sort_by="self_cuda_time_total", row_limit=18))
+                tqdm.write("\n[TORCH-PROFILE] ===== top 18 by CPU self-time =====")
+                tqdm.write(ka.table(sort_by="self_cpu_time_total", row_limit=18))
+                raise SystemExit("[TORCH-PROFILE] done — remove PROFILE_TORCH to train")
+
             # Backbone forward dominates the step (~20s fp32). It's frozen, so
             # running it under bf16 autocast is safe and ~2-3x faster. Upcast the
             # float outputs back to fp32 so the MANO joint solve, metric anchor,
