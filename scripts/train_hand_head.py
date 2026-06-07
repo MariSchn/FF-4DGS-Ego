@@ -1144,6 +1144,11 @@ def train():
         random.seed(training_cfg.get("seed", 42))
         random.shuffle(all_seqs)
         n_val = int(len(all_seqs) * float(data_cfg.get("val_split", 0.1)))
+        # Hold out at least one sequence whenever we have more than one, so a
+        # small val_split (e.g. 0.01) on a handful of sequences still produces
+        # validation media + a best checkpoint instead of silently disabling both.
+        if n_val == 0 and len(all_seqs) > 1:
+            n_val = 1
         if n_val == 0:
             print("[WARN] No validation sequences — validation disabled, no best checkpoint will be saved")
         val_seqs, train_seqs = all_seqs[:n_val], all_seqs[n_val:]

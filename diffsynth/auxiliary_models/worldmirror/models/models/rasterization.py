@@ -636,9 +636,16 @@ class GaussianSplatRenderer(nn.Module):
         # Compute voxel indices
         coords = splats["means"]
         voxel_indices = (coords / voxel_size).floor().long()
-        unique_voxels, inverse_indices = torch.unique(
-            voxel_indices, dim=0, return_inverse=True
-        )
+        # Collapse the [N, 3] integer voxel coords into a single int64 key and
+        # run 1-D torch.unique. The dim=0 path lexicographically sorts every row
+        # (O(N log N) over millions of points → ~40x slower); flat unique on a
+        # packed key is collision-free as long as the product of per-axis extents
+        # fits in int64, which it does for metric scenes at voxel_size=0.002.
+        vmin = voxel_indices.min(dim=0).values
+        shifted = voxel_indices - vmin                      # non-negative
+        sizes = shifted.max(dim=0).values + 1               # per-axis extent
+        keys = (shifted[:, 0] * sizes[1] + shifted[:, 1]) * sizes[2] + shifted[:, 2]
+        _, inverse_indices = torch.unique(keys, return_inverse=True)
         splat_weights = splats["weights"]
         voxel_weights = scatter_sum(splat_weights, inverse_indices, dim=0)
         weights = splat_weights / torch.clamp(voxel_weights[inverse_indices], min=1e-8)
