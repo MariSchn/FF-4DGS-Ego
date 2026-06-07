@@ -10,6 +10,7 @@ import bisect
 import json
 import os
 import random
+import time
 
 import numpy as np
 
@@ -1221,6 +1222,9 @@ def train():
     log_every  = training_cfg.get("log_every", 500)
     val_every  = training_cfg.get("val_every", 2000)
     val_max_batches = training_cfg.get("val_max_batches", None)  # None = full val set
+    # PROFILE_STEPS=N prints a CUDA-synced forward/render/backward breakdown for
+    # the first N steps, then trains normally. Zero overhead when unset.
+    profile_steps = int(os.environ.get("PROFILE_STEPS", "0"))
     save_every = training_cfg.get("save_every", 2000)
     output_dir = training_cfg.get("output_dir", "checkpoints")
     os.makedirs(output_dir, exist_ok=True)
@@ -1336,9 +1340,18 @@ def train():
             # print(f"gt_params: {gt_params}")
             # print(f"gt_joints: {gt_joints}")
 
+            _prof = profile_steps and global_step < profile_steps
+            def _lap():
+                if _prof:
+                    torch.cuda.synchronize()
+                    return time.perf_counter()
+                return 0.0
+            _t0 = _lap()
+
             views_train = build_views(imgs, num_frames, device, hb, hv)
             preds = model(views_train, is_inference=False, use_motion=False)
             pred_params = preds["hand_joints"] # [B, S, 64]
+            _t_fwd = _lap()
 
             pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
 
@@ -1353,6 +1366,7 @@ def train():
                 rendered = render_views_from_predictions(
                     model, preds, views_train, height=H_img, width=W_img,
                 )
+            _t_render = _lap()
             if rendered is not None:
                 B_r, S_r = rendered.shape[:2]
                 pred_chw = rendered.permute(0, 1, 4, 2, 3).reshape(B_r * S_r, 3, H_img, W_img)
@@ -1443,7 +1457,16 @@ def train():
                 + w.get("hand_depth_anchor", 0.0) * anchor_ramp * loss_hand_anchor
             )
 
+            _t_loss = _lap()
             (loss / grad_accum_steps).backward()
+            _t_bwd = _lap()
+            if _prof:
+                tqdm.write(
+                    f"[PROFILE] step {global_step}: "
+                    f"fwd={_t_fwd-_t0:.2f}s render={_t_render-_t_fwd:.2f}s "
+                    f"loss={_t_loss-_t_render:.2f}s bwd={_t_bwd-_t_loss:.2f}s "
+                    f"| total={_t_bwd-_t0:.2f}s"
+                )
             accum_loss += loss.item()
             for k in ("transl", "global_orient", "hand_pose", "betas"):
                 accum_terms[k] += param_losses[k].item()
