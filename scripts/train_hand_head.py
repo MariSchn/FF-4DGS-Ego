@@ -1225,11 +1225,12 @@ def train():
     # PROFILE_STEPS=N prints a CUDA-synced forward/render/backward breakdown for
     # the first N steps, then trains normally. Zero overhead when unset.
     profile_steps = int(os.environ.get("PROFILE_STEPS", "0"))
+    use_amp = bool(training_cfg.get("use_amp", True))  # bf16 autocast on the forward
     save_every = training_cfg.get("save_every", 2000)
     output_dir = training_cfg.get("output_dir", "checkpoints")
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"Training on {device} | {epochs} epochs | batch_size={batch_size} | grad_accum_steps={grad_accum_steps}")
+    print(f"Training on {device} | {epochs} epochs | batch_size={batch_size} | grad_accum_steps={grad_accum_steps} | amp_bf16={use_amp}")
 
     # --- LPIPS scorer for GS-head image-quality metrics ---
     # Built once and reused across every validation run (and across train_gs
@@ -1349,7 +1350,15 @@ def train():
             _t0 = _lap()
 
             views_train = build_views(imgs, num_frames, device, hb, hv)
-            preds = model(views_train, is_inference=False, use_motion=False)
+            # Backbone forward dominates the step (~20s fp32). It's frozen, so
+            # running it under bf16 autocast is safe and ~2-3x faster. Upcast the
+            # float outputs back to fp32 so the MANO joint solve, metric anchor,
+            # and rasterizer all see fp32 (matching the no-AMP numerics).
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
+                preds = model(views_train, is_inference=False, use_motion=False)
+            if use_amp:
+                preds = {k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v)
+                         for k, v in preds.items()}
             pred_params = preds["hand_joints"] # [B, S, 64]
             _t_fwd = _lap()
 

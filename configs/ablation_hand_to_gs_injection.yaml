@@ -94,6 +94,7 @@ training:
   epochs: 1
   batch_size: 4
   grad_accum_steps: 8    # Effective batch = batch_size * grad_accum_steps
+  use_amp: true         # bf16 autocast on the (frozen) backbone forward (~2-3x)
   log_every: 50
   val_every: 250
   val_max_batches: 12   # Cap val to N batches (~12*bs clips); null = full set.
