@@ -796,7 +796,7 @@ def render_vis_list(vis_items, gt_pred_pairs, render_fn):
 # Validation
 # ------------------------------------------------------------------
 
-def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None, lpips_scorer=None):
+def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None, lpips_scorer=None, max_batches=None):
     """Run validation and optionally capture gt/pred at specific clip indices.
 
     Returns (val_loss, val_terms, captured, hand_metrics, gs_metrics) where
@@ -821,8 +821,14 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
     gs_chunks = []
     eval_gs = bool(getattr(model, "enable_gs", False)) and (lpips_scorer is not None)
     batch_size = val_loader.batch_size
+    n_processed = 0
     with torch.no_grad():
         for batch_idx, vbatch in enumerate(tqdm(val_loader, desc="Val", leave=False)):
+            # Cap the number of val batches: PSNR/MPJPE over a few dozen clips
+            # tracks fine, and a full pass renders thousands of frames (hours).
+            if max_batches is not None and batch_idx >= max_batches:
+                break
+            n_processed += 1
             imgs = vbatch["img"].to(device)
             gt = vbatch["gt"].to(device)
             hb = vbatch["hand_bboxes"].to(device) if "hand_bboxes" in vbatch else None
@@ -943,32 +949,34 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             val_terms["hand_depth_anchor"]    += loss_hand_anchor.item()
             val_terms["hand_depth_residual_m"] += anchor_residual_m
 
-            if vis_clip_indices:
-                # For vis we need camera-space predictions for rendering
+            # Hand-overlay capture needs a second, camera-space forward pass.
+            # Only run it when this batch actually holds a target clip — avoids
+            # a wasted 2x forward on every other val batch.
+            batch_clip_idxs = [batch_idx * batch_size + i for i in range(imgs.shape[0])]
+            if vis_clip_indices and any(ci in vis_clip_indices for ci in batch_clip_idxs):
                 vis_preds = model(build_views(imgs, num_frames, device, hb, hv, crop_local_output=False), is_inference=False, use_motion=False)
-                for item_idx in range(imgs.shape[0]):
-                    clip_idx = batch_idx * batch_size + item_idx
+                for item_idx, clip_idx in enumerate(batch_clip_idxs):
                     if clip_idx in vis_clip_indices:
                         captured[clip_idx] = {
                             "gt": gt[item_idx, 0].cpu(),
                             "pred": vis_preds["hand_joints"][item_idx, 0].cpu(),
                         }
 
-    n = max(len(val_loader), 1)
+    n = max(n_processed, 1)
     val_terms = {k: v / n for k, v in val_terms.items()}
     hand_metrics = metrics_from_chunks(metric_chunks)
     gs_metrics = gs_metrics_from_chunks(gs_chunks) if eval_gs else None
     return val_loss / n, val_terms, captured, hand_metrics, gs_metrics, gs_captured
 
 
-def build_gs_vis_videos(vis_items, gs_captured, fps=8):
+def build_gs_vis_videos(gs_captured, fps=8):
     """Build wandb.Video side-by-side (rendered | GT) clips over all frames
-    for each captured val clip. Returns [] if nothing was captured."""
+    for each captured val clip. Returns [] if nothing was captured.
+
+    Iterates gs_captured directly so it does not depend on the projectaria
+    hand-vis context (which is unavailable on aarch64 cluster nodes)."""
     videos = []
-    for item in vis_items:
-        clip_idx = item["clip_idx"]
-        if clip_idx not in gs_captured:
-            continue
+    for clip_idx in sorted(gs_captured.keys()):
         cap = gs_captured[clip_idx]
         rendered = cap["rendered"]                            # [S, H, W, 3] in [0, 1]
         gt = cap["gt"].permute(0, 2, 3, 1)                    # [S, H, W, 3] in [0, 1]
@@ -1187,7 +1195,21 @@ def train():
         if val_vis_items or train_vis_items:
             print(f"[VIS] {len(val_vis_items)} val + {len(train_vis_items)} train frames across {len(seq_cache)} sequences")
 
-    val_vis_clip_indices = {it["clip_idx"] for it in val_vis_items} or None
+    val_vis_clip_indices = {it["clip_idx"] for it in val_vis_items}
+
+    # GS overlay videos (rendered | GT) only need the rendered frames + GT
+    # images that validation already captures — NOT the projectaria/Aria hand
+    # context. Select a few val clips directly so the GS overlay still logs on
+    # nodes where projectaria_tools (`_core_pybinds`) or Aria calib files are
+    # unavailable and setup_vis_context returns None for every sequence.
+    gs_vis_clip_indices = set()
+    if val_set is not None and len(val_set.clips) > 0 and model_cfg.get("enable_gs", False):
+        # First N clips → all land in the first batch(es), so they're captured
+        # even when validation is capped to a few batches (val_max_batches).
+        gs_vis_clip_indices = set(range(min(len(val_set.clips), num_vis_frames)))
+
+    # Union drives validation capture; each media path renders only what it can.
+    capture_clip_indices = (val_vis_clip_indices | gs_vis_clip_indices) or None
 
     # --- Optimizer & scheduler ---
     epochs     = training_cfg["epochs"]
@@ -1198,6 +1220,7 @@ def train():
 
     log_every  = training_cfg.get("log_every", 500)
     val_every  = training_cfg.get("val_every", 2000)
+    val_max_batches = training_cfg.get("val_max_batches", None)  # None = full val set
     save_every = training_cfg.get("save_every", 2000)
     output_dir = training_cfg.get("output_dir", "checkpoints")
     os.makedirs(output_dir, exist_ok=True)
@@ -1481,7 +1504,7 @@ def train():
 
                 # --- Validation ---
                 if val_loader and (global_step % val_every == 0 or global_step == 1):
-                    val_loss, val_terms, captured, hand_metrics, gs_metrics, gs_captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], val_vis_clip_indices, lpips_scorer=lpips_scorer)
+                    val_loss, val_terms, captured, hand_metrics, gs_metrics, gs_captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], capture_clip_indices, lpips_scorer=lpips_scorer, max_batches=val_max_batches)
                     tqdm.write(
                         f"  step {global_step} | val_loss={val_loss:.4f} "
                         f"(t={val_terms['transl']:.4f} o={val_terms['global_orient']:.4f} "
@@ -1539,7 +1562,7 @@ def train():
                             if val_images:
                                 log_dict["media/val_hand_overlay"] = val_images
                         if gs_captured:
-                            gs_videos = build_gs_vis_videos(val_vis_items, gs_captured)
+                            gs_videos = build_gs_vis_videos(gs_captured)
                             if gs_videos:
                                 log_dict["media/val_gs_overlay"] = gs_videos
                         wandb.log(log_dict, step=global_step)
