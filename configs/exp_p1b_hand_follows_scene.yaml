@@ -105,6 +105,8 @@ training:
                         # A full pass renders thousands of frames (hours); a few
                         # dozen clips track PSNR/MPJPE fine. Use null for final eval.
   save_every: 100       # Steps between checkpoint saves
+  grad_clip_norm: 10.0  # finite gradient clipping (was effectively off -> NaN divergence)
+  kp3d_abs_warmup_steps: 200  # ramp the absolute-3D loss in over N steps
   seed: 42               # Random seed
   output_dir: "checkpoints/p1b_hfs"
 

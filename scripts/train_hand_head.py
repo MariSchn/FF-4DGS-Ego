@@ -1182,6 +1182,8 @@ def train():
     anchor_conf_thresh = anchor_cfg.get("conf_thresh", 0.0)
     anchor_warmup_steps = int(anchor_cfg.get("warmup_steps", 800))
     anchor_direction = anchor_cfg.get("direction", "scene_follows_hand")
+    grad_clip_norm = float(training_cfg.get("grad_clip_norm", 10.0))
+    kp3d_abs_warmup_steps = int(training_cfg.get("kp3d_abs_warmup_steps", 0))
 
     ds_kwargs = dict(
         num_frames=num_frames, res=res, clip_stride=clip_stride,
@@ -1522,6 +1524,7 @@ def train():
                 )
                 anchor_residual_m = _anchor_info["hand_depth_residual_m"]
             anchor_ramp = min(1.0, global_step / anchor_warmup_steps) if anchor_warmup_steps > 0 else 1.0
+            abs_ramp = min(1.0, global_step / kp3d_abs_warmup_steps) if kp3d_abs_warmup_steps > 0 else 1.0
 
             w = cfg["loss_weights"]
             loss = (
@@ -1530,7 +1533,7 @@ def train():
                 + w["hand_pose"]     * param_losses["hand_pose"]
                 + w["betas"]         * param_losses["betas"]
                 + w["kp3d"]          * loss_kp3d
-                + w.get("kp3d_abs", 0.0) * loss_kp3d_abs
+                + w.get("kp3d_abs", 0.0) * abs_ramp * loss_kp3d_abs
                 + w["kp2d"]          * loss_kp2d
                 + w.get("gs_l1", 0.0)    * loss_gs_l1
                 + w.get("gs_lpips", 0.0) * loss_gs_lpips
@@ -1559,9 +1562,14 @@ def train():
             accum_terms["hand_depth_residual_m"] += anchor_residual_m
 
             if (batch_idx + 1) % grad_accum_steps == 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=float("inf"))
-                optimizer.step()
-                scheduler.step()
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=grad_clip_norm)
+                # NaN guard: a single bad batch can produce non-finite grads; applying
+                # them poisons the weights (then SVD/quat ops crash). Skip the step.
+                if torch.isfinite(grad_norm):
+                    optimizer.step()
+                    scheduler.step()
+                else:
+                    tqdm.write(f"[nan-guard] non-finite grad_norm at step {global_step}; skipping optimizer step")
                 optimizer.zero_grad()
                 avg_loss = accum_loss / grad_accum_steps
                 avg_terms = {k: v / grad_accum_steps for k, v in accum_terms.items()}
