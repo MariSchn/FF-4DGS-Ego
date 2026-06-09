@@ -194,10 +194,17 @@ from .models import *
 cd /Users/mondra/git/3dv/FF-4DGS-Ego/.claude/worktrees/polish
 git rm -r diffsynth/pipelines diffsynth/prompters diffsynth/schedulers \
           diffsynth/tokenizer_configs diffsynth/controlnets diffsynth/processors \
-          diffsynth/vram_management diffsynth/distributed diffsynth/trainers \
-          diffsynth/lora diffsynth/extensions
+          diffsynth/vram_management diffsynth/distributed diffsynth/trainers
 git rm diffsynth/utils/app.py diffsynth/utils/visualization_tools.py
 ```
+
+> **NOTE (ordering):** `diffsynth/extensions/` and `diffsynth/lora/` are NOT deleted
+> here — they are still imported by `diffsynth/models/model_manager.py` (lines 49-50,
+> `..extensions.RIFE`/`..extensions.ESRGAN`) and `diffsynth/configs/model_config.py`
+> (`..extensions.RIFE`/`ESRGAN`, `..lora.flux_lora`), which are not slimmed until
+> Task 3. Deleting them now would leave dangling imports. They are removed in Task 3
+> after the hub is slimmed. Stage the trimmed `diffsynth/__init__.py` (`git add`) so it
+> is included in the commit.
 
 - [ ] **Step 3: Verify**
 
@@ -255,7 +262,7 @@ and `from ..configs.model_config import ...`) and the `from .lora import get_lor
 line. Then remove the now-orphaned `load_lora` method.
 
 Concretely:
-1. In the import header (roughly lines 6–50), delete every `from .X import …` line where `X` is a deleted zoo module (`sd_*`, `sdxl_*`, `sd3_*`, `svd_*`, `hunyuan_*`, `flux_*`, `cog_*`, `omnigen`, `nexus_gen*`, `step*`, `wan_video_*`, `*_controlnet`, `*_ipadapter`, `*_motion`) **and** the line `from .lora import get_lora_loaders`. Keep:
+1. In the import header (roughly lines 6–50), delete every `from .X import …` line where `X` is a deleted zoo module (`sd_*`, `sdxl_*`, `sd3_*`, `svd_*`, `hunyuan_*`, `flux_*`, `cog_*`, `omnigen`, `nexus_gen*`, `step*`, `wan_video_*`, `*_controlnet`, `*_ipadapter`, `*_motion`), the line `from .lora import get_lora_loaders`, **and** the two extension imports `from ..extensions.RIFE import IFNet` (line 49) and `from ..extensions.ESRGAN import RRDBNet` (line 50). Keep:
    - `from .downloader import download_models, download_customized_models, Preset_model_id, Preset_model_website`
    - `from ..configs.model_config import model_loader_configs, huggingface_model_loader_configs, patch_model_loader_configs`
    - `from .utils import load_state_dict, init_weights_on_device, hash_state_dict_keys, split_state_dict_with_prefix`
@@ -288,6 +295,9 @@ find diffsynth/models -maxdepth 1 -name '*.py' \
   ! -name '__init__.py' ! -name 'model_manager.py' \
   ! -name 'downloader.py' ! -name 'utils.py' -print -exec git rm {} +
 git rm -r diffsynth/auxiliary_models/depth_anything_3
+# extensions/ and lora/ deferred from Task 2 — safe to remove now that the hub
+# (model_manager.py / model_config.py) no longer imports them:
+git rm -r diffsynth/extensions diffsynth/lora
 ```
 
 - [ ] **Step 6: Verify (static gate)**
