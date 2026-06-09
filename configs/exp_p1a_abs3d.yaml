@@ -106,7 +106,7 @@ training:
                         # dozen clips track PSNR/MPJPE fine. Use null for final eval.
   save_every: 100       # Steps between checkpoint saves
   seed: 42               # Random seed
-  output_dir: "checkpoints/default"
+  output_dir: "checkpoints/p1a_abs3d"
 
 # ------------------------------------------------------------------
 # Visualization
