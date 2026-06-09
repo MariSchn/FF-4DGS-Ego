@@ -169,6 +169,77 @@ def metric_chunks_from_batch(rendered, gt_imgs, valid_mask, lpips_scorer, device
     return {"psnr": psnr, "ssim": ssim, "lpips": lpips_vals, "valid": valid}
 
 
+@torch.no_grad()
+def region_metric_chunks_from_batch(rendered, gt_imgs, region_mask, lpips_scorer,
+                                    device, min_pixels: int = 64, crop_size: int = 64):
+    """Region-restricted PSNR / SSIM / LPIPS for one batch.
+
+    Full-frame PSNR is dominated by the static background and understates the
+    effect of a prior that only acts on a small region (hands, manipulated
+    objects). This computes the same three metrics restricted to a per-frame
+    region of interest:
+
+      * PSNR  — over the masked pixels only (most faithful).
+      * SSIM / LPIPS — on the region's bounding-box crop, resized to
+        ``crop_size`` so they are always well-defined.
+
+    A frame is marked valid only if its region holds >= ``min_pixels`` pixels.
+
+    Args:
+        rendered:    [B, S, H, W, 3] float in [0, 1].
+        gt_imgs:     [B, S, 3, H, W] float in [0, 1].
+        region_mask: [B, S, H, W] bool/float — region of interest per frame.
+        lpips_scorer: LPIPSScorer.
+
+    Returns:
+        dict of CPU tensors {psnr, ssim, lpips, valid} of length B*S, matching
+        ``metric_chunks_from_batch`` so ``metrics_from_chunks`` can aggregate it.
+    """
+    import torch.nn.functional as F
+
+    B, S, H, W = rendered.shape[0], rendered.shape[1], rendered.shape[2], rendered.shape[3]
+    pred = rendered.permute(0, 1, 4, 2, 3).reshape(B * S, 3, H, W).float().cpu()
+    gt   = gt_imgs.reshape(B * S, 3, H, W).float().cpu()
+    mask = region_mask.reshape(B * S, H, W).float().cpu()
+
+    N = B * S
+    psnr  = torch.full((N,), float("nan"))
+    ssim  = torch.full((N,), float("nan"))
+    lpips_v = torch.full((N,), float("nan"))
+    valid = torch.zeros(N, dtype=torch.bool)
+
+    crops_pred, crops_gt, crop_idx = [], [], []
+    for i in range(N):
+        m = mask[i] > 0.5
+        npix = int(m.sum().item())
+        if npix < min_pixels:
+            continue
+        # masked PSNR over the region's pixels (averaged over the 3 channels)
+        diff2 = (pred[i] - gt[i]) ** 2            # [3, H, W]
+        mse = float((diff2 * m.unsqueeze(0)).sum().item()) / (3.0 * npix)
+        psnr[i] = float("inf") if mse <= 0 else 10.0 * float(np.log10(1.0 / max(mse, 1e-12)))
+        # bbox of the region for SSIM/LPIPS
+        ys, xs = torch.where(m)
+        y1, y2 = int(ys.min()), int(ys.max()) + 1
+        x1, x2 = int(xs.min()), int(xs.max()) + 1
+        pc = pred[i:i + 1, :, y1:y2, x1:x2]
+        gc = gt[i:i + 1, :, y1:y2, x1:x2]
+        pc = F.interpolate(pc, size=(crop_size, crop_size), mode="bilinear", align_corners=False)
+        gc = F.interpolate(gc, size=(crop_size, crop_size), mode="bilinear", align_corners=False)
+        ssim[i] = _ssim_per_frame(pc[0].permute(1, 2, 0).numpy(), gc[0].permute(1, 2, 0).numpy())
+        crops_pred.append(pc); crops_gt.append(gc); crop_idx.append(i)
+        valid[i] = True
+
+    if crops_pred:
+        pc_all = torch.cat(crops_pred, dim=0)
+        gc_all = torch.cat(crops_gt, dim=0)
+        d = lpips_scorer.score(pc_all, gc_all)
+        for j, i in enumerate(crop_idx):
+            lpips_v[i] = float(d[j])
+
+    return {"psnr": psnr, "ssim": ssim, "lpips": lpips_v, "valid": valid}
+
+
 def metrics_from_chunks(chunks):
     """Concatenate per-batch chunks and produce mean PSNR / SSIM / LPIPS.
 

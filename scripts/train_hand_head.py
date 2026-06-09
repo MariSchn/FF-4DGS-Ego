@@ -37,7 +37,31 @@ from scripts.gs_metrics import (
     render_views_from_predictions,
     metric_chunks_from_batch as gs_metric_chunks_from_batch,
     metrics_from_chunks as gs_metrics_from_chunks,
+    region_metric_chunks_from_batch as gs_region_chunks_from_batch,
 )
+
+
+def _hand_region_mask(hand_bboxes, hand_valid, H, W):
+    """Per-frame boolean mask [B, S, H, W] filled inside each valid hand box.
+
+    hand_bboxes: [B, S, 2, 4] normalised xyxy in [0, 1]. hand_valid: [B, S, 2]
+    (or None). Used to restrict GS metrics to the hand region.
+    """
+    B, S = hand_bboxes.shape[0], hand_bboxes.shape[1]
+    mask = torch.zeros(B, S, H, W, dtype=torch.bool)
+    bb = hand_bboxes.clamp(0.0, 1.0).cpu()
+    hv = hand_valid.cpu() if hand_valid is not None else None
+    for b in range(B):
+        for s in range(S):
+            for h in range(bb.shape[2]):
+                if hv is not None and float(hv[b, s, h]) < 0.5:
+                    continue
+                x1, y1, x2, y2 = bb[b, s, h].tolist()
+                xi1, xi2 = int(x1 * W), int(round(x2 * W))
+                yi1, yi2 = int(y1 * H), int(round(y2 * H))
+                if xi2 > xi1 and yi2 > yi1:
+                    mask[b, s, yi1:yi2, xi1:xi2] = True
+    return mask
 
 
 HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
@@ -812,7 +836,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
     val_loss = 0.0
     val_terms = {
         "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
-        "kp3d": 0.0, "kp2d": 0.0,
+        "kp3d": 0.0, "kp3d_abs": 0.0, "kp2d": 0.0,
         "gs_l1": 0.0, "gs_lpips": 0.0,
         "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
     }
@@ -820,6 +844,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
     gs_captured = {}
     metric_chunks = []
     gs_chunks = []
+    gs_hand_chunks = []   # region-masked (hand bbox) GS metrics
     eval_gs = bool(getattr(model, "enable_gs", False)) and (lpips_scorer is not None)
     batch_size = val_loader.batch_size
     n_processed = 0
@@ -853,6 +878,17 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 gs_chunks.append(gs_metric_chunks_from_batch(
                     rendered, imgs, None, lpips_scorer, device,
                 ))
+                # Region-masked metrics over the hand bounding boxes. Full-frame
+                # PSNR is background-dominated; this isolates the hand region the
+                # prior acts on. Guarded so an eval-only error never kills a run.
+                if hb is not None:
+                    try:
+                        hand_mask = _hand_region_mask(hb, hv, rendered.shape[2], rendered.shape[3])
+                        gs_hand_chunks.append(gs_region_chunks_from_batch(
+                            rendered, imgs, hand_mask, lpips_scorer, device,
+                        ))
+                    except Exception as _e:  # pragma: no cover
+                        tqdm.write(f"[region-metrics] skipped: {type(_e).__name__}: {_e}")
                 B_r, S_r = rendered.shape[:2]
                 pred_chw = rendered.permute(0, 1, 4, 2, 3).reshape(B_r * S_r, 3, H_img, W_img)
                 gt_chw = imgs.reshape(B_r * S_r, 3, H_img, W_img)
@@ -887,6 +923,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             pred_flat = pred_joints.view(B * S * H, 1, J, 3)
             gt_flat   = gt_input.view(B * S * H, 1, J, 4)
             loss_kp3d = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0)
+            loss_kp3d_abs = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0, align_root=False)
 
             loss_kp2d = torch.zeros((), device=device)
             if "gt_joints_2d" in vbatch:
@@ -934,6 +971,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 + loss_weights["hand_pose"]     * param_losses["hand_pose"]
                 + loss_weights["betas"]         * param_losses["betas"]
                 + loss_weights["kp3d"]          * loss_kp3d
+                + loss_weights.get("kp3d_abs", 0.0) * loss_kp3d_abs
                 + loss_weights["kp2d"]          * loss_kp2d
                 + loss_weights.get("gs_l1", 0.0)    * loss_gs_l1
                 + loss_weights.get("gs_lpips", 0.0) * loss_gs_lpips
@@ -944,6 +982,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             for k in ("transl", "global_orient", "hand_pose", "betas"):
                 val_terms[k] += param_losses[k].item()
             val_terms["kp3d"]  += loss_kp3d.item()
+            val_terms["kp3d_abs"] += loss_kp3d_abs.item()
             val_terms["kp2d"]  += loss_kp2d.item()
             val_terms["gs_l1"]    += loss_gs_l1.item()
             val_terms["gs_lpips"] += loss_gs_lpips.item()
@@ -967,6 +1006,12 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
     val_terms = {k: v / n for k, v in val_terms.items()}
     hand_metrics = metrics_from_chunks(metric_chunks)
     gs_metrics = gs_metrics_from_chunks(gs_chunks) if eval_gs else None
+    if gs_metrics is not None and gs_hand_chunks:
+        gs_hand = gs_metrics_from_chunks(gs_hand_chunks)
+        gs_metrics["PSNR_hand"]  = gs_hand["PSNR"]
+        gs_metrics["SSIM_hand"]  = gs_hand["SSIM"]
+        gs_metrics["LPIPS_hand"] = gs_hand["LPIPS"]
+        gs_metrics["num_valid_frames_hand"] = gs_hand["num_valid_frames"]
     return val_loss / n, val_terms, captured, hand_metrics, gs_metrics, gs_captured
 
 
@@ -1136,6 +1181,7 @@ def train():
     anchor_depth_min = anchor_cfg.get("depth_min", 0.01)
     anchor_conf_thresh = anchor_cfg.get("conf_thresh", 0.0)
     anchor_warmup_steps = int(anchor_cfg.get("warmup_steps", 800))
+    anchor_direction = anchor_cfg.get("direction", "scene_follows_hand")
 
     ds_kwargs = dict(
         num_frames=num_frames, res=res, clip_stride=clip_stride,
@@ -1323,7 +1369,7 @@ def train():
         accum_loss = 0.0
         accum_terms = {
             "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
-            "kp3d": 0.0, "kp2d": 0.0,
+            "kp3d": 0.0, "kp3d_abs": 0.0, "kp2d": 0.0,
             "gs_l1": 0.0, "gs_lpips": 0.0,
             "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
         }
@@ -1425,6 +1471,11 @@ def train():
             pred_flat = pred_joints.view(B * S * H, 1, J, 3)
             gt_flat   = gt_input.view(B * S * H, 1, J, 4)
             loss_kp3d = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0)
+            # Absolute (non-root-relative) 3D loss: the root-relative loss above
+            # is translation-invariant, leaving global hand placement supervised
+            # only by the MANO transl term + 2D reprojection. This term directly
+            # penalises absolute camera-frame position (metric depth).
+            loss_kp3d_abs = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0, align_root=False)
 
             # 2D reprojection loss. pred_joints are camera-frame (post-transform),
             # so skip the world→camera extrinsic and project with intrinsics only.
@@ -1467,6 +1518,7 @@ def train():
                     pred_joints, gs_depth_pred, has_hand, batch["cam_intrinsics"].to(device),
                     margin=anchor_margin, depth_min=anchor_depth_min,
                     gs_depth_conf=preds.get("gs_depth_conf"), conf_thresh=anchor_conf_thresh,
+                    direction=anchor_direction,
                 )
                 anchor_residual_m = _anchor_info["hand_depth_residual_m"]
             anchor_ramp = min(1.0, global_step / anchor_warmup_steps) if anchor_warmup_steps > 0 else 1.0
@@ -1478,6 +1530,7 @@ def train():
                 + w["hand_pose"]     * param_losses["hand_pose"]
                 + w["betas"]         * param_losses["betas"]
                 + w["kp3d"]          * loss_kp3d
+                + w.get("kp3d_abs", 0.0) * loss_kp3d_abs
                 + w["kp2d"]          * loss_kp2d
                 + w.get("gs_l1", 0.0)    * loss_gs_l1
                 + w.get("gs_lpips", 0.0) * loss_gs_lpips
@@ -1498,6 +1551,7 @@ def train():
             for k in ("transl", "global_orient", "hand_pose", "betas"):
                 accum_terms[k] += param_losses[k].item()
             accum_terms["kp3d"]  += loss_kp3d.item()
+            accum_terms["kp3d_abs"] += loss_kp3d_abs.item()
             accum_terms["kp2d"]  += loss_kp2d.item()
             accum_terms["gs_l1"]    += loss_gs_l1.item()
             accum_terms["gs_lpips"] += loss_gs_lpips.item()
@@ -1514,7 +1568,7 @@ def train():
                 accum_loss = 0.0
                 accum_terms = {
                     "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
-                    "kp3d": 0.0, "kp2d": 0.0,
+                    "kp3d": 0.0, "kp3d_abs": 0.0, "kp2d": 0.0,
                     "gs_l1": 0.0, "gs_lpips": 0.0,
                     "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
                 }
@@ -1528,6 +1582,7 @@ def train():
                                "train/loss_hand_pose":     avg_terms["hand_pose"],
                                "train/loss_betas":         avg_terms["betas"],
                                "train/loss_kp3d":          avg_terms["kp3d"],
+                               "train/loss_kp3d_abs":      avg_terms["kp3d_abs"],
                                "train/loss_kp2d":          avg_terms["kp2d"],
                                "train/loss_gs_l1":         avg_terms["gs_l1"],
                                "train/loss_gs_lpips":      avg_terms["gs_lpips"],
@@ -1586,6 +1641,7 @@ def train():
                                     "val/loss_hand_pose":     val_terms["hand_pose"],
                                     "val/loss_betas":         val_terms["betas"],
                                     "val/loss_kp3d":          val_terms["kp3d"],
+                                    "val/loss_kp3d_abs":      val_terms["kp3d_abs"],
                                     "val/loss_kp2d":          val_terms["kp2d"],
                                     "val/loss_gs_l1":         val_terms["gs_l1"],
                                     "val/loss_gs_lpips":      val_terms["gs_lpips"],
@@ -1603,6 +1659,11 @@ def train():
                             log_dict["gaussian_metrics/SSIM"]  = gs_metrics["SSIM"]
                             log_dict["gaussian_metrics/LPIPS"] = gs_metrics["LPIPS"]
                             log_dict["gaussian_metrics/num_valid_frames"] = gs_metrics["num_valid_frames"]
+                            if gs_metrics.get("num_valid_frames_hand", 0) > 0:
+                                log_dict["gaussian_metrics/PSNR_hand"]  = gs_metrics["PSNR_hand"]
+                                log_dict["gaussian_metrics/SSIM_hand"]  = gs_metrics["SSIM_hand"]
+                                log_dict["gaussian_metrics/LPIPS_hand"] = gs_metrics["LPIPS_hand"]
+                                log_dict["gaussian_metrics/num_valid_frames_hand"] = gs_metrics["num_valid_frames_hand"]
                         if val_vis_items:
                             pairs = [
                                 (captured[it["clip_idx"]]["gt"], captured[it["clip_idx"]]["pred"])

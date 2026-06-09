@@ -60,13 +60,19 @@ class Keypoint3DLoss(nn.Module):
         pred_keypoints_3d: torch.Tensor,
         gt_keypoints_3d: torch.Tensor,
         pelvis_id: int = 0,
+        align_root: bool = True,
     ) -> torch.Tensor:
         """
-        Compute 3D keypoint loss (pelvis-relative).
+        Compute 3D keypoint loss.
 
-        Both prediction and ground truth are root-centred using the pelvis
-        joint before the loss is computed, making it invariant to global
-        translation.
+        With ``align_root=True`` (default) both prediction and ground truth are
+        root-centred using the pelvis joint before the loss is computed, making
+        it invariant to global translation (the original HaMeR-style behaviour).
+
+        With ``align_root=False`` the keypoints are compared in their absolute
+        camera-frame coordinates, so the loss *does* penalise global translation.
+        This is the supervision the root-relative loss is blind to, and the term
+        that constrains where the hand sits in metric depth.
 
         Args:
             pred_keypoints_3d (torch.Tensor): Shape [B, S, N, 3] — predicted
@@ -75,6 +81,8 @@ class Keypoint3DLoss(nn.Module):
             gt_keypoints_3d (torch.Tensor): Shape [B, S, N, 4] — ground truth
                 3D keypoints with per-keypoint confidence in the last channel.
             pelvis_id (int): Index of the pelvis / root joint used for centring.
+            align_root (bool): If True, root-centre before comparing (translation
+                invariant). If False, compare absolute coordinates.
 
         Returns:
             torch.Tensor: Scalar 3D keypoint loss.
@@ -82,12 +90,13 @@ class Keypoint3DLoss(nn.Module):
         gt_keypoints_3d = gt_keypoints_3d.clone()
         batch_size = pred_keypoints_3d.shape[0]
 
-        # Root-centre both prediction and ground truth
-        pred_keypoints_3d = pred_keypoints_3d - pred_keypoints_3d[:, :, pelvis_id, :].unsqueeze(2)
-        gt_keypoints_3d[:, :, :, :-1] = (
-            gt_keypoints_3d[:, :, :, :-1]
-            - gt_keypoints_3d[:, :, pelvis_id, :-1].unsqueeze(2)
-        )
+        if align_root:
+            # Root-centre both prediction and ground truth
+            pred_keypoints_3d = pred_keypoints_3d - pred_keypoints_3d[:, :, pelvis_id, :].unsqueeze(2)
+            gt_keypoints_3d[:, :, :, :-1] = (
+                gt_keypoints_3d[:, :, :, :-1]
+                - gt_keypoints_3d[:, :, pelvis_id, :-1].unsqueeze(2)
+            )
 
         # conf: [B, S, N, 1]
         conf = gt_keypoints_3d[:, :, :, -1].unsqueeze(-1).clone()

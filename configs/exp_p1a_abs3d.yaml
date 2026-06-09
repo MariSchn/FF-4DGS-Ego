@@ -62,7 +62,7 @@ model:
 # ------------------------------------------------------------------
 loss_weights:
   kp3d:          0.05
-  kp3d_abs:      0.0     # absolute (non-root) 3D loss; 0 = off (baseline). >0
+  kp3d_abs:      0.05    # absolute (non-root) 3D loss; 0 = off (baseline). >0
                          # directly supervises global hand placement / metric depth.
   kp2d:          0.05    # bumped from HaMeR's 0.01 — reinforces projection
   global_orient: 0.01    # bumped 10x — rotmat MSE on a single 3x3
@@ -140,6 +140,6 @@ wandb:
   enabled: true
   project: "hand-head-training"
   entity: 3DV-Project
-  run_name: "Ablation: hand to gs injection (v2)"
+  run_name: "P1a: abs3d loss (scene_follows_hand)"
   tags: []
   notes: null

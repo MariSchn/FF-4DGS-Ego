@@ -62,7 +62,7 @@ model:
 # ------------------------------------------------------------------
 loss_weights:
   kp3d:          0.05
-  kp3d_abs:      0.0     # absolute (non-root) 3D loss; 0 = off (baseline). >0
+  kp3d_abs:      0.05    # absolute (non-root) 3D loss; 0 = off (baseline). >0
                          # directly supervises global hand placement / metric depth.
   kp2d:          0.05    # bumped from HaMeR's 0.01 — reinforces projection
   global_orient: 0.01    # bumped 10x — rotmat MSE on a single 3x3
@@ -82,7 +82,7 @@ hand_depth_anchor:
   warmup_steps: 800      # linear ramp of the anchor weight over global steps
   depth_min: 0.01        # reject sampled scene depth <= this (metres)
   conf_thresh: 0.0       # optional gs_depth_conf gate threshold
-  direction: scene_follows_hand  # {scene_follows_hand, hand_follows_scene, bidirectional}
+  direction: bidirectional  # {scene_follows_hand, hand_follows_scene, bidirectional}
                                  # which depth the anchor gradient corrects.
 # L2 MetricScaleHead inference solve (closed-form global scale).
 metric_scale:
@@ -140,6 +140,6 @@ wandb:
   enabled: true
   project: "hand-head-training"
   entity: 3DV-Project
-  run_name: "Ablation: hand to gs injection (v2)"
+  run_name: "P1b: bidirectional + abs3d"
   tags: []
   notes: null

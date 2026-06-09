@@ -34,8 +34,22 @@ def hand_depth_anchor_loss(
     depth_min: float = 0.01,
     gs_depth_conf: torch.Tensor | None = None,
     conf_thresh: float = 0.0,
+    direction: str = "scene_follows_hand",
 ) -> tuple[torch.Tensor, dict]:
     """Smooth-L1 anchor between sampled scene depth and metric hand depth.
+
+    The 2D sampling location is always taken from the *detached* hand projection
+    so the grid is stable; ``direction`` only selects which depth carries the
+    gradient:
+
+    * ``"scene_follows_hand"`` (default): the hand is the trusted metric anchor;
+      gradient flows only into ``gs_depth``. Use when the hand placement is more
+      reliable than the monocular scene depth.
+    * ``"hand_follows_scene"``: the scene depth is treated as the metric target;
+      gradient flows only into the hand joints (i.e. back to the head's
+      translation). Use when the (well-scaled) scene depth should correct an
+      under-supervised absolute hand placement.
+    * ``"bidirectional"``: both move toward each other (gradient into both).
 
     Args:
         pred_joints: [B, S, H, J, 3] camera-frame metric joints (metres).
@@ -46,24 +60,25 @@ def hand_depth_anchor_loss(
         depth_min:   reject sampled scene depth <= this value (invalid geometry).
         gs_depth_conf: optional [B, S, 1, Hd, Wd] confidence; gates samples.
         conf_thresh: keep a sample only if its sampled confidence > this value.
+        direction:   one of {scene_follows_hand, hand_follows_scene, bidirectional}.
 
     Returns:
         loss_scalar: scalar tensor (0 when no valid joints; never NaN).
         info: {"hand_depth_residual_m": float, "n_valid": int}.
     """
-    # Scene follows hand: the hand is the trusted metric anchor and must stay
-    # completely untouched by this term. Detach pred_joints so BOTH the sampling
-    # location (grid) and the depth target are fixed — gradient flows only to
-    # gs_depth via `sampled`.
-    grid_xy, z = project_joints_to_norm_pixels(pred_joints.detach(), cam_intr)
-    sampled, in_frame = sample_depth_at_joints(gs_depth, grid_xy)
+    if direction not in ("scene_follows_hand", "hand_follows_scene", "bidirectional"):
+        raise ValueError(f"unknown anchor direction: {direction!r}")
+
+    # Sampling location is always the detached hand projection (stable 2D grid).
+    grid_xy_det, z_det = project_joints_to_norm_pixels(pred_joints.detach(), cam_intr)
+    sampled, in_frame = sample_depth_at_joints(gs_depth, grid_xy_det)
 
     # Broadcast has_hand [B,S,H] over the J joint axis -> [B,S,H,J].
     has_hand_j = has_hand.unsqueeze(-1).to(torch.bool).expand_as(sampled)
     valid = has_hand_j & in_frame & (sampled > depth_min)
 
     if gs_depth_conf is not None:
-        conf, _ = sample_depth_at_joints(gs_depth_conf, grid_xy)
+        conf, _ = sample_depth_at_joints(gs_depth_conf, grid_xy_det)
         valid = valid & (conf > conf_thresh)
 
     n_valid = int(valid.sum().item())
@@ -71,14 +86,23 @@ def hand_depth_anchor_loss(
         loss = torch.zeros((), dtype=sampled.dtype, device=sampled.device)
         return loss, {"hand_depth_residual_m": 0.0, "n_valid": 0}
 
-    # `z` and `grid_xy` derive from the detached pred_joints above, so the target
-    # is fixed and the loss differentiates only w.r.t. gs_depth.
-    per_joint = F.smooth_l1_loss(sampled, z, beta=margin, reduction="none")
+    # Select which side carries gradient. `z_grad` re-projects WITHOUT detach so
+    # the hand depth differentiates back to the head; `z_det` is the fixed target.
+    if direction == "scene_follows_hand":
+        src, tgt = sampled, z_det                      # grad -> gs_depth only
+    elif direction == "hand_follows_scene":
+        _, z_grad = project_joints_to_norm_pixels(pred_joints, cam_intr)
+        src, tgt = z_grad, sampled.detach()            # grad -> hand only
+    else:  # bidirectional
+        _, z_grad = project_joints_to_norm_pixels(pred_joints, cam_intr)
+        src, tgt = sampled, z_grad                     # grad -> both
+
+    per_joint = F.smooth_l1_loss(src, tgt, beta=margin, reduction="none")
     valid_f = valid.to(per_joint.dtype)
     loss = (per_joint * valid_f).sum() / valid_f.sum()
 
     with torch.no_grad():
-        residual = ((sampled - z).abs() * valid_f).sum() / valid_f.sum()
+        residual = ((sampled - z_det).abs() * valid_f).sum() / valid_f.sum()
 
     return loss, {
         "hand_depth_residual_m": float(residual.item()),
