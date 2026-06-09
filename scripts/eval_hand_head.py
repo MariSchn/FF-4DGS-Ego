@@ -3,7 +3,7 @@ Evaluate a trained hand-head checkpoint on a fixed Hot3D val split.
 
 Reports HaMeR-style metrics: MPJPE, PA-MPJPE, MPVPE, PA-MPVPE, AUC_J, AUC_V.
 
-Usage (run as a module from the repo root, with the `neoverse` conda env active):
+Usage (run as a module from the repo root, with the project virtualenv active):
 
     # Single checkpoint
     python -m scripts.eval_hand_head \
