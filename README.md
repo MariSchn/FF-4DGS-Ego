@@ -11,14 +11,29 @@ reconstructed scene, recovers metric-scale 3D hands.
 
 ## Setup
 
+Tested on CUDA 12.1 / PyTorch 2.3.1 and CUDA 12.8 / PyTorch 2.7.1. Install
+PyTorch first (it is intentionally not pinned in `requirements.txt` so you can
+match your CUDA version), then the rest:
+
 ```bash
-python -m venv venv && source venv/bin/activate
+conda create -n ff4dgs python=3.10 -y && conda activate ff4dgs
+
+# PyTorch — pick the wheel matching your CUDA (example: CUDA 12.1)
+pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+
 pip install -r requirements.txt
+
+# Gaussian-splatting deps (match the torch/CUDA above)
+pip install torch-scatter -f https://data.pyg.org/whl/torch-2.3.1+cu121.html
+pip install --no-build-isolation git+https://github.com/nerfstudio-project/gsplat.git
+
 git submodule update --init --recursive   # HaMeR
 ```
 
-Place model weights under `models/` (reconstructor checkpoint, MANO, HaMeR) —
-see `models/Put checkpoints here.txt`.
+Place model weights under `models/` — the WorldMirror reconstructor checkpoint
+(`models/NeoVerse/reconstructor.ckpt`, shipped in the
+[NeoVerse release](https://huggingface.co/Yuppie1204/NeoVerse)), plus MANO and
+the HaMeR submodule. See `models/Put checkpoints here.txt`.
 
 ## Reconstruct 4D Gaussians from a video
 
