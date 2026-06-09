@@ -1664,19 +1664,33 @@ def train():
                                 log_dict["gaussian_metrics/SSIM_hand"]  = gs_metrics["SSIM_hand"]
                                 log_dict["gaussian_metrics/LPIPS_hand"] = gs_metrics["LPIPS_hand"]
                                 log_dict["gaussian_metrics/num_valid_frames_hand"] = gs_metrics["num_valid_frames_hand"]
-                        if val_vis_items:
-                            pairs = [
-                                (captured[it["clip_idx"]]["gt"], captured[it["clip_idx"]]["pred"])
-                                for it in val_vis_items if it["clip_idx"] in captured
-                            ]
-                            val_images = render_vis_list(val_vis_items, pairs, render_fn)
-                            if val_images:
-                                log_dict["media/val_hand_overlay"] = val_images
-                        if gs_captured:
-                            gs_videos = build_gs_vis_videos(gs_captured)
-                            if gs_videos:
-                                log_dict["media/val_gs_overlay"] = gs_videos
-                        wandb.log(log_dict, step=global_step)
+                        # Media is best-effort: a missing ffmpeg (or any encode
+                        # error) must never crash a training run. Metrics are
+                        # logged regardless.
+                        try:
+                            if val_vis_items:
+                                pairs = [
+                                    (captured[it["clip_idx"]]["gt"], captured[it["clip_idx"]]["pred"])
+                                    for it in val_vis_items if it["clip_idx"] in captured
+                                ]
+                                val_images = render_vis_list(val_vis_items, pairs, render_fn)
+                                if val_images:
+                                    log_dict["media/val_hand_overlay"] = val_images
+                        except Exception as _e:
+                            tqdm.write(f"[media] hand overlay skipped: {type(_e).__name__}: {_e}")
+                        try:
+                            if gs_captured:
+                                gs_videos = build_gs_vis_videos(gs_captured)
+                                if gs_videos:
+                                    log_dict["media/val_gs_overlay"] = gs_videos
+                        except Exception as _e:
+                            tqdm.write(f"[media] gs overlay skipped: {type(_e).__name__}: {_e}")
+                        try:
+                            wandb.log(log_dict, step=global_step)
+                        except Exception as _e:
+                            tqdm.write(f"[wandb] log with media failed ({type(_e).__name__}); metrics-only")
+                            wandb.log({k: v for k, v in log_dict.items()
+                                       if not k.startswith("media/")}, step=global_step)
 
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
