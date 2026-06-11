@@ -8,6 +8,15 @@ import math
 
 from ..utils.grid import create_uv_grid, position_grid_to_embed
 
+# Exp-family activations overflow to inf for raw inputs > ~88. The forward inf
+# survives downstream masking/filtering (loss stays finite), but backward then
+# computes 0 * exp'(x)=inf -> NaN, poisoning every gradient that shares the
+# upstream features (P1a NaN-grad freeze: anomaly-traced to ExpBackward0 in the
+# gs_head "exp" depth activation once hand-injected features grew large).
+# Clamping the exponent is inert for healthy values (raw depth features are
+# O(1-10); exp(20) ~ 4.9e8) and removes the inf.
+_EXP_ACT_MAX = 20.0
+
 
 class DPTHead(nn.Module):
     """
@@ -342,7 +351,7 @@ class DPTHead(nn.Module):
         attr_activations = {
             "norm_exp": lambda x: (x / x.norm(dim=-1, keepdim=True).clamp(min=1e-8)) * torch.expm1(x.norm(dim=-1, keepdim=True)),
             "norm": lambda x: x / x.norm(dim=-1, keepdim=True),
-            "exp": torch.exp,
+            "exp": lambda x: torch.exp(x.clamp(max=_EXP_ACT_MAX)),
             "relu": F.relu,
             "inv_log": self._apply_inverse_log_transform,
             "xy_inv_log": lambda x: torch.cat([
@@ -360,8 +369,8 @@ class DPTHead(nn.Module):
 
         # Confidence activation mapping
         conf_activations = {
-            "expp1": lambda c: 1 + c.exp(),
-            "expp0": torch.exp,
+            "expp1": lambda c: 1 + c.clamp(max=_EXP_ACT_MAX).exp(),
+            "expp0": lambda c: torch.exp(c.clamp(max=_EXP_ACT_MAX)),
             "sigmoid": torch.sigmoid,
             "none": lambda c: c,
         }
@@ -381,7 +390,7 @@ class DPTHead(nn.Module):
         Returns:
             Transformed tensor
         """
-        return torch.sign(input_tensor) * (torch.expm1(torch.abs(input_tensor)))
+        return torch.sign(input_tensor) * (torch.expm1(torch.abs(input_tensor).clamp(max=_EXP_ACT_MAX)))
 
 
 
