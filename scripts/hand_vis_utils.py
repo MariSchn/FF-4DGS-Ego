@@ -48,11 +48,27 @@ def quat_wxyz_to_axis_angle_torch(q_wxyz, eps=1e-8):
         q_wxyz (torch.Tensor): [..., 4]
     Returns:
         torch.Tensor: [..., 3] rotation vector such that R = exp([v]_x).
+
+    Degenerate (near-zero-norm) quaternions — absent-hand fillers or a collapsed
+    head prediction — are replaced with identity BEFORE the conversion. Without
+    this guard their axis-angle Jacobian is ~pi/eps^2 (~3e16): finite in the
+    forward but an enormous gradient that becomes NaN once it propagates and
+    combines under reduced precision. That NaN gradient froze P1a training
+    (job 97944) — the loss stayed finite while grad_norm went NaN and the
+    NaN-guard skipped every optimizer step. ``torch.where`` zeroes the gradient
+    for the replaced entries. Present near-identity rotations (norm ~1, tiny
+    vector part) are NOT degenerate and pass through with a finite gradient.
     """
+    identity = torch.zeros_like(q_wxyz)
+    identity[..., 0] = 1.0
+    q_wxyz = torch.where(q_wxyz.norm(dim=-1, keepdim=True) < 1e-6, identity, q_wxyz)
+
     q = q_wxyz / q_wxyz.norm(dim=-1, keepdim=True).clamp_min(eps)
     w = q[..., :1]
     xyz = q[..., 1:]
-    sin_half = xyz.norm(dim=-1, keepdim=True).clamp_min(eps)
+    # eps INSIDE the sqrt (not clamp_min after norm): keeps the backward of
+    # sin_half finite as a real rotation passes through identity (vector -> 0).
+    sin_half = torch.sqrt((xyz * xyz).sum(dim=-1, keepdim=True) + eps * eps)
     angle = 2.0 * torch.atan2(sin_half, w.abs())
     sign = torch.where(w >= 0, torch.ones_like(w), -torch.ones_like(w))
     axis = sign * xyz / sin_half
