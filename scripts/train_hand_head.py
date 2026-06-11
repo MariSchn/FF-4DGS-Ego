@@ -10,6 +10,7 @@ import bisect
 import json
 import os
 import random
+import sys
 import time
 
 import numpy as np
@@ -1364,6 +1365,57 @@ def train():
         best_val_loss = ckpt_state["best_val_loss"]
         print(f"Resumed successfully. global_step={global_step}, start_epoch={start_epoch}, best_val_loss={best_val_loss:.4f}")
 
+    # Opt-in autograd anomaly detection (DETECT_ANOMALY=1): raises at the first
+    # op that produces a non-finite value in the backward pass, with a traceback
+    # to the forward call site. Used to root-cause the P1a NaN-grad freeze.
+    if os.environ.get("DETECT_ANOMALY", "0") == "1":
+        torch.autograd.set_detect_anomaly(True)
+        tqdm.write("[anomaly] set_detect_anomaly(True): backward will raise at the first non-finite op")
+
+    # --- Per-term NaN isolation (P1a NaN hunt, round 2) ---
+    # The quat-degenerate guard removed one NaN source, but grads still go
+    # non-finite near full abs-loss ramp (zombie runs: steps 87 / 179 / 186).
+    # Screen the total grad after every batch backward; on the first
+    # finite->non-finite transition, switch to isolation mode: on subsequent
+    # batches, backward each weighted loss term ALONE and report which one
+    # produces non-finite grads, then halt (exit 3) instead of zombie-training
+    # with every optimizer step skipped.
+    def _grads_finite(params):
+        with torch.no_grad():
+            total = torch.zeros((), device=device)
+            for p in params:
+                if p.grad is not None:
+                    total += p.grad.float().pow(2).sum()
+            return bool(torch.isfinite(total)), float(total.sqrt())
+
+    def _isolate_nan_terms(named_terms, params):
+        """Backward each weighted term alone (retain_graph). True if culprit found."""
+        culprit = False
+        for name, term in named_terms:
+            if not torch.is_tensor(term) or not term.requires_grad:
+                tqdm.write(f"[nan-isolate]   {name}: value={float(term):.6f} (no graph, skipped)")
+                continue
+            if not torch.isfinite(term):
+                tqdm.write(f"[nan-isolate]   {name}: FORWARD value non-finite ({term.item()})")
+                culprit = True
+                continue
+            optimizer.zero_grad(set_to_none=True)
+            term.backward(retain_graph=True)
+            ok, gn = _grads_finite(params)
+            # Flush per term: if a later backward OOMs, partial verdicts survive.
+            tqdm.write(f"[nan-isolate]   {name}: value={term.item():.6f} grad_norm={gn:.3e} finite={ok}")
+            sys.stdout.flush()
+            if not ok:
+                culprit = True
+        optimizer.zero_grad(set_to_none=True)
+        return culprit
+
+    nan_isolate_pending = 0      # batches left in isolation mode (0 = normal training)
+    NAN_ISOLATE_BATCHES = 32     # give up after this many isolation batches
+    NAN_GUARD_HALT_AFTER = 5     # consecutive skipped steps before halting
+    prev_batch_grads_finite = True
+    consec_nan_guard = 0
+
     # --- Training loop ---
     for epoch in tqdm(range(start_epoch, epochs + 1), desc="Epochs"):
         model.train()
@@ -1540,6 +1592,44 @@ def train():
                 + w.get("hand_depth_anchor", 0.0) * anchor_ramp * loss_hand_anchor
             )
 
+            # Isolation mode: backward each weighted term alone on this batch,
+            # ordered most-suspicious-first so an OOM mid-diagnostic still
+            # leaves verdicts for the likely culprits in the log.
+            if nan_isolate_pending > 0:
+                nan_isolate_pending -= 1
+                named_terms = [
+                    ("kp3d_abs(w*ramp)",          w.get("kp3d_abs", 0.0) * abs_ramp * loss_kp3d_abs),
+                    ("hand_depth_anchor(w*ramp)", w.get("hand_depth_anchor", 0.0) * anchor_ramp * loss_hand_anchor),
+                    ("kp2d(w)",                   w["kp2d"] * loss_kp2d),
+                    ("gs_lpips(w)",               w.get("gs_lpips", 0.0) * loss_gs_lpips),
+                    ("gs_l1(w)",                  w.get("gs_l1", 0.0) * loss_gs_l1),
+                    ("kp3d(w)",                   w["kp3d"] * loss_kp3d),
+                    ("transl(w)",                 w["transl"] * param_losses["transl"]),
+                    ("global_orient(w)",          w["global_orient"] * param_losses["global_orient"]),
+                    ("hand_pose(w)",              w["hand_pose"] * param_losses["hand_pose"]),
+                    ("betas(w)",                  w["betas"] * param_losses["betas"]),
+                ]
+                tqdm.write(f"[nan-isolate] batch {batch_idx} step {global_step} "
+                           f"seq={batch.get('seq_path', '?')} offset={batch.get('frame_offset', '?')}")
+                found = _isolate_nan_terms(named_terms, trainable_params)
+                if not found:
+                    # No single term bad in isolation -- check the combination.
+                    loss.backward()
+                    ok, gn = _grads_finite(trainable_params)
+                    tqdm.write(f"[nan-isolate]   COMBINED: grad_norm={gn:.3e} finite={ok}")
+                    optimizer.zero_grad(set_to_none=True)
+                    found = not ok
+                sys.stdout.flush()
+                if found:
+                    tqdm.write("[nan-isolate] culprit(s) reported above; halting (exit 3)")
+                    sys.stdout.flush()
+                    sys.exit(3)
+                if nan_isolate_pending == 0:
+                    tqdm.write("[nan-isolate] no culprit in isolation window; halting (exit 3)")
+                    sys.stdout.flush()
+                    sys.exit(3)
+                continue  # skip the normal accum path while isolating
+
             _t_loss = _lap()
             (loss / grad_accum_steps).backward()
             _t_bwd = _lap()
@@ -1550,6 +1640,17 @@ def train():
                     f"loss={_t_loss-_t_render:.2f}s bwd={_t_bwd-_t_loss:.2f}s "
                     f"| total={_t_bwd-_t0:.2f}s"
                 )
+
+            # Per-batch screen: catch the exact batch whose backward first turns
+            # the accumulated grads non-finite, then enter isolation mode.
+            batch_grads_ok, _ = _grads_finite(trainable_params)
+            if not batch_grads_ok and prev_batch_grads_finite:
+                tqdm.write(f"[nan-isolate] first non-finite grad after batch {batch_idx} "
+                           f"(step {global_step}); per-term isolation for next {NAN_ISOLATE_BATCHES} batches")
+                sys.stdout.flush()
+                nan_isolate_pending = NAN_ISOLATE_BATCHES
+            prev_batch_grads_finite = batch_grads_ok
+
             accum_loss += loss.item()
             for k in ("transl", "global_orient", "hand_pose", "betas"):
                 accum_terms[k] += param_losses[k].item()
@@ -1568,8 +1669,16 @@ def train():
                 if torch.isfinite(grad_norm):
                     optimizer.step()
                     scheduler.step()
+                    consec_nan_guard = 0
                 else:
-                    tqdm.write(f"[nan-guard] non-finite grad_norm at step {global_step}; skipping optimizer step")
+                    consec_nan_guard += 1
+                    tqdm.write(f"[nan-guard] non-finite grad_norm at step {global_step}; "
+                               f"skipping optimizer step ({consec_nan_guard} consecutive)")
+                    if consec_nan_guard >= NAN_GUARD_HALT_AFTER:
+                        tqdm.write(f"[nan-guard] {NAN_GUARD_HALT_AFTER} consecutive non-finite steps; "
+                                   f"halting instead of zombie-training (exit 4)")
+                        sys.stdout.flush()
+                        sys.exit(4)
                 optimizer.zero_grad()
                 avg_loss = accum_loss / grad_accum_steps
                 avg_terms = {k: v / grad_accum_steps for k, v in accum_terms.items()}
