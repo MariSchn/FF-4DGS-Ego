@@ -38,7 +38,7 @@ import torch
 from decord import VideoReader
 from projectaria_tools.core.sophus import SE3
 
-from scripts.hand_alignment.align_hand_to_neoverse import (
+from scripts.preprocessing.pinhole_undistort_ops import (
     ARIA_FRAME_SIZE,
     build_pinhole_target,
     undistort_mp4_frame,
