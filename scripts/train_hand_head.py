@@ -1276,8 +1276,10 @@ def train():
     profile_steps = int(os.environ.get("PROFILE_STEPS", "0"))
     use_amp = bool(training_cfg.get("use_amp", True))  # bf16 autocast on the forward
     save_every = training_cfg.get("save_every", 2000)
+    keep_last_checkpoints = training_cfg.get("keep_last_checkpoints", 2)
     output_dir = training_cfg.get("output_dir", "checkpoints")
     os.makedirs(output_dir, exist_ok=True)
+    best_val_mpjpe = float("inf")  # tracked separately: val_loss best != MPJPE best
 
     print(f"Training on {device} | {epochs} epochs | batch_size={batch_size} | grad_accum_steps={grad_accum_steps} | amp_bf16={use_amp}")
 
@@ -1334,7 +1336,25 @@ def train():
     global_step = 0
     start_epoch = 1
 
-    def save_checkpoint(step, epoch_idx, is_best=False, name=None):
+    def _prune_numbered_checkpoints(keep_last):
+        # Each checkpoint is ~5.7 GB; an unbounded save_every=100 run fills the
+        # /work/scratch quota in ~12 saves (Errno 122 killed the P1b run). Keep
+        # only the last `keep_last` numbered checkpoints; best_*/latest/final are
+        # named differently and never pruned here.
+        numbered = []
+        for f in os.listdir(output_dir):
+            if f.startswith("checkpoint_") and f.endswith(".pt"):
+                try:
+                    numbered.append((int(f[len("checkpoint_"):-len(".pt")]), f))
+                except ValueError:
+                    continue
+        for _, f in sorted(numbered)[:-keep_last] if keep_last > 0 else sorted(numbered):
+            try:
+                os.remove(os.path.join(output_dir, f))
+            except OSError:
+                pass
+
+    def save_checkpoint(step, epoch_idx, is_best=False, name=None, best_metric=None):
         checkpoint_state = {
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
@@ -1345,6 +1365,8 @@ def train():
         }
         if name is not None:
             filename = name
+        elif best_metric is not None:
+            filename = f"best_{best_metric}.pt"
         elif is_best:
             filename = "best_val_loss.pt"
         else:
@@ -1352,6 +1374,8 @@ def train():
         path = os.path.join(output_dir, filename)
         torch.save(checkpoint_state, path)
         torch.save(checkpoint_state, os.path.join(output_dir, "latest.pt"))
+        if name is None and not is_best and best_metric is None:
+            _prune_numbered_checkpoints(keep_last_checkpoints)
 
     latest_path = os.path.join(output_dir, "latest.pt")
     if os.path.exists(latest_path):
@@ -1812,7 +1836,17 @@ def train():
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         save_checkpoint(global_step, epoch, is_best=True)
-                        tqdm.write("  -> New best. Saved.")
+                        tqdm.write("  -> New best val_loss. Saved.")
+                    # MPJPE is the actual objective and does NOT track val_loss
+                    # (the ramping abs-3D term inflates val_loss while MPJPE
+                    # drops). Retain the best-MPJPE checkpoint by its own name so
+                    # it survives numbered-checkpoint pruning. P1a's best (92.8mm
+                    # @ step 300) would otherwise have been lost to retention.
+                    hm_all_best = hand_metrics.get("all") if hand_metrics else None
+                    if hm_all_best is not None and hm_all_best["MPJPE"] < best_val_mpjpe:
+                        best_val_mpjpe = hm_all_best["MPJPE"]
+                        save_checkpoint(global_step, epoch, best_metric="mpjpe")
+                        tqdm.write(f"  -> New best MPJPE {best_val_mpjpe:.2f}mm. Saved.")
                     model.train()
 
                 if global_step % save_every == 0:
