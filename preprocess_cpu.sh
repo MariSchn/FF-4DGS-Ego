@@ -17,7 +17,8 @@
 #SBATCH --job-name=ff4dgs-preproc-cpu
 #SBATCH --account=3dv
 #SBATCH --partition=interactive-cpu
-#SBATCH --cpus-per-task=16
+#SBATCH --ntasks=1
+#SBATCH --gpus=0
 #SBATCH --mem=48G
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/%j.out
