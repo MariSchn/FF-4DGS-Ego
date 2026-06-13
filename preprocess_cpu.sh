@@ -16,9 +16,12 @@
 # ---------------------------------------------------------------------------
 #SBATCH --job-name=ff4dgs-preproc-cpu
 #SBATCH --account=3dv
-#SBATCH --partition=interactive-cpu
+# The 3dv account's job_submit plugin force-injects gpu:1 and pins to 'jobs',
+# so interactive-cpu/--gpus=0 are unreachable. Pin an x86 GPU type (1080ti) so
+# we never land on an ARM gb10/spark node where projectaria_tools cannot import.
+#SBATCH --partition=jobs
 #SBATCH --ntasks=1
-#SBATCH --gpus=0
+#SBATCH --gpus=1080ti:1
 #SBATCH --mem=48G
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/%j.out
