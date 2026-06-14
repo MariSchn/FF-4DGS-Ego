@@ -75,7 +75,7 @@ training:
   save_every: 100
   grad_clip_norm: 10.0
   kp3d_abs_warmup_steps: 200
-  keep_last_checkpoints: 2
+  keep_last_checkpoints: 0   # no numbered checkpoints; keep only best/latest/final (disk)
   seed: 42
   output_dir: "checkpoints/p2_pinhole"
 # ------------------------------------------------------------------
