@@ -1016,6 +1016,22 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
     return val_loss / n, val_terms, captured, hand_metrics, gs_metrics, gs_captured
 
 
+def build_hand_pointcloud_3d(captured):
+    """One wandb.Object3D per captured vis clip: GT hand joints (green) vs
+    predicted joints (red) in camera frame. The 2D overlay can't show the depth
+    axis -- where the placement error lives -- so this makes the residual
+    inspectable in the W&B 3D viewer. Best-effort: skips clips with no valid
+    joints. `captured[idx]` holds gt/pred tensors of shape [H, J, 3]."""
+    from scripts.hand_vis_utils import hand_joints_to_rgb_points
+    objs = []
+    for clip_idx in sorted(captured):
+        cap = captured[clip_idx]
+        pts = hand_joints_to_rgb_points(cap["gt"].cpu().numpy(), cap["pred"].cpu().numpy())
+        if pts is not None:
+            objs.append(wandb.Object3D(pts))
+    return objs
+
+
 def build_gs_vis_videos(gs_captured, fps=8):
     """Build wandb.Video side-by-side (rendered | GT) clips over all frames
     for each captured val clip. Returns [] if nothing was captured.
@@ -1826,6 +1842,13 @@ def train():
                                     log_dict["media/val_gs_overlay"] = gs_videos
                         except Exception as _e:
                             tqdm.write(f"[media] gs overlay skipped: {type(_e).__name__}: {_e}")
+                        try:
+                            if captured:
+                                hand_pc = build_hand_pointcloud_3d(captured)
+                                if hand_pc:
+                                    log_dict["media/val_hand_pointcloud"] = hand_pc
+                        except Exception as _e:
+                            tqdm.write(f"[media] 3d hand pointcloud skipped: {type(_e).__name__}: {_e}")
                         try:
                             wandb.log(log_dict, step=global_step)
                         except Exception as _e:

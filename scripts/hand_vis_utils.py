@@ -630,3 +630,40 @@ def render_hand_comparison(vis_context, frame_idx, gt_params, pred_params):
     cv2.putText(image, "Pred Right", (10, 120), font, 0.7, PRED_RIGHT_COLOR, 2)
 
     return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+def hand_joints_to_rgb_points(gt_hj, pred_hj, gt_rgb=(0, 200, 0), pred_rgb=(220, 30, 30)):
+    """Build a coloured 3D point set comparing GT vs predicted hand joints.
+
+    The 2D overlays hide the depth axis -- which is exactly where the placement
+    error lives -- so this feeds a 3D scatter (e.g. wandb.Object3D) where GT
+    joints are green and predictions red, making the depth/placement residual
+    directly visible.
+
+    Args:
+        gt_hj, pred_hj: array-likes of shape [H, J, 3] (or any [..., 3])
+            camera-frame joints in metres, same shape/ordering for both.
+        gt_rgb, pred_rgb: 0-255 RGB triples.
+
+    Returns:
+        (M, 6) float32 array of [x, y, z, r, g, b], GT points then pred points,
+        or None when shapes mismatch or no valid joints remain. Absent-hand
+        fillers (all-zero GT) and non-finite joints are dropped; predictions are
+        kept only where the corresponding GT is valid, so green/red points stay
+        one-to-one.
+    """
+    gt = np.asarray(gt_hj, dtype=np.float32).reshape(-1, 3)
+    pred = np.asarray(pred_hj, dtype=np.float32).reshape(-1, 3)
+    if gt.shape != pred.shape or gt.size == 0:
+        return None
+    valid = (
+        np.isfinite(gt).all(axis=1)
+        & np.isfinite(pred).all(axis=1)
+        & (np.linalg.norm(gt, axis=1) > 1e-6)
+    )
+    if not valid.any():
+        return None
+    gt, pred = gt[valid], pred[valid]
+    gt_pts = np.concatenate([gt, np.tile(gt_rgb, (len(gt), 1))], axis=1)
+    pred_pts = np.concatenate([pred, np.tile(pred_rgb, (len(pred), 1))], axis=1)
+    return np.concatenate([gt_pts, pred_pts], axis=0).astype(np.float32)
