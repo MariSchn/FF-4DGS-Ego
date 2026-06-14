@@ -68,7 +68,9 @@ pip install -q "chumpy-fix==0.0.1"
 
 # --- Import sanity (fail fast with a clear message if a dep is missing) ------
 python3 - <<'PY'
-import importlib
+import importlib, inspect
+if not hasattr(inspect, "getargspec"):     # chumpy shim (py3.11+ removed it)
+    inspect.getargspec = inspect.getfullargspec
 for m in ("torch","numpy","scipy","cv2","decord","smplx","chumpy"):
     importlib.import_module(m)
 from projectaria_tools.core.sophus import SE3          # the binding that fails on ARM

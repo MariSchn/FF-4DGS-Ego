@@ -25,10 +25,17 @@ Usage:
 import argparse
 import bisect
 import datetime
+import inspect
 import json
 import os
 import sys
 from pathlib import Path
+
+# chumpy (pulled in by smplx when unpickling the MANO .pkl) still calls
+# inspect.getargspec, removed in Python 3.11+. Restore it before any MANO load
+# so chumpy imports on the py3.12 preprocessing venv. Standard chumpy shim.
+if not hasattr(inspect, "getargspec"):
+    inspect.getargspec = inspect.getfullargspec
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 

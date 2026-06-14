@@ -134,9 +134,16 @@ def build_model(cfg, device):
 
 
 def load_hand_head(model, ckpt_path, device):
-    # train_hand_head.py saves model.hand_head.state_dict() directly (a flat dict).
-    sd = torch.load(ckpt_path, map_location=device)
-    model.hand_head.load_state_dict(sd, strict=True)
+    # Two checkpoint formats: current train_hand_head.py saves the full wrapped
+    # model under "model_state_dict" (backbone + hand_head + hand_to_gs
+    # injection); older runs saved a bare model.hand_head.state_dict().
+    ckpt = torch.load(ckpt_path, map_location=device)
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        # strict=False: backbone keys already loaded from the base ckpt; this
+        # overwrites the trained hand_head + injection weights.
+        model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    else:
+        model.hand_head.load_state_dict(ckpt, strict=True)
 
 
 def evaluate_checkpoint(model, ckpt_path, val_loader, mano_model, device, num_frames,
