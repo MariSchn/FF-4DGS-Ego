@@ -61,14 +61,19 @@ else
   echo "[venv] reusing ${VENV}"
   source "${VENV}/bin/activate"
 fi
+# MANO .pkl is a latin1 pickle of chumpy arrays; smplx needs chumpy to unpickle
+# it. Match the training venv (venv_gb10), which uses the py3.12-compatible
+# fork chumpy-fix==0.0.1. Idempotent: a no-op once installed.
+pip install -q "chumpy-fix==0.0.1"
 
 # --- Import sanity (fail fast with a clear message if a dep is missing) ------
 python3 - <<'PY'
 import importlib
-for m in ("torch","numpy","scipy","cv2","decord","smplx"):
+for m in ("torch","numpy","scipy","cv2","decord","smplx","chumpy"):
     importlib.import_module(m)
 from projectaria_tools.core.sophus import SE3          # the binding that fails on ARM
 from projectaria_tools.core import calibration         # noqa
+import smplx                                           # MANO load needs chumpy at runtime
 print("[import-check] all preprocessing deps import OK on", __import__("platform").machine())
 PY
 
