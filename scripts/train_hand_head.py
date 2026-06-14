@@ -10,12 +10,14 @@ import bisect
 import json
 import os
 import random
+import tempfile
 
 import numpy as np
 
 import torch
 import torch.nn.functional as F
 import numpy as np
+import trimesh
 import wandb
 import yaml
 from decord import VideoReader
@@ -28,7 +30,11 @@ from tqdm import tqdm
 from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
 from diffsynth.utils.auxiliary import load_video
 
-from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
+from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss, _safe_quat_to_rotmat
+from scripts.hand_alignment.align_hand_to_neoverse import (
+    recover_scale_from_camera_pairs,
+    R_SENSOR_TO_DISPLAY,
+)
 from scripts.hand_metrics import metric_chunks_from_batch, metrics_from_chunks
 from scripts.gs_metrics import (
     LPIPSScorer,
@@ -869,6 +875,16 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                             gs_captured[clip_idx] = {
                                 "rendered": rendered[item_idx].float().cpu(),  # [S, H, W, 3]
                                 "gt":       imgs[item_idx].float().cpu(),       # [S, 3, H, W]
+                                # Raw per-frame Gaussians for 3D scene export.
+                                "splats": [
+                                    {
+                                        "means":     g.means.detach().float().cpu(),
+                                        "harmonics": g.harmonics.detach().float().cpu(),
+                                        "opacities": g.opacities.detach().float().cpu(),
+                                    }
+                                    for g in preds["splats"][item_idx]
+                                ],
+                                "c2w_pred": preds["rendered_extrinsics"][item_idx].detach().float().cpu(),  # [S, 4, 4]
                             }
 
             pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
@@ -941,8 +957,14 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                     clip_idx = batch_idx * batch_size + item_idx
                     if clip_idx in vis_clip_indices:
                         captured[clip_idx] = {
+                            # Frame-0 params for the existing 2D overlay path (render_vis_list).
                             "gt": gt[item_idx, 0].cpu(),
                             "pred": vis_preds["hand_joints"][item_idx, 0].cpu(),
+                            # Full-clip params + GT extrinsics for 3D scene export.
+                            "gt_params_clip":    gt[item_idx].cpu(),                                 # [S, 64]
+                            "pred_params_clip":  vis_preds["hand_joints"][item_idx].detach().cpu(),  # [S, 64]
+                            "cam_extrinsics":    vbatch["cam_extrinsics"][item_idx].cpu()
+                                                  if "cam_extrinsics" in vbatch else None,           # [S, 4, 4] T_camera_world
                         }
 
     n = max(len(val_loader), 1)
@@ -973,6 +995,124 @@ def build_gs_vis_videos(vis_items, gs_captured, fps=8):
     return videos
 
 
+SH_C0 = 0.28209479177387814  # band-0 spherical harmonic, matches align_hand_to_neoverse.py
+
+
+def _hand_verts_cam_to_nv(verts_cam_np, c2w_pred_f, s, R_sd_np):
+    """Lift a single-frame [V, 3] hand mesh in Aria sensor cam frame into
+    NeoVerse predicted-world frame: p_nv = t_pred + s * R_pred * R_sd * p_cam.
+    All inputs/outputs are numpy."""
+    R_pred = c2w_pred_f[:3, :3]
+    t_pred = c2w_pred_f[:3, 3]
+    return (s * (R_pred @ R_sd_np @ verts_cam_np.T)).T + t_pred
+
+
+def build_3d_scenes(vis_items, captured, gs_captured, mano_model,
+                    frame_indices=(0, 8, 15), max_gauss=30000, opacity_thresh=0.05):
+    """Export GLB scenes (predicted hand + GT hand + subsampled gaussians) for
+    a few frames per captured val clip and return a dict of wandb.Object3D
+    keyed by `media/val_3d_scene_clip{idx}_f{frame}`.
+
+    Both meshes and gaussians live in NeoVerse predicted-world coordinates,
+    using the per-clip scale `s` recovered from camera-pose pairs."""
+    scene_logs = {}
+    R_sd_np = np.asarray(R_SENSOR_TO_DISPLAY, dtype=np.float64)
+
+    for item in vis_items:
+        clip_idx = item["clip_idx"]
+        if clip_idx not in captured or clip_idx not in gs_captured:
+            continue
+        cap = captured[clip_idx]
+        gs_cap = gs_captured[clip_idx]
+        if cap.get("cam_extrinsics") is None:
+            continue  # need GT extrinsics for the scale solve
+
+        S = gs_cap["c2w_pred"].shape[0]
+        # T_camera_world → c2w
+        c2w_gt = torch.linalg.inv(cap["cam_extrinsics"].to(torch.float64)).numpy()  # [S, 4, 4]
+        c2w_pred = gs_cap["c2w_pred"].to(torch.float64).numpy()                     # [S, 4, 4]
+
+        try:
+            s_val, diag = recover_scale_from_camera_pairs(c2w_gt, c2w_pred)
+        except Exception:
+            continue
+        if not np.isfinite(s_val) or s_val <= 0:
+            continue
+
+        pred_params_clip = cap["pred_params_clip"].view(S, NUM_HANDS, HAND_PARAM_DIM)
+        gt_params_clip   = cap["gt_params_clip"].view(S, NUM_HANDS, HAND_PARAM_DIM)
+        splats = gs_cap["splats"]
+
+        for f in frame_indices:
+            if f >= S:
+                continue
+            scene = trimesh.Scene()
+
+            # --- Hand meshes (pred + GT) -----------------------------------
+            for hand_idx in range(NUM_HANDS):
+                is_right = (hand_idx == 1)
+                # GT params for this hand all-zeros → hand is absent.
+                gt_p = gt_params_clip[f, hand_idx]
+                pr_p = pred_params_clip[f, hand_idx]
+                if gt_p.abs().sum() > 1e-6:
+                    try:
+                        v_cam, faces = mano_model.get_mesh_from_params(gt_p, is_right=is_right)
+                        v_nv = _hand_verts_cam_to_nv(v_cam.astype(np.float64),
+                                                    c2w_pred[f], s_val, R_sd_np)
+                        m_gt = trimesh.Trimesh(vertices=v_nv, faces=faces, process=False)
+                        m_gt.visual.face_colors = [60, 200, 60, 200]   # green-ish
+                        scene.add_geometry(m_gt, node_name=f"gt_{'right' if is_right else 'left'}")
+                    except Exception:
+                        pass
+                try:
+                    v_cam, faces = mano_model.get_mesh_from_params(pr_p, is_right=is_right)
+                    v_nv = _hand_verts_cam_to_nv(v_cam.astype(np.float64),
+                                                c2w_pred[f], s_val, R_sd_np)
+                    m_pr = trimesh.Trimesh(vertices=v_nv, faces=faces, process=False)
+                    m_pr.visual.face_colors = [220, 60, 60, 200]       # red-ish
+                    scene.add_geometry(m_pr, node_name=f"pred_{'right' if is_right else 'left'}")
+                except Exception:
+                    pass
+
+            # --- Gaussian point cloud --------------------------------------
+            g = splats[f]
+            means = g["means"].numpy()                                          # [N, 3]
+            opac = g["opacities"].numpy().reshape(-1)                          # [N]
+            # SH band-0 → diffuse RGB.
+            sh0 = g["harmonics"][..., 0, :].numpy()                            # [N, 3]
+            rgb = np.clip(0.5 + SH_C0 * sh0, 0.0, 1.0)
+
+            keep = np.isfinite(means).all(-1) & np.isfinite(opac) & (opac > opacity_thresh)
+            if keep.sum() > max_gauss:
+                # Keep the top-K most opaque after the threshold filter.
+                order = np.argsort(-opac[keep])
+                idx_keep = np.where(keep)[0][order[:max_gauss]]
+            else:
+                idx_keep = np.where(keep)[0]
+            if idx_keep.size > 0:
+                pts = means[idx_keep]
+                cols = (rgb[idx_keep] * 255).astype(np.uint8)
+                cols = np.concatenate([cols, np.full((cols.shape[0], 1), 255, np.uint8)], axis=1)
+                pc = trimesh.PointCloud(vertices=pts, colors=cols)
+                scene.add_geometry(pc, node_name="gaussians")
+
+            # --- Export + wrap for wandb -----------------------------------
+            if len(scene.geometry) == 0:
+                continue
+            with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as tf:
+                glb_path = tf.name
+            try:
+                scene.export(glb_path)
+                scene_logs[f"media/val_3d_scene_clip{clip_idx}_f{f:02d}"] = wandb.Object3D(
+                    glb_path, caption=f"Clip {clip_idx} f{f}: pred=red, GT=green, s={s_val:.3f}",
+                )
+            except Exception:
+                if os.path.exists(glb_path):
+                    os.unlink(glb_path)
+
+    return scene_logs
+
+
 def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
     """Forward-pass fixed train clips and render visualizations."""
     model.eval()
@@ -992,6 +1132,159 @@ def render_train_vis(model, train_vis_items, num_frames, device, render_fn):
 # ------------------------------------------------------------------
 # Training
 # ------------------------------------------------------------------
+
+def recover_scale_per_batch(c2w_gt, c2w_pred, s_min=0.01, s_max=100.0):
+    """Per-batch-element scalar `s` from camera-pose pairs (numpy path).
+
+    NeoVerse is frozen and `c2w_pred` carries no gradient, so we run the
+    pure-numpy `recover_scale_from_camera_pairs` once per batch element
+    (~1 ms total for typical B=32).
+
+    Args:
+        c2w_gt:   [B, S, 4, 4] torch — Aria GT camera-to-world (metric).
+        c2w_pred: [B, S, 4, 4] torch — NeoVerse predicted camera-to-world.
+        s_min, s_max: reject batch elements whose `s` falls outside this range
+            (or is non-finite). Tight bound on s_min is critical because
+            `1/s²` is applied as a loss correction — tiny s blows the loss up.
+
+    Returns:
+        s:           [B] torch tensor on c2w_gt's device/dtype.
+        pair_counts: [B] list of `scale_pair_count` diagnostics.
+        valid:       [B] torch.bool mask — False where s is unusable
+            (non-finite, or outside [s_min, s_max]).
+    """
+    B = c2w_gt.shape[0]
+    gt_np = c2w_gt.detach().cpu().numpy()
+    pr_np = c2w_pred.detach().cpu().numpy()
+    scales, pair_counts = [], []
+    for b in range(B):
+        s_b, diag = recover_scale_from_camera_pairs(gt_np[b], pr_np[b])
+        scales.append(s_b)
+        pair_counts.append(diag["scale_pair_count"])
+    s = torch.tensor(scales, device=c2w_gt.device, dtype=c2w_gt.dtype)
+    valid = torch.isfinite(s) & (s >= s_min) & (s <= s_max)
+    return s, pair_counts, valid
+
+
+def transform_points_cam_to_nv(points_cam, c2w_pred, s, R_sd):
+    """Apply per-frame similarity transform: p_nv = t_pred + s · R_pred · R_sd · p_cam.
+
+    Args:
+        points_cam: [B, S, *extra, 3] — points in Aria sensor camera frame.
+        c2w_pred:   [B, S, 4, 4]      — NeoVerse predicted camera-to-world.
+        s:          [B]               — per-batch scale (broadcast across S).
+        R_sd:       [3, 3]            — sensor→display rotation (constant).
+
+    Returns:
+        [B, S, *extra, 3] in NeoVerse predicted world frame.
+    """
+    B, S = c2w_pred.shape[:2]
+    R_pred = c2w_pred[..., :3, :3]                              # [B, S, 3, 3]
+    t_pred = c2w_pred[..., :3, 3]                               # [B, S, 3]
+    s_view = s.view(B, 1, 1, 1)                                 # [B, 1, 1, 1]
+    M = (R_pred @ R_sd) * s_view                                # [B, S, 3, 3]
+
+    extra_dims = points_cam.dim() - 3                           # dims between S and trailing 3
+    M_b = M.view(B, S, *([1] * extra_dims), 3, 3)
+    t_b = t_pred.view(B, S, *([1] * extra_dims), 3)
+    p = points_cam.unsqueeze(-1)                                # [B, S, *extra, 3, 1]
+    return (M_b @ p).squeeze(-1) + t_b
+
+
+def transform_R_cam_to_nv(R_cam, c2w_pred, R_sd):
+    """Apply rotation transform: R_nv = R_pred · R_sd · R_cam (no scale).
+
+    Args:
+        R_cam:    [B, S, *extra, 3, 3] — rotation in Aria sensor camera frame.
+        c2w_pred: [B, S, 4, 4]
+        R_sd:     [3, 3]
+
+    Returns:
+        [B, S, *extra, 3, 3] in NeoVerse predicted world frame.
+    """
+    B, S = c2w_pred.shape[:2]
+    R_pred = c2w_pred[..., :3, :3]                              # [B, S, 3, 3]
+    M = R_pred @ R_sd                                           # [B, S, 3, 3]
+    extra_dims = R_cam.dim() - 4                                # dims between S and trailing 3,3
+    M_b = M.view(B, S, *([1] * extra_dims), 3, 3)
+    return M_b @ R_cam
+
+
+def compute_param_losses_nv(pred_params, gt_params, c2w_pred, s, R_sd, has_hand):
+    """ParameterLoss equivalent computed in NeoVerse frame, with per-batch 1/s² correction.
+
+    transl is treated as a 3D point (full similarity). global_orient quat is
+    lifted to rotmat then rotation-only transform applied. pose/betas are
+    frame-independent. Per-batch-element `1/s²` is applied to the `transl`
+    term so the result matches GT-frame ParameterLoss bit-exactly (up to
+    float precision).
+
+    Args:
+        pred_params, gt_params: [B, S, 64]   packed MANO.
+        c2w_pred:               [B, S, 4, 4]
+        s:                      [B]
+        R_sd:                   [3, 3]
+        has_hand:               [B, S, 2]
+
+    Returns:
+        dict with 'transl', 'global_orient', 'hand_pose', 'betas' (scalars,
+        summed over batch — same reduction as ParameterLoss).
+    """
+    B, S, _ = pred_params.shape
+    pred = pred_params.view(B, S, NUM_HANDS, HAND_PARAM_DIM)
+    gt   = gt_params.view(B, S, NUM_HANDS, HAND_PARAM_DIM)
+    dtype = pred.dtype
+    mask = has_hand.to(dtype).view(B, S, NUM_HANDS, 1)          # [B, S, 2, 1]
+
+    # transl: full point transform → 1/s² correction
+    pred_transl_nv = transform_points_cam_to_nv(pred[..., 0:3], c2w_pred, s, R_sd)
+    gt_transl_nv   = transform_points_cam_to_nv(gt[..., 0:3],   c2w_pred, s, R_sd)
+    transl_err = F.mse_loss(pred_transl_nv, gt_transl_nv, reduction='none')  # [B,S,2,3]
+    per_sample_transl = (mask * transl_err).reshape(B, -1).mean(dim=-1)      # [B]
+    inv_s2 = 1.0 / (s.pow(2) + 1e-8)                                         # [B]
+    loss_transl = (per_sample_transl * inv_s2).sum()
+
+    # global_orient: quat → rotmat → rotation-only transform (no s² factor)
+    pred_R_cam = _safe_quat_to_rotmat(pred[..., 3:7])           # [B, S, 2, 3, 3]
+    gt_R_cam   = _safe_quat_to_rotmat(gt[..., 3:7])
+    pred_R_nv  = transform_R_cam_to_nv(pred_R_cam, c2w_pred, R_sd)
+    gt_R_nv    = transform_R_cam_to_nv(gt_R_cam,   c2w_pred, R_sd)
+    orient_err = F.mse_loss(pred_R_nv, gt_R_nv, reduction='none').flatten(-2)  # [B,S,2,9]
+    loss_orient = (mask * orient_err).reshape(B, -1).mean(dim=-1).sum()
+
+    # pose / betas: frame-independent — match ParameterLoss exactly
+    pose_err  = F.mse_loss(pred[..., 7:22],  gt[..., 7:22],  reduction='none')
+    betas_err = F.mse_loss(pred[..., 22:32], gt[..., 22:32], reduction='none')
+    loss_pose  = (mask * pose_err ).reshape(B, -1).mean(dim=-1).sum()
+    loss_betas = (mask * betas_err).reshape(B, -1).mean(dim=-1).sum()
+
+    return {
+        "transl":        loss_transl,
+        "global_orient": loss_orient,
+        "hand_pose":     loss_pose,
+        "betas":         loss_betas,
+    }
+
+
+def compute_kp3d_loss_nv(pred_joints_nv, gt_joints_nv, has_hand, s, pelvis_id=0):
+    """Keypoint3DLoss in NeoVerse frame with per-batch-element 1/s² correction.
+
+    Mirrors Keypoint3DLoss(loss_type='l2') reduction: per-(B*S*H) sample sum
+    over (J, 3), then mean over the (B*S*H) "batch". The `inv_s²` factor is
+    broadcast across (S, H) so each B-element gets its own correction.
+    """
+    B, S, H = pred_joints_nv.shape[:3]
+    # Root-centre
+    pred_c = pred_joints_nv - pred_joints_nv[:, :, :, pelvis_id:pelvis_id+1, :]
+    gt_c   = gt_joints_nv   - gt_joints_nv  [:, :, :, pelvis_id:pelvis_id+1, :]
+    err = F.mse_loss(pred_c, gt_c, reduction='none')             # [B, S, H, J, 3]
+
+    conf = has_hand.to(err.dtype).unsqueeze(-1).unsqueeze(-1)    # [B, S, H, 1, 1]
+    per_sample = (conf * err).view(B, S, H, -1).sum(dim=-1)      # [B, S, H]
+    inv_s2 = 1.0 / (s.pow(2) + 1e-8)                             # [B]
+    per_sample = per_sample * inv_s2.view(B, 1, 1)               # broadcast
+    return per_sample.sum() / (B * S * H)
+
 
 def compute_joints_from_batch(params, mano_model, device):
     """Differentiable, batched conversion of 32-D MANO params to 3D joints.
@@ -1030,6 +1323,10 @@ def train():
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/train_hand_head.yaml")
+    parser.add_argument("--debug_assert_frame_equiv", action="store_true",
+                        help="Run both GT-frame and NeoVerse-frame loss paths on each batch "
+                             "and assert numerical equivalence (with 1/s^2 correction). "
+                             "Sanity-check for the per-batch similarity transform.")
     parser.add_argument("overrides", nargs="*", metavar="KEY=VAL",
                         help="Config overrides, e.g. training.lr=3e-4 model.hamer_head_kwargs.depth=4")
     args = parser.parse_args()
@@ -1049,6 +1346,12 @@ def train():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # NeoVerse-frame training needs C2W_pred from the camera head; force it on.
+    # The head is frozen along with the backbone, so this only adds forward cost.
+    if data_cfg.get("train_in_neoverse_frame", False) and not model_cfg.get("enable_cam", False):
+        print("[NV-frame] enabling model.enable_cam (required for C2W_pred — head stays frozen)")
+        model_cfg["enable_cam"] = True
+
     # --- Model ---
     model = WorldMirror(**{k: v for k, v in model_cfg.items() if k != "checkpoint"})
     checkpoint = torch.load(model_cfg["checkpoint"], map_location=device)
@@ -1067,6 +1370,17 @@ def train():
     criterion_kp3d  = Keypoint3DLoss(loss_type='l2').to(device)
     criterion_kp2d  = Keypoint2DLoss(loss_type='l1').to(device)
     criterion_param = ParameterLoss().to(device)
+
+    # --- NeoVerse-frame training (scaffold for self-consistency loss) ---
+    train_in_nv = bool(data_cfg.get("train_in_neoverse_frame", False))
+    debug_assert_equiv = bool(getattr(args, "debug_assert_frame_equiv", False))
+    R_SD = torch.tensor(R_SENSOR_TO_DISPLAY, dtype=torch.float32, device=device)
+    if train_in_nv:
+        print("[NV-frame] training losses in NeoVerse predicted world frame "
+              "(1/s² correction enabled — bit-exactly equivalent to GT-frame baseline)")
+    if debug_assert_equiv:
+        print("[NV-frame] --debug_assert_frame_equiv: will compare GT-frame and "
+              "NV-frame losses each batch")
 
     hand_params = list(model.hand_head.parameters())
     print(f"Hand head parameters: {sum(p.numel() for p in hand_params):,}")
@@ -1225,6 +1539,7 @@ def train():
             "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
             "kp3d": 0.0, "kp2d": 0.0,
         }
+        latest_scale_log = {}  # most-recent per-batch s diagnostics (NV-frame only)
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
             imgs = batch["img"].to(device)
@@ -1252,19 +1567,91 @@ def train():
                 gt_pack = gt_params.view(*gt_params.shape[:-1], NUM_HANDS, HAND_PARAM_DIM)
                 has_hand = (gt_pack.abs().sum(dim=-1) > 1e-6).float()
 
-            # Parameter loss — split per MANO key, each masked per-hand.
-            # Returns dict with 'transl', 'global_orient', 'hand_pose', 'betas'.
-            param_losses = criterion_param(pred_params, gt_params, has_hand)
-
-            # 3D keypoint loss. Confidence is 1 where the hand is present, 0 otherwise —
-            # absent hands have zero GT joints but MANO's default pose would otherwise
-            # produce a constant ~0.2 residual that never decays.
             B, S, H, J, _ = pred_joints.shape
-            gt_conf = has_hand.unsqueeze(-1).unsqueeze(-1).expand(B, S, H, J, 1)
-            gt_input = torch.cat([gt_joints, gt_conf], dim=-1)                # [B, S, H, J, 4]
-            pred_flat = pred_joints.view(B * S * H, 1, J, 3)
-            gt_flat   = gt_input.view(B * S * H, 1, J, 4)
-            loss_kp3d = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0)
+
+            # --- Per-batch similarity transform Aria-cam → NeoVerse-world ---
+            # `s` is a per-batch-element scalar; (R, t) come per-frame from C2W_pred.
+            # With 1/s² correction this is bit-exactly equivalent to GT-frame training.
+            nv_ready = False
+            scale_log = {}
+            if train_in_nv or debug_assert_equiv:
+                c2w_pred = preds["camera_poses"].detach()                    # [B, S, 4, 4]
+                c2w_gt = torch.linalg.inv(
+                    batch["cam_extrinsics"].to(device).to(c2w_pred.dtype)    # T_camera_world
+                )                                                            # → c2w
+                s_batch, pair_counts, s_valid = recover_scale_per_batch(c2w_gt, c2w_pred)
+                pair_ok = min(pair_counts) >= 5
+                if pair_ok and bool(s_valid.all()):
+                    nv_ready = True
+                    # Use only finite values for diagnostics (in case logging is on but
+                    # we somehow had a bad s slip through — defensive).
+                    s_finite = s_batch[torch.isfinite(s_batch)]
+                    scale_log = {
+                        "scale/median": float(s_finite.median().item()),
+                        "scale/iqr":    float((s_finite.quantile(0.75)
+                                              - s_finite.quantile(0.25)).item()),
+                        "scale/min":    float(s_finite.min().item()),
+                        "scale/max":    float(s_finite.max().item()),
+                    }
+                elif train_in_nv:
+                    n_bad = int((~s_valid).sum().item())
+                    bad_vals = s_batch[~s_valid].tolist()
+                    tqdm.write(
+                        f"[NV-frame] degenerate batch — falling back to GT-frame "
+                        f"loss this step (min_pair_count={min(pair_counts)}, "
+                        f"bad_s={n_bad}/{s_batch.numel()}: {bad_vals})"
+                    )
+
+            use_nv_for_backward = train_in_nv and nv_ready
+            need_gt_path = (not use_nv_for_backward) or debug_assert_equiv
+            need_nv_path = use_nv_for_backward or (debug_assert_equiv and nv_ready)
+
+            # --- GT-frame losses (default path; always computed when needed) ---
+            if need_gt_path:
+                param_losses_gt = criterion_param(pred_params, gt_params, has_hand)
+                gt_conf = has_hand.unsqueeze(-1).unsqueeze(-1).expand(B, S, H, J, 1)
+                gt_input = torch.cat([gt_joints, gt_conf], dim=-1)            # [B,S,H,J,4]
+                pred_flat = pred_joints.view(B * S * H, 1, J, 3)
+                gt_flat   = gt_input.view(B * S * H, 1, J, 4)
+                loss_kp3d_gt = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0)
+
+            # --- NeoVerse-frame losses (transformed via per-batch similarity) ---
+            if need_nv_path:
+                pred_joints_nv = transform_points_cam_to_nv(
+                    pred_joints, c2w_pred, s_batch, R_SD)
+                gt_joints_nv   = transform_points_cam_to_nv(
+                    gt_joints,   c2w_pred, s_batch, R_SD)
+                param_losses_nv = compute_param_losses_nv(
+                    pred_params, gt_params, c2w_pred, s_batch, R_SD, has_hand)
+                loss_kp3d_nv = compute_kp3d_loss_nv(
+                    pred_joints_nv, gt_joints_nv, has_hand, s_batch)
+
+            # --- Optional numerical-equivalence assert ---
+            if debug_assert_equiv and need_nv_path:
+                tol = 1e-4
+                for k in ("transl", "global_orient", "hand_pose", "betas"):
+                    gt_v = param_losses_gt[k].item()
+                    nv_v = param_losses_nv[k].item()
+                    rel = abs(nv_v - gt_v) / max(abs(gt_v), 1e-8)
+                    if rel > tol:
+                        raise AssertionError(
+                            f"[NV-frame] {k}: GT={gt_v:.6e} NV={nv_v:.6e} rel={rel:.3e}")
+                rel_k3 = abs(loss_kp3d_nv.item() - loss_kp3d_gt.item()) \
+                         / max(abs(loss_kp3d_gt.item()), 1e-8)
+                if rel_k3 > tol:
+                    raise AssertionError(
+                        f"[NV-frame] kp3d: GT={loss_kp3d_gt.item():.6e} "
+                        f"NV={loss_kp3d_nv.item():.6e} rel={rel_k3:.3e}")
+                if batch_idx == 0:
+                    tqdm.write(f"[NV-frame] equivalence asserted to rel<{tol}")
+
+            # --- Pick which losses go into the backward pass ---
+            if use_nv_for_backward:
+                param_losses = param_losses_nv
+                loss_kp3d    = loss_kp3d_nv
+            else:
+                param_losses = param_losses_gt
+                loss_kp3d    = loss_kp3d_gt
 
             # 2D reprojection loss. pred_joints are camera-frame (post-transform),
             # so skip the world→camera extrinsic and project with intrinsics only.
@@ -1314,6 +1701,8 @@ def train():
                 accum_terms[k] += param_losses[k].item()
             accum_terms["kp3d"]  += loss_kp3d.item()
             accum_terms["kp2d"]  += loss_kp2d.item()
+            if scale_log:
+                latest_scale_log = scale_log
 
             if (batch_idx + 1) % grad_accum_steps == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(hand_params, max_norm=float("inf"))
@@ -1331,15 +1720,18 @@ def train():
 
                 # --- Train logging ---
                 if use_wandb:
-                    wandb.log({"train/loss": avg_loss,
-                               "train/loss_transl":        avg_terms["transl"],
-                               "train/loss_global_orient": avg_terms["global_orient"],
-                               "train/loss_hand_pose":     avg_terms["hand_pose"],
-                               "train/loss_betas":         avg_terms["betas"],
-                               "train/loss_kp3d":          avg_terms["kp3d"],
-                               "train/loss_kp2d":          avg_terms["kp2d"],
-                               "train/grad_norm":          grad_norm.item(),
-                               "lr": scheduler.get_last_lr()[0]}, step=global_step)
+                    train_log = {"train/loss": avg_loss,
+                                 "train/loss_transl":        avg_terms["transl"],
+                                 "train/loss_global_orient": avg_terms["global_orient"],
+                                 "train/loss_hand_pose":     avg_terms["hand_pose"],
+                                 "train/loss_betas":         avg_terms["betas"],
+                                 "train/loss_kp3d":          avg_terms["kp3d"],
+                                 "train/loss_kp2d":          avg_terms["kp2d"],
+                                 "train/grad_norm":          grad_norm.item(),
+                                 "lr": scheduler.get_last_lr()[0]}
+                    if latest_scale_log:
+                        train_log.update({f"train/{k}": v for k, v in latest_scale_log.items()})
+                    wandb.log(train_log, step=global_step)
 
                 if global_step % log_every == 0 or global_step == 1:
                     lr = scheduler.get_last_lr()[0]
@@ -1414,6 +1806,14 @@ def train():
                             gs_videos = build_gs_vis_videos(val_vis_items, gs_captured)
                             if gs_videos:
                                 log_dict["media/val_gs_overlay"] = gs_videos
+                        if gs_captured and captured:
+                            try:
+                                scene_logs = build_3d_scenes(val_vis_items, captured, gs_captured, mano_model)
+                            except Exception as e:
+                                tqdm.write(f"  build_3d_scenes failed: {type(e).__name__}: {e}")
+                                scene_logs = {}
+                            if scene_logs:
+                                log_dict.update(scene_logs)
                         wandb.log(log_dict, step=global_step)
 
                     if val_loss < best_val_loss:

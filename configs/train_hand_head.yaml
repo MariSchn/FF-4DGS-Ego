@@ -15,6 +15,11 @@ data:
   val_split: 0.01
   # DataLoader workers for loading video clips
   num_workers: 2
+  # Train losses in NeoVerse predicted world frame (computed per-batch from C2W_pred
+  # vs GT camera poses). With the 1/s^2 correction applied, this is bit-exactly
+  # equivalent to GT-frame training — it's scaffolding for the upcoming
+  # self-consistency loss between MANO mesh and Gaussians.
+  train_in_neoverse_frame: false
 # ------------------------------------------------------------------
 # Model
 # ------------------------------------------------------------------
@@ -72,8 +77,8 @@ training:
   lr: 1e-4
   min_lr: 1e-7           # Minimum LR for cosine annealing scheduler
   epochs: 1
-  batch_size: 32
-  grad_accum_steps: 1    # Effective batch = batch_size * grad_accum_steps
+  batch_size: 1
+  grad_accum_steps: 32    # Effective batch = batch_size * grad_accum_steps
   log_every: 500         # Steps between train loss logs (console + W&B)
   val_every: 500         # Steps between validation runs
   save_every: 1000       # Steps between checkpoint saves
