@@ -1404,6 +1404,24 @@ def train():
         start_epoch = ckpt_state["epoch"]
         best_val_loss = ckpt_state["best_val_loss"]
         print(f"Resumed successfully. global_step={global_step}, start_epoch={start_epoch}, best_val_loss={best_val_loss:.4f}")
+    elif cfg["model"].get("warm_start_hand_head"):
+        # Initialise the hand head from a prior checkpoint (e.g. the 50mm run)
+        # instead of training it from scratch, so the abs-3D loss only has to
+        # refine an already-converged placement. Only when NOT resuming.
+        ws_path = cfg["model"]["warm_start_hand_head"]
+        print(f"Warm-starting hand head from {ws_path}")
+        ws = torch.load(ws_path, map_location=device)
+        sd = ws["model_state_dict"] if isinstance(ws, dict) and "model_state_dict" in ws else ws
+        hh_keys = set(model.hand_head.state_dict().keys())
+        loaded = {k: v for k, v in sd.items() if k in hh_keys}
+        if loaded:
+            res = model.hand_head.load_state_dict(loaded, strict=False)
+            print(f"Warm-start: loaded {len(loaded)}/{len(hh_keys)} hand_head tensors "
+                  f"(missing={len(res.missing_keys)}, unexpected=0)")
+        else:
+            res = model.load_state_dict(sd, strict=False)
+            print(f"Warm-start: no bare hand_head keys matched; loaded full-model dict "
+                  f"(missing={len(res.missing_keys)}, unexpected={len(res.unexpected_keys)})")
 
     # Opt-in autograd anomaly detection (DETECT_ANOMALY=1): raises at the first
     # op that produces a non-finite value in the backward pass, with a traceback
