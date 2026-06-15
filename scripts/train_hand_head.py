@@ -838,6 +838,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
     val_terms = {
         "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
         "kp3d": 0.0, "kp2d": 0.0,
+        "gs_l1": 0.0, "gs_lpips": 0.0,
     }
     captured = {}
     gs_captured = {}
@@ -859,6 +860,8 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 pred_params, gt, hv, mano_model, device,
             ))
 
+            loss_gs_l1 = torch.zeros((), device=device)
+            loss_gs_lpips = torch.zeros((), device=device)
             if eval_gs:
                 H_img, W_img = imgs.shape[-2:]
                 with torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -868,6 +871,14 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 gs_chunks.append(gs_metric_chunks_from_batch(
                     rendered, imgs, None, lpips_scorer, device,
                 ))
+                B_r, S_r = rendered.shape[:2]
+                pred_chw = rendered.permute(0, 1, 4, 2, 3).reshape(B_r * S_r, 3, H_img, W_img)
+                gt_chw = imgs.reshape(B_r * S_r, 3, H_img, W_img)
+                loss_gs_l1 = F.l1_loss(pred_chw.float(), gt_chw.float())
+                lpips_model = lpips_scorer._ensure()
+                loss_gs_lpips = lpips_model(
+                    pred_chw.float() * 2.0 - 1.0, gt_chw.float() * 2.0 - 1.0
+                ).mean()
                 if vis_clip_indices:
                     for item_idx in range(imgs.shape[0]):
                         clip_idx = batch_idx * batch_size + item_idx
@@ -942,6 +953,8 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 + loss_weights["betas"]         * param_losses["betas"]
                 + loss_weights["kp3d"]          * loss_kp3d
                 + loss_weights["kp2d"]          * loss_kp2d
+                + loss_weights.get("gs_l1", 0.0)    * loss_gs_l1
+                + loss_weights.get("gs_lpips", 0.0) * loss_gs_lpips
             )
 
             val_loss += loss.item()
@@ -949,6 +962,8 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 val_terms[k] += param_losses[k].item()
             val_terms["kp3d"]  += loss_kp3d.item()
             val_terms["kp2d"]  += loss_kp2d.item()
+            val_terms["gs_l1"]    += loss_gs_l1.item()
+            val_terms["gs_lpips"] += loss_gs_lpips.item()
 
             if vis_clip_indices:
                 # For vis we need camera-space predictions for rendering
@@ -1382,8 +1397,26 @@ def train():
         print("[NV-frame] --debug_assert_frame_equiv: will compare GT-frame and "
               "NV-frame losses each batch")
 
+    # Optimizer parameter groups. Hand head is always trained. When the GS
+    # branch is enabled we additionally train gs_head and (if built) the
+    # hand→GS injection convs, in a single param group at the same LR.
     hand_params = list(model.hand_head.parameters())
-    print(f"Hand head parameters: {sum(p.numel() for p in hand_params):,}")
+    gs_head_params = (
+        list(model.gs_head.parameters()) if getattr(model, "enable_gs", False) else []
+    )
+    injection_params = (
+        list(model.hand_to_gs_injection.parameters())
+        if getattr(model, "hand_to_gs_injection", None) is not None
+        else []
+    )
+    trainable_params = hand_params + gs_head_params + injection_params
+    print(
+        "Trainable parameters: "
+        f"hand={sum(p.numel() for p in hand_params):,} "
+        f"gs_head={sum(p.numel() for p in gs_head_params):,} "
+        f"injection={sum(p.numel() for p in injection_params):,} "
+        f"total={sum(p.numel() for p in trainable_params):,}"
+    )
 
     # --- Data ---
     all_seqs = discover_sequences(data_cfg["data_root"])
@@ -1467,7 +1500,7 @@ def train():
     epochs     = training_cfg["epochs"]
     steps_per_epoch = len(train_loader) // grad_accum_steps
     total_steps = epochs * steps_per_epoch
-    optimizer  = Adam(hand_params, lr=float(training_cfg["lr"]))
+    optimizer  = Adam(trainable_params, lr=float(training_cfg["lr"]))
     scheduler  = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=float(training_cfg.get("min_lr", 1e-6)))
 
     log_every  = training_cfg.get("log_every", 500)
@@ -1538,6 +1571,7 @@ def train():
         accum_terms = {
             "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
             "kp3d": 0.0, "kp2d": 0.0,
+            "gs_l1": 0.0, "gs_lpips": 0.0,
         }
         latest_scale_log = {}  # most-recent per-batch s diagnostics (NV-frame only)
 
@@ -1552,10 +1586,30 @@ def train():
             # print(f"gt_params: {gt_params}")
             # print(f"gt_joints: {gt_joints}")
 
-            preds = model(build_views(imgs, num_frames, device, hb, hv), is_inference=False, use_motion=False)
+            views_train = build_views(imgs, num_frames, device, hb, hv)
+            preds = model(views_train, is_inference=False, use_motion=False)
             pred_params = preds["hand_joints"] # [B, S, 64]
 
             pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
+
+            # GS reconstruction loss (L1 + LPIPS) on the rendered views.
+            # Gated on model.enable_gs (so disabled-GS configs are bit-for-bit
+            # identical to the no-GS codepath) and on lpips_scorer presence.
+            loss_gs_l1 = torch.zeros((), device=device)
+            loss_gs_lpips = torch.zeros((), device=device)
+            rendered = None
+            if getattr(model, "enable_gs", False) and lpips_scorer is not None:
+                H_img, W_img = imgs.shape[-2:]
+                rendered = render_views_from_predictions(
+                    model, preds, views_train, height=H_img, width=W_img,
+                )
+            if rendered is not None:
+                B_r, S_r = rendered.shape[:2]
+                pred_chw = rendered.permute(0, 1, 4, 2, 3).reshape(B_r * S_r, 3, H_img, W_img)
+                gt_chw = imgs.reshape(B_r * S_r, 3, H_img, W_img)
+                loss_gs_l1 = F.l1_loss(pred_chw, gt_chw)
+                lpips_model = lpips_scorer._ensure()
+                loss_gs_lpips = lpips_model(pred_chw * 2.0 - 1.0, gt_chw * 2.0 - 1.0).mean()
 
             loss_kp2d = torch.zeros((), device=device)
 
@@ -1693,6 +1747,8 @@ def train():
                 + w["betas"]         * param_losses["betas"]
                 + w["kp3d"]          * loss_kp3d
                 + w["kp2d"]          * loss_kp2d
+                + w.get("gs_l1", 0.0)    * loss_gs_l1
+                + w.get("gs_lpips", 0.0) * loss_gs_lpips
             )
 
             (loss / grad_accum_steps).backward()
@@ -1701,11 +1757,13 @@ def train():
                 accum_terms[k] += param_losses[k].item()
             accum_terms["kp3d"]  += loss_kp3d.item()
             accum_terms["kp2d"]  += loss_kp2d.item()
+            accum_terms["gs_l1"]    += loss_gs_l1.item()
+            accum_terms["gs_lpips"] += loss_gs_lpips.item()
             if scale_log:
                 latest_scale_log = scale_log
 
             if (batch_idx + 1) % grad_accum_steps == 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(hand_params, max_norm=float("inf"))
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=float("inf"))
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -1715,6 +1773,7 @@ def train():
                 accum_terms = {
                     "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
                     "kp3d": 0.0, "kp2d": 0.0,
+                    "gs_l1": 0.0, "gs_lpips": 0.0,
                 }
                 global_step += 1
 
@@ -1727,6 +1786,8 @@ def train():
                                  "train/loss_betas":         avg_terms["betas"],
                                  "train/loss_kp3d":          avg_terms["kp3d"],
                                  "train/loss_kp2d":          avg_terms["kp2d"],
+                                 "train/loss_gs_l1":         avg_terms["gs_l1"],
+                                 "train/loss_gs_lpips":      avg_terms["gs_lpips"],
                                  "train/grad_norm":          grad_norm.item(),
                                  "lr": scheduler.get_last_lr()[0]}
                     if latest_scale_log:
@@ -1739,7 +1800,8 @@ def train():
                         f"  step {global_step} | train_loss={avg_loss:.4f} "
                         f"(t={avg_terms['transl']:.4f} o={avg_terms['global_orient']:.4f} "
                         f"p={avg_terms['hand_pose']:.4f} b={avg_terms['betas']:.4f} "
-                        f"kp3d={avg_terms['kp3d']:.4f} kp2d={avg_terms['kp2d']:.4f}) "
+                        f"kp3d={avg_terms['kp3d']:.4f} kp2d={avg_terms['kp2d']:.4f} "
+                        f"gs_l1={avg_terms['gs_l1']:.4f} gs_lpips={avg_terms['gs_lpips']:.4f}) "
                         f"| grad_norm={grad_norm.item():.4f} | lr={lr:.2e}"
                     )
                     if use_wandb and train_vis_items:
@@ -1755,7 +1817,8 @@ def train():
                         f"  step {global_step} | val_loss={val_loss:.4f} "
                         f"(t={val_terms['transl']:.4f} o={val_terms['global_orient']:.4f} "
                         f"p={val_terms['hand_pose']:.4f} b={val_terms['betas']:.4f} "
-                        f"kp3d={val_terms['kp3d']:.4f} kp2d={val_terms['kp2d']:.4f})"
+                        f"kp3d={val_terms['kp3d']:.4f} kp2d={val_terms['kp2d']:.4f} "
+                        f"gs_l1={val_terms['gs_l1']:.4f} gs_lpips={val_terms['gs_lpips']:.4f})"
                     )
                     hm_all = hand_metrics.get("all")
                     if hm_all is not None:
@@ -1781,7 +1844,9 @@ def train():
                                     "val/loss_hand_pose":     val_terms["hand_pose"],
                                     "val/loss_betas":         val_terms["betas"],
                                     "val/loss_kp3d":          val_terms["kp3d"],
-                                    "val/loss_kp2d":          val_terms["kp2d"]}
+                                    "val/loss_kp2d":          val_terms["kp2d"],
+                                    "val/loss_gs_l1":         val_terms["gs_l1"],
+                                    "val/loss_gs_lpips":      val_terms["gs_lpips"]}
                         for side_label in ("left", "right", "all"):
                             side_metrics = hand_metrics.get(side_label)
                             if side_metrics is None:

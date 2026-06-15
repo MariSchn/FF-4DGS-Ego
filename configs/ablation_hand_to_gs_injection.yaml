@@ -4,7 +4,7 @@
 data:
   # Root folder containing one subdir per sequence. Each sequence must have
   # video_main_rgb.mp4 and hand_data/mano_hand_pose_trajectory.jsonl
-  data_root: "/home/marian/3dv/data/hot3d_aria/raw_data"
+  data_root: "/home/user/dmonopoli/data/hot3d_aria/sequences"
   # Number of frames per clip (sliding window over video). Full video is too long to fit in memory.
   num_frames: 16
   # [height, width] to which video frames are resized
@@ -15,11 +15,6 @@ data:
   val_split: 0.01
   # DataLoader workers for loading video clips
   num_workers: 2
-  # Train losses in NeoVerse predicted world frame (computed per-batch from C2W_pred
-  # vs GT camera poses). With the 1/s^2 correction applied, this is bit-exactly
-  # equivalent to GT-frame training — it's scaffolding for the upcoming
-  # self-consistency loss between MANO mesh and Gaussians.
-  train_in_neoverse_frame: false
 # ------------------------------------------------------------------
 # Model
 # ------------------------------------------------------------------
@@ -38,12 +33,15 @@ model:
   hand_crop_size: 8
 
   # Disable other heads
-  enable_cam: false
+  enable_cam: true
   enable_pts: false
   enable_depth: false
   enable_norm: false
   enable_motion: false
-  enable_gs: false
+  enable_gs: true
+  hand_to_gs_injection:
+    enabled: true            # master toggle for the new module
+    use_hand_valid_mask: true
 
   # HaMeR head architecture (only used when hand_head_type == "hamer")
   hamer_head_kwargs:
@@ -65,13 +63,12 @@ model:
 loss_weights:
   kp3d:          0.05
   kp2d:          0.05    # bumped from HaMeR's 0.01 — reinforces projection
-  # Rescaled x32 for the sum→mean fix in ParameterLoss (was tuned at bs=32).
-  global_orient: 0.32    # was 0.01 x 32
-  hand_pose:     0.32    # was 0.01 x 32
-  betas:         0.32    # was 0.01 x 32
-  transl:        3.2     # was 0.1 x 32
-  gs_l1:         0.0     # GS reconstruction L1 — off when enable_gs=false
-  gs_lpips:      0.0     # GS reconstruction LPIPS — off when enable_gs=false
+  global_orient: 0.01    # bumped 10x — rotmat MSE on a single 3x3
+  hand_pose:     0.01    # bumped 10x — MSE on 15 PCA coeffs
+  betas:         0.01    # bumped 20x — hand-size was converging too slowly
+  transl:        0.1     # 100x bump — meter-scale; needs real weight for depth
+  gs_l1:         0.1     # GS reconstruction L1 — drives the GS branch
+  gs_lpips:      0.1     # GS reconstruction LPIPS — drives the GS branch
 
 # ------------------------------------------------------------------
 # Training
@@ -82,8 +79,8 @@ training:
   epochs: 1
   batch_size: 1
   grad_accum_steps: 32    # Effective batch = batch_size * grad_accum_steps
-  log_every: 500         # Steps between train loss logs (console + W&B)
-  val_every: 500         # Steps between validation runs
+  log_every: 50
+  val_every: 200
   save_every: 1000       # Steps between checkpoint saves
   seed: 42               # Random seed
   output_dir: "checkpoints/default"
@@ -120,6 +117,6 @@ wandb:
   enabled: true
   project: "hand-head-training"
   entity: 3DV-Project
-  run_name: "Loss Test Full Epoch"
+  run_name: "Ablation: hand to gs injection (v2)"
   tags: []
   notes: null

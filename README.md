@@ -1,269 +1,125 @@
-# NeoVerse: Enhancing 4D World Model with in-the-wild Monocular Videos
+# FF-4DGS-Ego
 
-<strong>Computer Vision and Pattern Recognition (CVPR) 2026</strong>
+Feed-forward **4D Gaussian-Splatting reconstruction with egocentric hand recovery**.
+A WorldMirror reconstructor backbone predicts per-frame 4D Gaussians and camera
+parameters from monocular video; a HaMeR/MANO hand head, coupled to the
+reconstructed scene, recovers metric-scale 3D hands.
 
-[Yuxue Yang](https://yuxueyang1204.github.io)<sup>1, 2</sup>, [Lue Fan](https://lue.fan)<sup>1 ✉️ †</sup>, [Ziqi Shi](https://renshengji.github.io)<sup>1</sup>, [Junran Peng](https://jrpeng.github.io)<sup>1</sup>, [Feng Wang](https://happynear.wang)<sup>2</sup>, [Zhaoxiang Zhang](https://zhaoxiangzhang.net)<sup>1 ✉️</sup>
+> This repository began as a fork of DiffSynth-Studio / NeoVerse. The video
+> generation (diffusion) stack has been removed; only the reconstruction +
+> hand-recovery solution remains.
 
-<sup>1</sup>NLPR & MAIS, CASIA&emsp; <sup>2</sup>CreateAI
+## Setup
 
-<sup>✉️</sup>Corresponding Authors&emsp; <sup>†</sup>Project Lead
-
-<a href='https://arxiv.org/abs/2601.00393'><img src='https://img.shields.io/badge/arXiv-2601.00393-b31b1b?logo=arxiv'></a> &nbsp;
-<a href='https://neoverse-4d.github.io'><img src='https://img.shields.io/badge/Project-Page-Green'></a> &nbsp;
-<a href='https://huggingface.co/Yuppie1204/NeoVerse'><img src='https://img.shields.io/badge/Hugging Face-Model-gold?logo=huggingface'></a> &nbsp;
-<a href='https://www.modelscope.cn/models/Yuppie1204/NeoVerse'><img src='https://img.shields.io/badge/ModelScope-Model-blueviolet?logo=modelscope'></a> &nbsp;
-<a href='https://www.bilibili.com/video/BV1ezvYBBEMi'><img src='https://img.shields.io/badge/BiliBili-Video-479fd1?logo=bilibili'></a> &nbsp;
-<a href='https://youtu.be/1k8Ikf8zbZw'><img src='https://img.shields.io/badge/YouTube-Video-orange?logo=youtube'></a>
-
-NeoVerse is a versatile 4D world model that is capable of 4D reconstruction, novel-trajectory video generation, and rich downstream applications.
-
-https://github.com/user-attachments/assets/4c957bd7-64e1-4a7e-9993-136740d911fe
-
-**More videos are demonstrated on the [project website](https://neoverse-4d.github.io) for an enhanced view experience.**
-
-## Updates
-
-- **[2026-02-21]** NeoVerse has been accepted by **CVPR 2026**!
-- **[2026-02-16]** Release inference scripts and model checkpoints in both [Hugging Face](https://huggingface.co/Yuppie1204/NeoVerse) and [ModelScope](https://www.modelscope.cn/models/Yuppie1204/NeoVerse).
-- **[2026-01-01]** Release arXiv paper.
-
-
-## TL;DR
-
-- **Simple Inference Script** — Generate novel-trajectory videos with a single `python inference.py` command
-- **Interactive Gradio Demo** — Step-by-step web UI for reconstruction, trajectory design, and generation
-- **Multiple Reconstructors** — Supports different 3D reconstructors (e.g., [Depth Anything 3](https://depth-anything-3.github.io/)) via a plug-and-play interface
-- **Fast Inference** — Inference pipeline completes in under 30 seconds with distilled LoRA acceleration on a single A800.
-
-## Installation
-
-### Step 1: Install Dependencies
-
-We have tested NeoVerse on CUDA 12.1 with PyTorch 2.3.1 and CUDA 12.8 with PyTorch 2.7.1.
+Tested on CUDA 12.1 / PyTorch 2.3.1 and CUDA 12.8 / PyTorch 2.7.1. Install
+PyTorch first (it is intentionally not pinned in `requirements.txt` so you can
+match your CUDA version), then the rest:
 
 ```bash
-git clone https://github.com/IamCreateAI/NeoVerse.git
-cd NeoVerse
-conda create -n neoverse python=3.10 -y
-conda activate neoverse
+conda create -n ff4dgs python=3.10 -y && conda activate ff4dgs
 
-# For CUDA 12.1
+# PyTorch — pick the wheel matching your CUDA (example: CUDA 12.1)
 pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+
 pip install -r requirements.txt
+
+# Gaussian-splatting deps (match the torch/CUDA above)
 pip install torch-scatter -f https://data.pyg.org/whl/torch-2.3.1+cu121.html
 pip install --no-build-isolation git+https://github.com/nerfstudio-project/gsplat.git
 
-# For CUDA 12.8
-pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
-pip install -r requirements.txt
-pip install torch-scatter -f https://data.pyg.org/whl/torch-2.7.1+cu128.html
-pip install --no-build-isolation git+https://github.com/nerfstudio-project/gsplat.git
+git submodule update --init --recursive   # HaMeR
 ```
 
-### Step 2: Download Model Checkpoints
+Place model weights under `models/` — the WorldMirror reconstructor checkpoint
+(`models/NeoVerse/reconstructor.ckpt`, shipped in the
+[NeoVerse release](https://huggingface.co/Yuppie1204/NeoVerse)), plus MANO and
+the HaMeR submodule. See `models/Put checkpoints here.txt`.
+
+## Reconstruct 4D Gaussians from a video
 
 ```bash
-hf download Yuppie1204/NeoVerse --local-dir models/NeoVerse
-# Or using ModelScope
-modelscope download --model Yuppie1204/NeoVerse --local_dir models/NeoVerse
+python scripts/reconstruct_4dgs.py --input_path examples/videos/robot.mp4
 ```
 
-Expected directory structure:
-```
-models/NeoVerse/
-├── diffusion_pytorch_model-0000*-of-00006.safetensors
-├── diffusion_pytorch_model.safetensors.index.json
-├── models_t5_umt5-xxl-enc-bf16.pth
-├── reconstructor.ckpt
-├── Wan2.1_VAE.pth
-├── google/
-│   └── ... (tokenizer files)
-└── loras/
-    └── Wan21_T2V_14B_lightx2v_cfg_step_distill_lora_rank64.safetensors
-```
+Optional flags:
 
-## Usage
-
-We provide two ways to try NeoVerse: a **command-line inference script** and an **interactive Gradio demo**.
-
-### Inference Script
-
-The inference script supports two trajectory input modes:
-
-#### Predefined Trajectories with Adjustable Parameters
-
-Use `--trajectory` to choose from 13 built-in camera motions, and fine-tune them with `--angle`, `--distance`, or `--orbit_radius`:
-
-| Trajectory | Description |
-|-----------|-------------|
-| `pan_left` / `pan_right` | Rotate camera horizontally (yaw) |
-| `tilt_up` / `tilt_down` | Rotate camera vertically (pitch) |
-| `move_left` / `move_right` | Translate camera horizontally |
-| `push_in` / `pull_out` | Translate camera forward / backward |
-| `boom_up` / `boom_down` | Translate camera vertically |
-| `orbit_left` / `orbit_right` | Arc around the scene center |
-| `static` | Keep the original camera path |
-
-```bash
-# Tilt up
-python inference.py \
-    --input_path examples/videos/robot.mp4 \
-    --trajectory tilt_up \
-    --prompt "A two-arm robot assembles parts in front of a table." \
-    --output_path outputs/tilt_up.mp4
-
-# Move right by 0.2 units
-python inference.py \
-    --input_path examples/videos/tree_and_building.mp4 \
-    --trajectory move_right \
-    --distance 0.2 \
-    --output_path outputs/move_right.mp4
-
-# Zoom in 2x by adjusting the focal length
-python inference.py \
-    --input_path examples/videos/animal.mp4 \
-    --trajectory static \
-    --zoom_ratio 2.0 \
-    --output_path outputs/zoom_in.mp4
-```
-
-#### Custom Trajectories from JSON
-
-For full keyframe-level control, provide a trajectory JSON file via `--trajectory_file`:
-
-```bash
-# First orbit left, then pull out
-python inference.py \
-    --input_path examples/videos/movie.mp4 \
-    --trajectory_file examples/trajectories/orbit_left_pull_out.json \
-    --alpha_threshold 0.95 \
-    --output_path outputs/orbit_left_pull_out.mp4
-
-# Custom trajectory
-python inference.py \
-    --input_path examples/videos/driving.mp4 \
-    --trajectory_file examples/trajectories/custom.json \
-    --output_path outputs/custom_traj.mp4
-
-# Custom trajectory on a static scene (single image input)
-python inference.py \
-    --input_path examples/videos/jungle.png \
-    --static_scene \
-    --trajectory_file examples/trajectories/custom2.json \
-    --output_path outputs/custom_traj2.mp4
-
-# Sparse keyframe poses with interpolation
-python inference.py \
-    --input_path examples/videos/driving2.mp4 \
-    --trajectory_file examples/trajectories/sparse_matrices.json \
-    --output_path outputs/keyframe_interpolation.mp4
-```
-
-See [docs/trajectory_format.md](docs/trajectory_format.md) for the JSON schema and [docs/coordinate_system.md](docs/coordinate_system.md) for the coordinate conventions. Ready-made examples are in `configs/trajectories/`.
-
-You can validate a trajectory file without running inference:
-
-```bash
-python inference.py --trajectory_file my_trajectory.json --validate_only
-```
-
-#### Key Arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--input_path` | — | Input video or image path |
-| `--trajectory` | — | Predefined trajectory type (see table above) |
-| `--trajectory_file` | — | Path to a custom trajectory JSON (mutually exclusive with `--trajectory`) |
-| `--output_path` | `outputs/inference.mp4` | Output video file path |
-| `--prompt` | *(scene inpainting prompt)* | Text prompt for generation |
-| `--static_scene` | off | Enable static scene mode (see below) |
-| `--traj_mode` | `relative` | Trajectory coordinate mode (see below) |
-| `--alpha_threshold` | `1.0` | Alpha mask threshold (see below) |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--render_video` | off | Re-render input views and save `render.mp4` |
+| `--static_scene` | off | Treat scene as static (no temporal Gaussians) |
+| `--output_dir` | `outputs/reconstruction` | Where to write results |
+| `--num_frames` | 120 | Number of frames to process |
+| `--sampling` | `uniform` | Frame-sampling strategy (`uniform` or `first`) |
+| `--frame_offset` | 0 | Skip this many frames at the start |
+| `--height` / `--width` | 336 | Input resolution |
+| `--resize_mode` | `center_crop` | `center_crop` or `resize` |
+| `--save_all_frames_ply` | off | Save a `.ply` for every frame (large) |
+| `--fps` | 16 | FPS for the output render video |
 | `--reconstructor_path` | `models/NeoVerse/reconstructor.ckpt` | Path to reconstructor checkpoint |
-| `--num_frames` | `81` | Number of output frames |
-| `--height` / `--width` | `336` / `560` | Output resolution |
-| `--disable_lora` | off | Use full 50-step inference instead of 4-step distilled LoRA |
-| `--low_vram` | off | Enable low-VRAM mode with model offloading (see below) |
-| `--vis_rendering` | off | Save target-trajectory rendering visualizations alongside the output |
-| `--seed` | `42` | Random seed |
 
-**Scene Type** (`--static_scene`) — By default, NeoVerse treats the input as a *general scene*: frames are sampled across the full time range to capture camera and object motion. When `--static_scene` is set, all frames share the same timestamp, which is appropriate for a single image or a video with a completely stationary camera.
+Outputs (written to `--output_dir`): `gaussians.pt`, `camera_params.json`,
+`gaussians_frame0000.ply`, and an optional `render.mp4`.
 
-**Mode** (`--traj_mode`) — In `relative` mode (default), the designed trajectory is composed with the reconstructed input camera, so movements are relative to the original viewpoint. In `global` mode, the trajectory matrices are used directly in world space.
-
-**Alpha Threshold** (`--alpha_threshold`) — After rendering the target viewpoint from the reconstructed 3D scene, pixels with alpha below this threshold are masked out and repainted by the diffusion model. Default `1.0` keeps all regions re-painted.
-
-**Low-VRAM Mode** (`--low_vram`) — Enables model offloading to reduce peak GPU memory usage. In this mode, models are kept on CPU and only loaded to GPU when needed (e.g., the reconstructor is loaded for reconstruction then offloaded, the diffusion model is loaded for denoising then offloaded). This significantly reduces peak VRAM at the cost of slower inference due to CPU-GPU data transfers. The default mode has ~47 GB allocated on GPU (`torch.cuda.memory_allocated`) with a peak of ~74 GB (`torch.cuda.max_memory_allocated`), while `--low_vram` keeps only ~1 GB allocated and reduces the peak to ~38 GB.
-
-### Interactive Demo (Gradio)
-
-Launch the web UI:
+## Train the hand head
 
 ```bash
-python app.py
-
-# With low-VRAM mode
-python app.py --low_vram
+python -m scripts.train_hand_head --config configs/train_hand_head.yaml
 ```
 
-The demo walks you through four steps:
-
-1. **Upload** — Drop in a video or set of images and select the scene type (General / Static).
-2. **Reconstruct** — Click `Reconstruct` to build a 4D Gaussian Splat scene. The 3D viewer shows Gaussian-Splatting-centred point cloud so you can inspect the spatial layout.
-3. **Design Trajectory** — Pick a camera motion type and adjust sliders, or upload a trajectory JSON. Click `Render` to preview RGB and mask renderings.
-4. **Generate** — Enter a prompt and click `Generate` to synthesize the final video.
-
-### Alternative Reconstructors
-
-NeoVerse also supports alternative reconstructors such as [Depth Anything 3](https://depth-anything-3.github.io/). Their predicted depth and camera parameters can be converted to pseudo Gaussian splats to plug into NeoVerse's pipeline.
-
-Download the Depth Anything 3 checkpoint:
+Hydra-style key-value overrides are accepted after `--config`:
 
 ```bash
-# Download model.safetensors from Hugging Face
-wget https://huggingface.co/depth-anything/DA3-GIANT-1.1/resolve/main/model.safetensors -O models/da3_giant_1.1.safetensors
+python -m scripts.train_hand_head --config configs/train_hand_head.yaml batch_size=8
 ```
 
-Then pass it via `--reconstructor_path`:
+Ablation configs live in `configs/`. SLURM launch example: `batch.sh`.
+
+## Evaluation
+
+**Hand head** (keypoint and MANO metrics):
 
 ```bash
-# CLI inference with Depth Anything 3
-python inference.py \
-    --input_path examples/videos/driving.mp4 \
-    --trajectory_file examples/trajectories/custom.json \
-    --reconstructor_path models/da3_giant_1.1.safetensors \
-    --output_path outputs/custom_traj_da3.mp4
-
-# Gradio demo with Depth Anything 3
-python app.py --reconstructor_path models/da3_giant_1.1.safetensors
+python -m scripts.eval_hand_head \
+    --config configs/train_hand_head.yaml \
+    --ckpt checkpoints/default/best_val_loss.pt
 ```
 
-## Model Architecture
+Key flags: `--sweep` (evaluate all checkpoints in `--ckpt-dir`), `--out <path.json>`,
+`--batch-size`, `--num-workers`, `--device`, `--sanity`, `--limit-clips`.
 
-NeoVerse has two main components:
+**GS head** (Gaussian-splatting rendering metrics):
 
-1. **Reconstructor** — Recovers 3D scene structure (Gaussian Splats + camera poses) from a monocular video. In the released version, we provide a [WorldMirror-based](https://3d-models.hunyuan.tencent.com/world/) reconstructor finetuned on 3D/4D datasets. What's more, NeoVerse is compatible with other reconstructors like [Depth Anything 3](https://depth-anything-3.github.io/) by converting their outputs to pseudo Gaussian splats.
-2. **Video Diffusion Model** — Generates high-quality video frames conditioned on the reconstructed scene. Here we use a [WAN 2.1](https://github.com/Wan-Video/Wan2.1) backbone with [a 4-step distilled LoRA](https://huggingface.co/lightx2v/Wan2.1-T2V-14B-StepDistill-CfgDistill-Lightx2v/tree/main/loras) for a fast inference speed.
-
-For technical details, please refer to our [paper](https://arxiv.org/abs/2601.00393).
-
-## Citation
-
-If you find this work helpful, please help star the repository and consider citing it as follows. It would be greatly appreciated!
-
-```bibtex
-@article{yang2026neoverse,
-  title={NeoVerse: Enhancing 4D World Model with in-the-wild Monocular Videos},
-  author={Yang, Yuxue and Fan, Lue and Shi, Ziqi and Peng, Junran and Wang, Feng and Zhang, Zhaoxiang},
-  journal={arXiv preprint arXiv:2601.00393},
-  year={2026}
-}
+```bash
+python -m scripts.eval_gs_head \
+    --config configs/train_hand_head.yaml \
+    --ckpt checkpoints/default/best_val_loss.pt
 ```
 
-## Acknowledgments
+Accepts the same flags as `eval_hand_head` plus `--lpips-net {alex,vgg}`.
 
-We sincerely thank the great work [VGGT](https://vgg-t.github.io/), [WorldMirror](https://3d-models.hunyuan.tencent.com/world/), [Depth Anything 3](https://depth-anything-3.github.io/), [Wan-Video](https://github.com/Wan-Video/Wan2.1), [TrajectoryCrafter](https://trajectorycrafter.github.io/), [ReCamMaster](https://jianhongbai.github.io/ReCamMaster/), and [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio) for their inspiring work and contributions to the 3D and video generation community.
+**Reconstruction quality** (PSNR / SSIM / LPIPS vs. original video):
 
-## Contact Us
+```bash
+python scripts/eval_reconstruction.py \
+    --original examples/videos/robot.mp4 \
+    --reconstruction outputs/reconstruction \
+    --height 336 --width 336
+```
 
-We believe NeoVerse has the potential to unlock a wide range of applications and we are excited to see how the community will use and build upon it. If you have any questions, suggestions, or want to share your results, please feel free to reach out to us via email [yangyuxue2023@ia.ac.cn](mailto:yangyuxue2023@ia.ac.cn) or WeChat ([Yuppie898988](Yuppie898988)). We also welcome you to open an issue on GitHub for any bug reports or feature requests.
+Key flags: `--num_frames`, `--output_csv <path>`, `--lpips_net {alex,vgg}`, `--no_gpu`.
+
+## Repository layout
+
+| Path | Purpose |
+|------|---------|
+| `scripts/` | Reconstruction, hand-head training, evaluation, visualization |
+| `diffsynth/auxiliary_models/worldmirror/` | Reconstructor backbone + heads (camera, dense, HaMeR, GS injection) |
+| `diffsynth/models/` | `ModelManager` checkpoint loader (reconstructor only) |
+| `diffsynth/{utils,data}/` | Video I/O and geometry helpers |
+| `configs/` | Training / ablation configs |
+| `models/` | Checkpoints (reconstructor, MANO, HaMeR submodule) |
+| `examples/videos/` | Sample input clips |
+
+## License
+
+See `LICENSE.txt`.

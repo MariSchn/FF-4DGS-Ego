@@ -8,6 +8,7 @@ from .visual_transformer import VisualGeometryTransformer
 from ..heads.camera_head import CameraHead
 from ..heads.dense_head import DPTHead
 from ..heads.hamer_head import HamerManoHead
+from ..heads.hand_to_gs_injection import HandToGSInjection
 from .rasterization import GaussianSplatRenderer
 from ..utils.camera_utils import vector_to_camera_matrices, extrinsics_to_vector
 from ..utils.priors import normalize_depth, normalize_poses
@@ -62,6 +63,7 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         self.use_hand_crop = kwargs.get("use_hand_crop", False)
         self.hand_crop_size = kwargs.get("hand_crop_size", 8)
         self.hamer_head_kwargs = kwargs.get("hamer_head_kwargs", {})
+        self.hand_to_gs_injection_cfg = kwargs.get("hand_to_gs_injection", {})
 
         self.life_span_gamma = life_span_gamma
         self.dynamic_threshold = dynamic_threshold
@@ -225,6 +227,27 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             else:
                 raise ValueError(f"Unknown hand_head_type: {self.hand_head_type}")
 
+        # Optional: inject hamer's enhanced local crop features into the GS branch.
+        # Only meaningful when both heads exist and hamer's use_crop path is on,
+        # so the dict carries enhanced_crop_tokens.
+        if (
+            self.enable_hand
+            and self.enable_gs
+            and self.hand_head_type == "hamer"
+            and self.hand_to_gs_injection_cfg.get("enabled", False)
+        ):
+            cfg = dict(self.hand_to_gs_injection_cfg)
+            cfg.pop("enabled", None)
+            hand_dim = cfg.pop("hand_dim", self.hamer_head_kwargs.get("dim", 1024))
+            # gs_dims must match DPTHead.out_channels per layer (post-projects,
+            # pre-fusion). The default mirrors DPTHead's [256, 512, 1024, 1024].
+            gs_dims = cfg.pop("gs_dims", [256, 512, 1024, 1024])
+            self.hand_to_gs_injection = HandToGSInjection(
+                hand_dim=hand_dim,
+                gs_dims=gs_dims,
+                **cfg,
+            )
+
     def forward(self, views: Dict[str, torch.Tensor], cond_flags: List[int]=[0, 0, 0], is_inference=True, use_motion=True):
         """
         Execute forward pass through the WorldMirror model.
@@ -301,20 +324,22 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             preds["pts3d_conf"] = pts_conf
 
         # tracking hand
+        enhanced_crop_tokens = None
         if self.enable_hand:
             if self.hand_head_type == "hamer":
                 hamer_kwargs = {}
                 if self.use_hand_crop:
                     hamer_kwargs["hand_bboxes"] = views.get("hand_bboxes")
                     hamer_kwargs["hand_valid"] = views.get("hand_valid")
-                hand_params, hand_conf = self.hand_head(
+                hand_out = self.hand_head(
                     token_list,
                     images=imgs,
                     patch_start_idx=patch_start_idx,
                     **hamer_kwargs,
                 )
-                preds["hand_joints"] = hand_params
-                preds["hand_conf"] = hand_conf
+                preds["hand_joints"] = hand_out["params"]
+                preds["hand_conf"] = hand_out["conf"]
+                enhanced_crop_tokens = hand_out.get("enhanced_crop_tokens")
             elif self.hand_head_type == "hand_crop":
                 hand_bboxes = views.get("hand_bboxes", None)
                 hand_valid = views.get("hand_valid", None)
@@ -375,10 +400,42 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
 
         # 3D Gaussian Splatting
         if self.enable_gs:
+            # Build a hand-injection hook that runs inside dense_head, on the
+            # per-layer projected features (post-projects, pre-fusion). This
+            # gives the DPT fusion blocks visibility into hand-aware features
+            # at every scale, instead of only patching the final gs_feat.
+            #
+            # dense_head may chunk frames internally for memory; the hook is
+            # called per chunk with (feats, frame_start, frame_end) over the
+            # original [0, S) range, so we slice all per-frame inputs to match
+            # the current chunk before invoking the injection module.
+            gs_feature_hook = None
+            if (
+                getattr(self, "hand_to_gs_injection", None) is not None
+                and self.hand_head_type == "hamer"
+                and enhanced_crop_tokens is not None
+                and views.get("hand_bboxes") is not None
+            ):
+                hand_bboxes = views.get("hand_bboxes")
+                hand_valid = views.get("hand_valid")
+                B_h, S_h, _, _ = hand_bboxes.shape
+                _, K_h, D_h = enhanced_crop_tokens.shape
+                # [B*S*2, K, D] -> [B, S, 2, K, D] for per-frame slicing.
+                ect_bs = enhanced_crop_tokens.reshape(B_h, S_h, 2, K_h, D_h)
+
+                def _gs_feature_hook(feats, fs, fe):
+                    ect_chunk = ect_bs[:, fs:fe].reshape(-1, K_h, D_h)
+                    bb_chunk = hand_bboxes[:, fs:fe]
+                    hv_chunk = hand_valid[:, fs:fe] if hand_valid is not None else None
+                    return self.hand_to_gs_injection(ect_chunk, bb_chunk, hv_chunk, feats)
+
+                gs_feature_hook = _gs_feature_hook
+
             gs_feat, gs_depth, gs_depth_conf = self.gs_head(
                 context_preds.get("token_list", token_list),
                 images=context_preds.get("imgs", imgs),
-                patch_start_idx=patch_start_idx
+                patch_start_idx=patch_start_idx,
+                feature_hook=gs_feature_hook,
             )
             preds["gs_depth"] = gs_depth
             preds["gs_depth_conf"] = gs_depth_conf

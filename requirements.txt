@@ -33,20 +33,13 @@ addict
 moviepy==1.0.3
 
 # Demo
-gradio
 trimesh
 viser
 
 # Training
-accelerate
-deepspeed==0.16.7
 omegaconf
-peft
 tensorboard
 wandb
-
-# Text processing
-ftfy
 
 # Dataset processing
 pandas

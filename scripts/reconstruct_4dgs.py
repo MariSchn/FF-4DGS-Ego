@@ -1,8 +1,7 @@
 """
-Standalone 4DGS reconstruction script for NeoVerse / FF-4DGS-Ego.
+Standalone 4DGS reconstruction script for FF-4DGS-Ego.
 
-Runs only the reconstructor (WorldMirror backbone + heads) without loading
-the WAN diffusion model, VAE, or text encoder.
+Runs only the reconstructor (WorldMirror backbone + heads).
 
 Outputs (saved to --output_dir):
   gaussians.pt          - list of per-group dicts (means, harmonics, scales, rotations, opacities, timestamp)

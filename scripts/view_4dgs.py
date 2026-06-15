@@ -1,5 +1,5 @@
 """
-Interactive 4DGS viewer for NeoVerse / FF-4DGS-Ego reconstruction outputs.
+Interactive 4DGS viewer for FF-4DGS-Ego reconstruction outputs.
 
 Uses viser's native Gaussian splat rendering — actual 3D ellipsoids in the browser.
 
