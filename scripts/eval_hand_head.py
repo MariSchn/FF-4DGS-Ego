@@ -249,8 +249,12 @@ def main():
         num_frames=num_frames, res=res, clip_stride=clip_stride,
         use_hand_crop=use_hand_crop, rescale_factor=rescale_factor,
     )
-    if args.limit_clips is not None:
-        val_set.clips = val_set.clips[: args.limit_clips]
+    if args.limit_clips is not None and len(val_set.clips) > args.limit_clips:
+        # Evenly subsample across the (seq-ordered) clip list so a capped eval
+        # spans ALL val sequences, not just the first one — otherwise a large
+        # multi-seq val truncated to the first N clips would cover ~1 seq.
+        stride = len(val_set.clips) / args.limit_clips
+        val_set.clips = [val_set.clips[int(i * stride)] for i in range(args.limit_clips)]
     val_loader = DataLoader(
         val_set, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers, pin_memory=True, drop_last=False,

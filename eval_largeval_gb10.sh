@@ -29,13 +29,17 @@ source venv_gb10/bin/activate
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1
 
+# ~9 val seqs => thousands of clips; cap to 600 EVENLY sampled across all seqs
+# (eval_hand_head subsamples by stride) for a robust but time-bounded compare.
+LIMIT=600
+
 echo "########## BASELINE (no anchor): Marian 50mm — larger val ##########"
 python3 -m scripts.eval_hand_head --config "${CFG}" --ckpt "${BASELINE}" \
-  --val-list "${VL}" --out outputs/eval_large_baseline.json --batch-size 4
+  --val-list "${VL}" --limit-clips "${LIMIT}" --out outputs/eval_large_baseline.json --batch-size 4
 
 echo "########## OURS: P2 warm-start — larger val (same split) ##########"
 python3 -m scripts.eval_hand_head --config "${CFG}" --ckpt "${OURS}" \
-  --val-list "${VL}" --out outputs/eval_large_warmstart.json --batch-size 4
+  --val-list "${VL}" --limit-clips "${LIMIT}" --out outputs/eval_large_warmstart.json --batch-size 4
 
 echo "=== SUMMARY ==="
 for f in outputs/eval_large_baseline.json outputs/eval_large_warmstart.json; do
