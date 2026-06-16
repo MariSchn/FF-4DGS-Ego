@@ -103,13 +103,16 @@ def main() -> None:
                "WEAK: FM competitive at the hand -> reframe as complementary (see E1 fallback)")
     print(verdict)
 
-    import json
-    import os
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    with open(args.out, "w") as f:
-        json.dump({"unidepth": fm_s, "ours": ours_s, "ratio": ratio,
-                   "weights": args.weights, "meta": meta}, f, indent=2)
-    print(f"\nSaved -> {args.out}")
+    try:
+        import json
+        import os
+        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+        with open(args.out, "w") as f:
+            json.dump({"unidepth": fm_s, "ours": ours_s, "ratio": ratio,
+                       "weights": args.weights, "meta": meta}, f, indent=2)
+        print(f"\nSaved -> {args.out}")
+    except Exception as e:
+        print(f"\n[warn] could not save {args.out}: {e} (summary printed above)")
 
 
 if __name__ == "__main__":

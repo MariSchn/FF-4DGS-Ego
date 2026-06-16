@@ -234,11 +234,15 @@ def main() -> None:
           "the SCENE (not just the hand) metric.")
 
     if args.out:
-        import json
-        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-        with open(args.out, "w") as f:
-            json.dump(summary, f, indent=2)
-        print(f"\nSaved -> {args.out}")
+        try:
+            import json
+            os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+            with open(args.out, "w") as f:
+                json.dump(summary, f, indent=2)
+            print(f"\nSaved -> {args.out}")
+        except Exception as e:
+            # disk/inode quota etc. must NOT fail the run — the summary already printed above.
+            print(f"\n[warn] could not save {args.out}: {e} (summary printed above)")
 
 
 if __name__ == "__main__":
