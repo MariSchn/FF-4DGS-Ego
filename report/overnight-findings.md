@@ -70,3 +70,21 @@ Consequences:
 4. E1 UniDepth (vs metric-depth FM at the hand) — torch cu128 reinstalled; re-test on a 5060ti node
    after the control frees the queue. Still relevant for "hand depth without a depth FM".
 5. Rewrite the paper around hand placement; keep the scene-metric negative as analysis.
+
+---
+
+## ⚠️ Hardware obstacle for the (now make-or-break) external comparison
+
+The placement claim now lives or dies on an external SOTA comparison (HaWoR / Hand3R). But the cluster
+is **Blackwell-only**: gb10 nodes = GB10 (Grace-Blackwell), x86 jobs = RTX 5060 Ti (sm_120). HaWoR ships
+**torch 1.13 + cu117** (supports only ≤ sm_86 Ampere) and **DROID-SLAM** CUDA extensions written for that
+old stack — neither runs on Blackwell without a torch→2.7/cu128 upgrade + a DROID-SLAM port, which is a
+multi-day, uncertain effort. (Same root cause as the UniDepth E1 crash: cu121 torch had no sm_120 kernel;
+fixed by cu128. UniDepth V2 has no custom CUDA build, so cu128 alone fixes it; DROID-SLAM does, so it's
+harder.)
+
+**Implication:** the external comparison is not a quick win on this hardware. Options for the morning
+decision: (a) port HaWoR to cu128 + rebuild DROID (multi-day, risky); (b) compare on numbers reported in
+the HaWoR/Hand3R papers for shared benchmarks instead of re-running them; (c) get GPU access with an
+Ampere/Hopper node elsewhere; (d) scope to a workshop where the internal baseline + the honest negative
+suffice. This is the key strategic call.
