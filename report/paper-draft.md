@@ -1,8 +1,18 @@
-# Metric Hands, Metric Scene: Feedforward Egocentric Gaussian Reconstruction Anchored to the Hand
+# Metric Hands, ~~Metric Scene~~: Feedforward Egocentric Gaussian Reconstruction Anchored to the Hand
 
-**Working draft — 2026-06-16.** Target: CVPR/ICCV/ECCV main track (fallback: top workshop + arXiv to stake the claim).
-Numbers in `[brackets]` are pending the experiments queued on the cluster (see `publication-plan.md`); the surrounding
-text is final-draft prose. Citations use the keys in §References (verified in `novelty-assessment.md`).
+> **⚠️ MAJOR REFRAME (2026-06-17) — read `report/overnight-findings.md` first.**
+> The **"metric scene"** half of this draft is **FALSIFIED**. The non-circular B2 experiment (GT object
+> depth, hand region excluded) shows the hand anchor makes object-region depth **WORSE** (a01 134.7cm vs
+> baseline 61.9cm), and the earlier "scene becomes metric" signal was a hand-region **circular artifact**
+> (non-circular scale CV ~13–28% for both). Root cause is fundamental: the frozen monocular backbone is
+> ~62cm-inaccurate on objects, so no anchor weight can make the scene metric.
+> **Surviving contribution = metric HAND PLACEMENT** (−35% MPJPE, 4.5cm hand depth) + recoverable global
+> scale. The scene render IS preserved at low anchor weight (a01 32.81 vs baseline 32.55 dB). Below, all
+> "metric scene"/object-metric claims must be cut; keep them only as a reported negative/limitation.
+> Sections §1–§5 still need rewriting around hand placement; the money table (§5.1) is updated.
+
+**Working draft — reframed 2026-06-17.** Target: revised down toward **workshop / arXiv** unless the external
+placement comparison (HaWoR/Hand3R) is clearly SOTA-competitive. Citations: §References (`novelty-assessment.md`).
 
 ---
 
@@ -150,16 +160,19 @@ GS PSNR/SSIM/LPIPS from re-rendered Gaussians.
 
 ### 5.1 Headline table (the "money" table)
 
+**Updated 2026-06-17 with real numbers.** ✅ supports the (reframed) hand-placement claim; ❌ falsified.
+
 | Claim | Metric | Baseline | Ours | Status |
 |---|---|---|---|---|
-| Hand placement | MPJPE ↓ (9-seq) | 81.4 mm | **52.9 mm (−35%)** | ✅ confirmed |
-| Articulation preserved | PA-MPJPE | ≈7.5 mm | ≈7.9 mm | ✅ confirmed |
-| Coupling direction | MPJPE ↓ | 172 mm (hand←scene) | 89.4 mm (scene←hand) | ✅ confirmed |
-| Scene metric **at hand** | depth residual ↓ / scale CV ↓ | 13.1 cm / 25.5% | 4.5 cm / 5.9% | ✅ confirmed (semi-circular) |
-| **Causal** (abs-3D) | control MPJPE | — | stays ≥[60] mm | ⏳ E0 pending |
-| **vs metric-depth FM** | UniDepth depth err @ hand | [>10] cm | 4.5 cm | ⏳ E1 pending |
-| **Scene metric on objects** (non-circular) | depth err / δ<10cm | [≈25 cm] | [≈10 cm] | ⏳ E2 pending |
-| Scene quality kept | PSNR | baseline | within [≈0.5] dB | ⏳ E3 pending |
+| **Hand placement** ✅ | MPJPE ↓ (9-seq) | 81.4 mm | **52.9 mm (−35%)** | ✅ confirmed (anchor 1.0) |
+| Articulation preserved ✅ | PA-MPJPE | ≈7.5 mm | ≈7.9 mm | ✅ confirmed |
+| Coupling direction ✅ | MPJPE ↓ | 172 mm (hand←scene) | 89.4 mm (scene←hand) | ✅ confirmed |
+| Hand metric @ hand ✅ | depth residual | — | 4.5 cm | ✅ confirmed |
+| Scene render preserved (low anchor) ✅ | PSNR | 32.55 dB | 32.81 dB (a01) | ✅ (anchor 1.0 → 26.78, −7.2 dB) |
+| **Scene metric on OBJECTS** ❌ | depth err median (non-circ) | **61.9 cm** | **134.7 cm** | ❌ **FALSIFIED** — anchor distorts scene depth |
+| Scale stability on objects ❌ | scale CV (non-circular) | 27.6% | 12.8–27.6% | ❌ the 25→6% "win" was a hand-region circular artifact |
+| **Causal** (abs-3D) | control MPJPE | — | stays high? | ⏳ E0 running (99395) |
+| vs metric-depth FM | UniDepth err @ hand | [>10] cm? | 4.5 cm | ⏳ E1 (torch cu128 fixed; re-test on 5060ti) |
 
 ### 5.2 Hand placement (confirmed)
 Warm-starting a converged hand head and adding the metric coupling reduces robust 9-sequence MPJPE from **81.4 → 52.9

@@ -1,5 +1,12 @@
 # FF-4DGS-Ego — Road to a Tier-1 Publication
 
+> **⚠️ 2026-06-17 REFRAME — see `report/overnight-findings.md`.** The scene-metric thesis (E2) was
+> **FALSIFIED**: the non-circular B2 eval shows the anchor makes object depth *worse* (135 vs 62 cm),
+> and the at-hand "scene-metric" win was a circular artifact. **Contribution narrows to metric HAND
+> PLACEMENT.** Realistic target drops toward **workshop/arXiv** unless the external placement
+> comparison (HaWoR/Hand3R, E4/E5) is clearly SOTA-competitive — that is now the make-or-break, not
+> scene-metric. E1/E2/E3 below are superseded by the real results in overnight-findings.md.
+
 **Last updated:** 2026-06-16
 **Target:** CVPR / ICCV / ECCV main track (fallback: a top workshop to stake the claim fast)
 **Status:** novel idea + confirmed thesis + strong internal result; the *evaluation* is the gap.
