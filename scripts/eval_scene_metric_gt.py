@@ -138,6 +138,7 @@ def main() -> None:
 
     seq_cache: dict[str, list] = {}   # raw_seq -> frame_objects
     clip_scales, errs, deltas, n_obj_px = [], [], [], 0
+    _DBG = [0]
 
     with torch.no_grad():
         for idx, batch in enumerate(loader):
@@ -194,6 +195,17 @@ def main() -> None:
                 T_cam_world = cam_extr[sframe].double().numpy()    # validated w2c
                 od, om = render_object_depth(objs, T_cam_world, Kf, Hd, Wd, args.objects_dir, device=device)
                 region = om & (~hand_mask[sframe]) & (gs[sframe] > 1e-3)
+                if os.environ.get("B2_DEBUG") and _DBG[0] < 10:
+                    gsf = gs[sframe]
+                    hz = hand_mask[sframe]
+                    msg = (f"[dbg] Hd={Hd} Wd={Wd} s={s:.3f} Kf=({Kf[0]:.1f},{Kf[1]:.1f},{Kf[2]:.1f}) "
+                           f"| om_px={int(om.sum())} region_px={int(region.sum())} hand_px={int(hz.sum())} "
+                           f"| gs: min={gsf.min():.2f} med={gsf.median():.2f} max={gsf.max():.2f} "
+                           f"pos%={100*(gsf>1e-3).float().mean():.0f}")
+                    if int(om.sum()) > 0:
+                        msg += (f" | od@om med={od[om].median():.3f} gs@om med={gsf[om].median():.3f}")
+                    print(msg, flush=True)
+                    _DBG[0] += 1
                 if not region.any():
                     continue
                 e = (gs[sframe][region] * s - od[region]).abs()
