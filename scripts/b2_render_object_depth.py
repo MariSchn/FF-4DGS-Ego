@@ -128,7 +128,10 @@ def render_object_depth(frame_objects, T_cam_world: np.ndarray, K, H: int, W: in
         glb = os.path.join(objects_dir, f"{uid}.glb")
         if not os.path.exists(glb):
             continue
-        V = _load_mesh_vertices(glb)                                   # [V,3] world-canonical
+        try:
+            V = _load_mesh_vertices(glb)                               # [V,3] world-canonical
+        except Exception:
+            continue  # a single unreadable mesh must not crash the whole eval
         T_co = T_cam_world @ T_wo                                      # cam<-object
         Vc = (T_co[:3, :3] @ V.T + T_co[:3, 3:4]).T                    # [V,3] camera frame
         Z = Vc[:, 2]

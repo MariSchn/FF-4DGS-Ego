@@ -149,10 +149,10 @@ def main() -> None:
             raw_seq = _raw_seq_dir(clip["seq_path"])
             frame_offset = clip["frame_offset"]
             if raw_seq not in seq_cache:
-                n_video = torch.load(
-                    os.path.join(clip["seq_path"], "hand_data", "cam_extrinsics_cache.pt"),
-                    map_location="cpu", weights_only=True).shape[0]
                 try:
+                    n_video = torch.load(
+                        os.path.join(clip["seq_path"], "hand_data", "cam_extrinsics_cache.pt"),
+                        map_location="cpu", weights_only=True).shape[0]
                     seq_cache[raw_seq] = build_frame_objects(raw_seq, n_video)
                 except Exception as e:
                     print(f"  [skip seq] {raw_seq}: {e}")
