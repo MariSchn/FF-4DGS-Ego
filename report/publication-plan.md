@@ -46,11 +46,11 @@ Legend: ✅ done · 🔄 running · 🔨 building · ⬜ todo
 
 | # | Experiment | Status | **Target number to CLAIM it** | If it misses |
 |---|---|---|---|---|
-| E0 | **Control** (warm-start, abs-3D+anchor zeroed) | 🔄 99188 | control MPJPE **stays ≥ ~60mm (1-seq) / ≥ ~75mm (9-seq)** → abs-3D *causes* the −28mm win | if control ≈ 53 → win is just more training → **reframe or kill** |
-| E1 | **B1 metric-depth-FM** (UniDepth at hand) | 🔨 | UniDepth hand-depth error **> ~10cm (≥2× our 4.5cm)** → FM can't replace the anchor | if FM < ~5cm → contribution weakened → pivot to "anchor + FM complementary" |
-| E2 | **B2 GT-object-depth scene-metric** (non-hand) | 🔨 | anchored object-region depth error **clearly < no-anchor** (e.g. anchored ~8-12cm vs no-anchor ~20-30cm; δ<0.1m up ≥15pts) | if no gain in object regions → thesis is hand-only → weaken claim to "metric hand placement" |
-| E3 | **Scene-quality** (region-masked GS PSNR/SSIM/LPIPS) | ⬜ | PSNR/SSIM **within noise of baseline** (we don't trade scene quality for metric scale) | if PSNR drops >1dB → note trade-off, tune anchor weight |
-| E4 | **Run HaWoR on HOT3D** (monocular external baseline) | ⬜ | our placement (52.9) **< HaWoR's** on the same HOT3D clips | if we lose → emphasize scene-metric (HaWoR has no scene) |
+| E0 | **Control** (warm-start, abs-3D+anchor zeroed) | 🔄 99188 running | control MPJPE **stays ≥ ~60mm (1-seq) / ≥ ~75mm (9-seq)** → abs-3D *causes* the −28mm win | if control ≈ 53 → win is just more training → **reframe or kill** |
+| E1 | **B1 metric-depth-FM** (UniDepth at hand) | 🟢 staged — queued 99195 (extract); UniDepth-v2 ViT-L weights cached; x86 eval ready | UniDepth hand-depth error **> ~10cm (≥2× our 4.5cm)** → FM can't replace the anchor | if FM < ~5cm → contribution weakened → pivot to "anchor + FM complementary" |
+| E2 | **B2 GT-object-depth scene-metric** (non-hand) | 🟢 staged — queued 99194; **render geometry validated** (hand-contact depth agrees 1.6–4.2cm) | anchored object-region depth error **clearly < no-anchor** (e.g. anchored ~8-12cm vs no-anchor ~20-30cm; δ<0.1m up ≥15pts) | if no gain in object regions → thesis is hand-only → weaken claim to "metric hand placement" |
+| E3 | **Scene-quality** (full-frame GS PSNR/SSIM/LPIPS) | 🟢 staged — `eval_gs_quality_gb10.sh` ready (reuses eval_gs_head) | PSNR/SSIM **within noise of baseline** (we don't trade scene quality for metric scale) | if PSNR drops >1dB → note trade-off, tune anchor weight |
+| E4 | **Run HaWoR on HOT3D** (monocular external baseline) | 🟡 scoped — HaWoR cloned; ships `scripts/scripts_eval/eval_hawor_hot3d.py`; HF weights downloading | our placement (52.9) **< HaWoR's** on the same HOT3D clips | if we lose → emphasize scene-metric (HaWoR has no scene) |
 | E5 | **HOI4D port + Hand3R head-to-head** | ⬜ (multi-wk) | **competitive C-/W-MPJPE with Hand3R** + we report scene-metric they don't | if backbone fails on HOI4D → pivot to HOT3D-primary + HaWoR/FM baselines |
 | E6 | **Multi-dataset table** | ⬜ | results on **≥2 datasets** (HOT3D + HOI4D) | single-dataset → workshop, not main track |
 | E7 | **Final novelty re-check** | ⬜ | no new 2026 paper closes the exact niche | if closed → reframe / move fast |
@@ -115,8 +115,15 @@ If 1-6 hold → strong main-track story. If 1-4 hold but 5-6 partial → worksho
 
 ## 8. Immediate next actions (live)
 
-1. Read E0 control verdict (tonight) — the make-or-break for the placement claim.
-2. Finish B1 (UniDepth) env + `eval_metric_depth_fm.py` → E1 number.
-3. Build `eval_scene_metric_gt.py` (object library ready) → E2 number.
-4. Pull region-masked GS PSNR/SSIM for E3 (cheap).
-5. Then: HaWoR-on-HOT3D (E4), and scope the HOI4D port (E5).
+**Build status (2026-06-16): E1/E2/E3 fully implemented, deployed, and queued behind the control. All buildable-without-GPU work is done.**
+
+Cluster queue (serial, MaxJobs=1): `99188` control RUNNING → `99194` B2/E2 PENDING → `99195` B1/E1-extract PENDING. UniDepth weights cached; HaWoR HF weights downloading.
+
+1. **Read E0 control verdict** when 99188 finishes — the make-or-break for the placement claim.
+2. **E2 (99194)** auto-fires after control → read object-region depth error (anchored vs no-anchor). Eval: `scripts/eval_scene_metric_gt.py` (+ `b2_render_object_depth.py`, geometry validated).
+3. **E1**: after `99195` writes `outputs/b1_bundle.pt`, submit `eval_unidepth_b1_x86.sh` (x86 jobs partition) → UniDepth-vs-anchor hand-depth error.
+4. **E3**: submit `eval_gs_quality_gb10.sh` (one slot) → scene-quality delta.
+5. **E4**: finish HaWoR install (conda env py3.10 + torch1.13cu117, DROID-SLAM CUDA build on a GPU node, Metric3D + DROID Google-Drive weights via gdown), then run its `eval_hawor_hot3d.py` on the sequences overlapping ours. MANO already in `models/MANO`.
+6. Then scope the HOI4D port (E5).
+
+**Implementation artifacts (this build session):** `scripts/extract_b1_frames.py`, `scripts/eval_unidepth_b1.py`, `scripts/b2_render_object_depth.py`, `scripts/eval_scene_metric_gt.py`; wrappers `extract_b1_gb10.sh`, `eval_unidepth_b1_x86.sh`, `eval_scene_metric_gt_gb10.sh`, `eval_gs_quality_gb10.sh`. Env: `venv_unidepth` (x86, UniDepthV2 importable, weights cached); trimesh present in both venvs. NOTE: `venv_gb10` is **aarch64** — never import/pip it on the x86 login node.
