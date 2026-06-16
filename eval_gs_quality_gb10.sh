@@ -41,13 +41,15 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1
 
 echo ""
+# Results go to scratch (HOME is inode-tight); `|| true` so one failure can't abort the other run.
+OUTDIR=/work/scratch/dmonopoli/eval_out
 echo "########## BASELINE — NO anchor (${BASELINE}) ##########"
 python3 -m scripts.eval_gs_head --config "${CFG}" --ckpt "${BASELINE}" \
-    --limit-clips "${LIMIT}" --out outputs/e3_gs_baseline.json
+    --limit-clips "${LIMIT}" --out "${OUTDIR}/e3_gs_baseline.json" || true
 
 echo ""
 echo "########## WITH ANCHOR — p2_warmstart (${ANCHORED}) ##########"
 python3 -m scripts.eval_gs_head --config "${CFG}" --ckpt "${ANCHORED}" \
-    --limit-clips "${LIMIT}" --out outputs/e3_gs_anchored.json
+    --limit-clips "${LIMIT}" --out "${OUTDIR}/e3_gs_anchored.json" || true
 
 echo "Finished: $(date)"
