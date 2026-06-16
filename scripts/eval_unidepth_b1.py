@@ -64,7 +64,7 @@ def main() -> None:
     fm_err, ours_err = [], []   # per-joint absolute depth error (metres)
     with torch.no_grad():
         for ci, clip in enumerate(clips):
-            rgb = clip["rgb"]            # [S, 3, H, W] in [0, 1]
+            rgb = clip["rgb"]            # [S, 3, H, W] uint8 in [0, 255]
             K = clip["K"].to(device)    # [3, 3]
             grid = clip["grid_xy"]      # [S, 2, J, 2]
             hand_z = clip["hand_z"]     # [S, 2, J]
@@ -74,7 +74,7 @@ def main() -> None:
             for s in range(S):
                 if not bool(valid[s].any()):
                     continue
-                img255 = (rgb[s].clamp(0, 1) * 255.0).to(device)   # [3, H, W]
+                img255 = rgb[s].float().to(device)                 # [3, H, W] in [0,255]
                 pred = model.infer(img255, K)
                 depth = pred["depth"].squeeze().to("cpu").float()   # [H, W]
                 fm_s = sample_depth(depth, grid[s])                 # [2, J]

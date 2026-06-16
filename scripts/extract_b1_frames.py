@@ -143,7 +143,8 @@ def main() -> None:
             K = torch.tensor([[f, 0.0, cx], [0.0, f, cy], [0.0, 0.0, 1.0]], dtype=torch.float32)
 
             clips.append({
-                "rgb": imgs[0].detach().cpu().float(),        # [S, 3, H, W]
+                # uint8 [0,255] — 4x smaller than float and exactly UniDepth's input format.
+                "rgb": (imgs[0].detach().clamp(0, 1) * 255.0).round().to(torch.uint8).cpu(),  # [S,3,H,W]
                 "K": K,                                       # [3, 3]
                 "grid_xy": grid_xy[0].detach().cpu().float(), # [S, 2, J, 2] in [0,1]
                 "hand_z": z[0].detach().cpu().float(),        # [S, 2, J]

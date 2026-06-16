@@ -18,7 +18,7 @@ set -euo pipefail
 CFG="${1:-configs/exp_p2_pinhole_warmstart.yaml}"
 CKPT="${2:-checkpoints/p2_warmstart/best_mpjpe.pt}"
 NCLIPS="${3:-60}"
-OUT="${4:-outputs/b1_bundle.pt}"
+OUT="${4:-/work/scratch/dmonopoli/b1_bundle.pt}"   # scratch: bundle is ~1.4G, keep it off the $HOME quota
 mkdir -p logs outputs
 
 echo "=================================================="

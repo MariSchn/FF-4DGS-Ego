@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-BUNDLE="${1:-outputs/b1_bundle.pt}"
+BUNDLE="${1:-/work/scratch/dmonopoli/b1_bundle.pt}"
 WEIGHTS="${2:-lpiccinelli/unidepth-v2-vitl14}"
 OUT="${3:-outputs/b1_unidepth.json}"
 mkdir -p logs outputs
