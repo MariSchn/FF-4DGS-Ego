@@ -40,6 +40,7 @@ from diffsynth.auxiliary_models.worldmirror.models.heads.metric_scale_head impor
 )
 from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
     project_joints_to_norm_pixels,
+    sample_depth_at_joints,
 )
 from scripts.b2_render_object_depth import build_frame_objects, render_object_depth
 from scripts.hand_depth_anchor_loss import hand_depth_anchor_loss
@@ -52,7 +53,8 @@ from scripts.train_hand_head import (
 )
 
 DELTA = 0.10           # metres; "metric-correct on objects" threshold
-HAND_EXCL_RADIUS = 12  # px (at gs_depth resolution) disk excluded around each hand joint
+HAND_EXCL_RADIUS = 12  # px (at the render resolution) disk excluded around each hand joint
+R_RENDER = 224         # object-render resolution; gs_depth is sampled by normalized grid (res-independent)
 
 
 def _load_trained_weights(model: WorldMirror, path: str, device: str) -> None:
@@ -167,8 +169,9 @@ def main() -> None:
             hv = batch["hand_valid"].to(device) if "hand_valid" in batch else None
             views = build_views(imgs, num_frames, device, hb, hv)
             preds = model(views, is_inference=False, use_motion=False)
-            gs = _gs_depth_2d(preds["gs_depth"]).float()          # [S, Hd, Wd]
-            S, Hd, Wd = gs.shape
+            gsd = preds["gs_depth"]                                # [B,S,1,Hd,Wd]; sampled via grid (res-independent)
+            S = gsd.shape[1]
+            R = R_RENDER                                           # our object-render res; gs sampled by normalized grid
             pred_joints = compute_joints_from_batch(preds["hand_joints"], mano_model, device)
             has_hand = (hv.float() if hv is not None
                         else torch.ones(pred_joints.shape[:3], device=device))
@@ -176,41 +179,45 @@ def main() -> None:
             cam_extr = clip["cam_extrinsics"]                      # [S,4,4] T_cam_world
 
             # metric scale from the hand (the coupling's metric); skip clip if no hand
-            _, info = hand_depth_anchor_loss(pred_joints, preds["gs_depth"], has_hand, cam_intr)
+            _, info = hand_depth_anchor_loss(pred_joints, gsd, has_hand, cam_intr)
             if info["n_valid"] == 0:
                 continue
-            s = float(solve_metric_scale(pred_joints, preds["gs_depth"], has_hand, cam_intr))
+            s = float(solve_metric_scale(pred_joints, gsd, has_hand, cam_intr))
 
-            # K scaled from the native cam_intr frame (~2*cx) to the gs_depth grid
+            # Render GT object depth at our chosen res R; gs_depth is sampled by the SAME
+            # normalized grid the hand anchor uses (sample_depth_at_joints), so the gs
+            # resolution/shape never has to match ours — this is the proven sampling path.
             f0, cx0, cy0 = [float(x) for x in cam_intr[0].tolist()]
-            scale = Wd / (2.0 * cx0)
+            scale = R / (2.0 * cx0)
             Kf = (f0 * scale, cx0 * scale, cy0 * scale)
-
-            hand_mask = _hand_pixel_mask(pred_joints, cam_intr, S, Hd, Wd, device)
+            hand_mask = _hand_pixel_mask(pred_joints, cam_intr, S, R, R, device)
             clip_err, clip_npx = [], 0
             for sframe in range(S):
                 objs = [(u, T) for (u, T) in frame_objects[frame_offset + sframe] if u in avail]
                 if not objs:
                     continue
                 T_cam_world = cam_extr[sframe].double().numpy()    # validated w2c
-                od, om = render_object_depth(objs, T_cam_world, Kf, Hd, Wd, args.objects_dir, device=device)
-                region = om & (~hand_mask[sframe]) & (gs[sframe] > 1e-3)
-                if os.environ.get("B2_DEBUG") and _DBG[0] < 10:
-                    gsf = gs[sframe]
-                    hz = hand_mask[sframe]
-                    msg = (f"[dbg] Hd={Hd} Wd={Wd} s={s:.3f} Kf=({Kf[0]:.1f},{Kf[1]:.1f},{Kf[2]:.1f}) "
-                           f"| om_px={int(om.sum())} region_px={int(region.sum())} hand_px={int(hz.sum())} "
-                           f"| gs: min={gsf.min():.2f} med={gsf.median():.2f} max={gsf.max():.2f} "
-                           f"pos%={100*(gsf>1e-3).float().mean():.0f}")
-                    if int(om.sum()) > 0:
-                        msg += (f" | od@om med={od[om].median():.3f} gs@om med={gsf[om].median():.3f}")
-                    print(msg, flush=True)
-                    _DBG[0] += 1
-                if not region.any():
+                od, om = render_object_depth(objs, T_cam_world, Kf, R, R, args.objects_dir, device=device)
+                om = om & (~hand_mask[sframe])                     # object pixels, hand excluded
+                if not om.any():
                     continue
-                e = (gs[sframe][region] * s - od[region]).abs()
+                ys, xs = torch.where(om)
+                grid = torch.stack([xs.float() / R, ys.float() / R], -1).view(1, 1, 1, -1, 2).to(device)
+                gs_at, in_fr = sample_depth_at_joints(gsd[:, sframe:sframe + 1], grid)
+                gs_at = gs_at.reshape(-1)
+                od_at = od[ys, xs]
+                keep = in_fr.reshape(-1) & (gs_at > 1e-3) & (gs_at < 50.0) & (od_at > 1e-3)
+                if os.environ.get("B2_DEBUG") and _DBG[0] < 10:
+                    print(f"[dbg] gsd.shape={tuple(gsd.shape)} R={R} s={s:.3f} om={int(om.sum())} "
+                          f"keep={int(keep.sum())} | gs_at med="
+                          f"{gs_at[keep].median().item() if keep.any() else float('nan'):.3f} "
+                          f"od med={od_at[keep].median().item() if keep.any() else float('nan'):.3f}", flush=True)
+                    _DBG[0] += 1
+                if not keep.any():
+                    continue
+                e = (gs_at[keep] * s - od_at[keep]).abs()
                 clip_err.append(e)
-                clip_npx += int(region.sum())
+                clip_npx += int(keep.sum())
             if not clip_err:
                 continue
             ce = torch.cat(clip_err)
