@@ -8,9 +8,9 @@ set -uo pipefail
 cd "$HOME/FF-4DGS-Ego"
 source venv_gb10/bin/activate
 export B2_DEBUG=1 PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-echo "B2 DEBUG run (warm-start ckpt, 4 clips, 3 seqs)"
+echo "B2 DEBUG run (a01 recovered ckpt, 6 clips, 4 seqs)"
 python3 -m scripts.eval_scene_metric_gt \
-  --config configs/exp_p2_pinhole_warmstart.yaml \
-  --checkpoint checkpoints/p2_warmstart/best_mpjpe.pt \
-  --objects_dir /work/scratch/dmonopoli/hot3d_assets --num_clips 4 --max_seqs 3 || true
+  --config configs/exp_p2_pinhole_warmstart_a01.yaml \
+  --checkpoint checkpoints/p2_warmstart_a01/best_mpjpe.pt \
+  --objects_dir /work/scratch/dmonopoli/hot3d_assets --num_clips 6 --max_seqs 4 || true
 echo "B2 DEBUG done"
