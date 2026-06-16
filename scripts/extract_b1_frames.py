@@ -47,7 +47,8 @@ from scripts.train_hand_head import (
     discover_sequences,
 )
 
-DEPTH_MIN = 0.05  # metres; reject degenerate near-camera samples
+DEPTH_MIN = 0.05    # metres; reject degenerate near-camera samples
+FRAME_STRIDE = 4    # store every Nth frame — keeps the bundle small/robust to write (still many hand samples)
 
 
 def _load_trained_weights(model: WorldMirror, path: str, device: str) -> None:
@@ -142,14 +143,15 @@ def main() -> None:
             f = float(cam_intr[0, 0]); cx = float(cam_intr[0, 1]); cy = float(cam_intr[0, 2])
             K = torch.tensor([[f, 0.0, cx], [0.0, f, cy], [0.0, 0.0, 1.0]], dtype=torch.float32)
 
+            fs = slice(None, None, FRAME_STRIDE)              # subsample frames to keep the bundle small
             clips.append({
                 # uint8 [0,255] — 4x smaller than float and exactly UniDepth's input format.
-                "rgb": (imgs[0].detach().clamp(0, 1) * 255.0).round().to(torch.uint8).cpu(),  # [S,3,H,W]
+                "rgb": (imgs[0, fs].detach().clamp(0, 1) * 255.0).round().to(torch.uint8).cpu(),  # [s,3,H,W]
                 "K": K,                                       # [3, 3]
-                "grid_xy": grid_xy[0].detach().cpu().float(), # [S, 2, J, 2] in [0,1]
-                "hand_z": z[0].detach().cpu().float(),        # [S, 2, J]
-                "gs_at_hand": sampled[0].detach().cpu().float(),
-                "valid": valid[0].detach().cpu().bool(),
+                "grid_xy": grid_xy[0, fs].detach().cpu().float(), # [s, 2, J, 2] in [0,1]
+                "hand_z": z[0, fs].detach().cpu().float(),        # [s, 2, J]
+                "gs_at_hand": sampled[0, fs].detach().cpu().float(),
+                "valid": valid[0, fs].detach().cpu().bool(),
             })
             n = int(valid.sum().item())
             res_cm = float(((sampled - z).abs() * valid.float()).sum() / valid.float().sum()) * 100

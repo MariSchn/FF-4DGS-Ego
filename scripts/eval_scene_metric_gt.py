@@ -84,8 +84,8 @@ def _hand_pixel_mask(pred_joints, cam_intr, S, Hd, Wd, device):
     gx = grid_xy[0, ..., 0].reshape(S, -1) * Wd
     gy = grid_xy[0, ..., 1].reshape(S, -1) * Hd
     mask = torch.zeros(S, Hd, Wd, dtype=torch.bool, device=device)
-    ys = torch.arange(Hd, device=device).view(1, Hd, 1)
-    xs = torch.arange(Wd, device=device).view(1, 1, Wd)
+    ys = torch.arange(Hd, device=device).view(Hd, 1)
+    xs = torch.arange(Wd, device=device).view(1, Wd)
     for s in range(S):
         for j in range(gx.shape[1]):
             cx, cy = gx[s, j], gy[s, j]
