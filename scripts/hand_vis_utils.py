@@ -480,6 +480,11 @@ def setup_vis_context(seq_path, mano_model_folder=None, mano_model=None):
 
     Uses the same data as the standalone visualize_mano_hands.py script.
     Returns a context dict, or None if required files are missing.
+
+    If `seq_path/.preprocessing_meta.json` is present (pinhole-undistorted
+    dataset), additionally builds and returns a `pinhole_calib` matching the
+    one used during preprocessing — callers that render overlays on the
+    undistorted video should prefer this over the original fisheye calib.
     """
     video_path = os.path.join(seq_path, "video_main_rgb.mp4")
     jsonl_path = os.path.join(seq_path, "hand_data", "mano_hand_pose_trajectory.jsonl")
@@ -502,10 +507,28 @@ def setup_vis_context(seq_path, mano_model_folder=None, mano_model=None):
 
     n_video = len(VideoReader(video_path))
 
+    # Pinhole calib if the sequence was preprocessed (undistorted to pinhole).
+    pinhole_calib = None
+    preproc_meta = None
+    meta_path = os.path.join(seq_path, ".preprocessing_meta.json")
+    if os.path.exists(meta_path):
+        try:
+            import json
+            with open(meta_path) as f:
+                preproc_meta = json.load(f)
+            # Import lazily to avoid circular imports during module load.
+            from scripts.hand_alignment.align_hand_to_neoverse import build_pinhole_target
+            pinhole_calib = build_pinhole_target(cam_calib, preproc_meta["focal"])
+        except Exception as e:
+            print(f"[VIS] Found .preprocessing_meta.json but failed to build pinhole_calib: {e}")
+            pinhole_calib = None
+
     return {
         "mano_model": mano_model,
         "T_device_camera": T_device_camera,
         "cam_calib": cam_calib,
+        "pinhole_calib": pinhole_calib,
+        "preprocessing_meta": preproc_meta,
         "headset_poses": headset_poses,
         "headset_ts_sorted": headset_ts_sorted,
         "hand_poses": hand_poses,
@@ -571,7 +594,9 @@ def render_hand_comparison(vis_context, frame_idx, gt_params, pred_params):
 
     mano = vis_context["mano_model"]
     T_dev_cam = vis_context["T_device_camera"]
-    cam_calib = vis_context["cam_calib"]
+    # Project through pinhole if the dataset was preprocessed (the video
+    # we're drawing on is undistorted); fall back to fisheye otherwise.
+    projection_calib = vis_context.get("pinhole_calib") or vis_context["cam_calib"]
 
     # Render GT hands from raw JSONL data (solid fill)
     for is_right, color in [(False, GT_LEFT_COLOR), (True, GT_RIGHT_COLOR)]:
@@ -580,7 +605,9 @@ def render_hand_comparison(vis_context, frame_idx, gt_params, pred_params):
             continue
         try:
             verts, faces = mano.get_mesh(hand_data[hand_key], is_right)
-            pixels, depths, valid = project_vertices(verts, T_world_device, T_dev_cam, cam_calib)
+            pixels, depths, valid = project_vertices(
+                verts, T_world_device, T_dev_cam, projection_calib,
+            )
             if valid.sum() >= 10:
                 image = render_mesh_overlay(image, pixels, faces, depths, valid, color, 0.35, False)
         except Exception as e:
@@ -597,7 +624,7 @@ def render_hand_comparison(vis_context, frame_idx, gt_params, pred_params):
             continue
         try:
             verts, faces = mano.get_mesh_from_params(params, is_right)
-            pixels, depths, valid = project_vertices_camera_space(verts, cam_calib)
+            pixels, depths, valid = project_vertices_camera_space(verts, projection_calib)
             if valid.sum() >= 10:
                 image = render_mesh_overlay(image, pixels, faces, depths, valid, color, 0.35, True)
         except Exception as e:

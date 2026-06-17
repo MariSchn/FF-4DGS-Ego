@@ -30,6 +30,7 @@ from scripts.train_hand_head import (
     HOT3DHandDataset,
     discover_sequences,
 )
+from scripts.hand_vis_utils import MANOModel
 
 LEFT_COLOR = (255, 150, 50)   # blue-ish (BGR)
 RIGHT_COLOR = (50, 50, 255)   # red-ish (BGR)
@@ -180,6 +181,8 @@ def main():
 
     data_cfg = cfg["data"]
     crop_cfg = cfg.get("hand_crop", {})
+    mano_folder = cfg.get("visualization", {}).get("mano_model_folder", "models/MANO")
+    mano_model = MANOModel(mano_folder)
 
     data_root = data_cfg["data_root"]
     num_frames = data_cfg["num_frames"]
@@ -197,6 +200,7 @@ def main():
     print(f"Building dataset with rescale_factor={rescale_factor} ...")
     dataset = HOT3DHandDataset(
         all_seqs[:1],
+        mano_model,
         num_frames=num_frames,
         res=res,
         clip_stride=clip_stride,

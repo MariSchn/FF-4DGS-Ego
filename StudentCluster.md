@@ -25,11 +25,6 @@
 - pip install torch-scatter -f https://data.pyg.org/whl/torch-2.3.1+cu121.html
 ...
 
-### Download Model weights
-- wget https://huggingface.co/Yuppie1204/NeoVerse/resolve/main/reconstructor.ckpt
-- mkdir models/NeoVerse
-- mv reconstructor.ckpt models/NeoVerse
-
 ### Config Weights & Biases
 - wandb login
 

@@ -5,7 +5,7 @@ Reports image-quality metrics by re-rendering the input views from the
 predicted Gaussians and comparing against the ground-truth frames:
 PSNR, SSIM, LPIPS.
 
-Usage (run as a module from the repo root, with the `neoverse` conda env active):
+Usage (run as a module from the repo root, with the project virtualenv active):
 
     # Base reconstructor only (no hand-head ckpt — hand head doesn't affect GS)
     python -m scripts.eval_gs_head --config configs/train_hand_head.yaml
