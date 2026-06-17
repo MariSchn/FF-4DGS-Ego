@@ -24,6 +24,7 @@ from scripts.train_hand_head import (
     HOT3DHandDataset, discover_sequences, build_views,
     HAND_PARAM_DIM, NUM_HANDS,
 )
+from scripts.hand_vis_utils import MANOModel
 
 
 def print_tensor_stats(name, t):
@@ -292,15 +293,17 @@ def main():
     num_frames = data_cfg["num_frames"]
     res = tuple(data_cfg["resolution"])
     rescale_factor = cfg.get("hand_crop", {}).get("rescale_factor", 2.0)
+    mano_folder = cfg.get("visualization", {}).get("mano_model_folder", "models/MANO")
+    mano_model = MANOModel(mano_folder)
 
     # Crop dataset (camera-space GT)
     ds_crop = HOT3DHandDataset(
-        all_seqs[:3], num_frames=num_frames, res=res,
+        all_seqs[:3], mano_model, num_frames=num_frames, res=res,
         use_hand_crop=True, rescale_factor=rescale_factor,
     )
     # Full-frame dataset (world-space GT)
     ds_full = HOT3DHandDataset(
-        all_seqs[:3], num_frames=num_frames, res=res,
+        all_seqs[:3], mano_model, num_frames=num_frames, res=res,
         use_hand_crop=False,
     )
 
