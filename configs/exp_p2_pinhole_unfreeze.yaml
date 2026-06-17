@@ -1,0 +1,105 @@
+# ==================================================================
+# P2-UNFREEZE: the main-track shot at a TRUE metric scene.
+# ------------------------------------------------------------------
+# Prior runs froze the encoder (freeze_backbone=true) and only trained the
+# gs_head + injection; the scene depth stayed ~62cm-inaccurate on objects and
+# the anchor only distorted it (B2: a01 135cm vs baseline 62cm). Hypothesis:
+# the limit is the FROZEN ENCODER's relative depth. Here we UNFREEZE the encoder
+# and let the egocentric video's reconstruction signal (strong gs losses) +
+# the hand's metric anchor jointly TEACH the network metric depth. Re-run B2:
+# if object depth drops below baseline 62cm -> scene-metric is achievable ->
+# main-track. If not -> the relative-depth limit is fundamental (hand can't fix it).
+# Low LR + warm-started heads to avoid destroying the pretrained backbone.
+# ==================================================================
+data:
+  data_root: "/work/courses/3dv/team25/data/hot3d_aria/preprocessed_pinhole_f609"
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.01
+  num_workers: 4
+# ------------------------------------------------------------------
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/work/courses/3dv/team25/checkpoints/default/hand_head_final.pt"
+  freeze_backbone: false      # <-- the experiment: train the encoder too
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: true
+  hand_to_gs_injection:
+    enabled: true
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+# ------------------------------------------------------------------
+loss_weights:
+  kp3d:          0.05
+  kp3d_abs:      0.05
+  kp2d:          0.05
+  global_orient: 0.01
+  hand_pose:     0.01
+  betas:         0.01
+  transl:        0.1
+  gs_l1:         0.5          # <-- strong reconstruction (video parallax -> relative depth)
+  gs_lpips:      0.5          # <--
+  hand_depth_anchor: 0.2      # <-- gentle metric scale; don't distort
+# ------------------------------------------------------------------
+hand_depth_anchor:
+  margin: 0.02
+  warmup_steps: 800
+  depth_min: 0.01
+  conf_thresh: 0.0
+  direction: scene_follows_hand
+metric_scale:
+  enable: true
+  clamp: [0.1, 10.0]
+# ------------------------------------------------------------------
+training:
+  lr: 5e-6                    # <-- low: the encoder is pretrained, protect it
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 2               # <-- halved: unfreezing backprops through the encoder (memory)
+  grad_accum_steps: 16        # effective batch ~32, same as warm-start
+  use_amp: true
+  log_every: 25
+  val_every: 50
+  val_max_batches: 12
+  save_every: 100
+  grad_clip_norm: 5.0         # tighter clip; unfreezing is less stable
+  kp3d_abs_warmup_steps: 200
+  keep_last_checkpoints: 0
+  seed: 42
+  output_dir: "checkpoints/p2_unfreeze"
+# ------------------------------------------------------------------
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 4
+# ------------------------------------------------------------------
+hand_crop:
+  rescale_factor: 1.5
+# ------------------------------------------------------------------
+debug:
+  enabled: false
+  max_sequences: 5
+  single_frame: false
+# ------------------------------------------------------------------
+wandb:
+  enabled: false
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "P2: UNFREEZE encoder (metric-scene shot)"
+  tags: []
+  notes: null

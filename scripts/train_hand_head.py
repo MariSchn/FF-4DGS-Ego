@@ -1160,12 +1160,23 @@ def train():
         if getattr(model, "hand_to_gs_injection", None) is not None
         else []
     )
-    trainable_params = hand_params + gs_head_params + injection_params
+    if getattr(model, "freeze_backbone", True):
+        trainable_params = hand_params + gs_head_params + injection_params
+    else:
+        # UNFREEZE experiment: freeze_backbone=false leaves the encoder's
+        # requires_grad=True but the encoder is NOT in the lists above, so it
+        # would get grads yet never step. Train EVERYTHING with grads so the
+        # backbone actually learns (the egocentric video's parallax + the hand
+        # anchor are the metric-depth signal). See exp_p2_pinhole_unfreeze.yaml.
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+    n_backbone = sum(p.numel() for p in trainable_params) - sum(
+        p.numel() for p in hand_params + gs_head_params + injection_params)
     print(
         "Trainable parameters: "
         f"hand={sum(p.numel() for p in hand_params):,} "
         f"gs_head={sum(p.numel() for p in gs_head_params):,} "
         f"injection={sum(p.numel() for p in injection_params):,} "
+        f"backbone(unfrozen)={n_backbone:,} "
         f"total={sum(p.numel() for p in trainable_params):,}"
     )
 
