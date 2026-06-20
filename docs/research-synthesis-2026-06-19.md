@@ -401,10 +401,15 @@ Hand3R = `2602.03200`, **arXiv-only (submitted 3 Feb 2026), NOT peer-reviewed, n
   deltas: frozen feedforward **3DGS** (vs their DA3+WiLoR+SAM3D pipeline), full 4DGS, HOT3D/Aria coverage.
 - **🔴 UniSH (2601.01222)** — feedforward joint scene+human metric recon using SMPL height prior as scene's
   metric reference. Same recipe, but full-body **SMPL / multi-view, not ego-monocular hand.** Architectural twin.
-- **🔴 Hand-4DGS** (authors Bae/Kim/**Pollefeys**/Rad/Uh/Kwon) — feedforward 3DGS for **4D hands from ego
-  video**, mesh-guided Gaussians ~60 FPS, 2D-supervised. Nearest BACKBONE twin, high-credibility, concurrent.
-  HAND-ONLY (no scene Gaussians, no scene-anchored scale) → reinforces rather than kills us. **⚠️ no clean
-  arXiv ID indexed (one agent guessed 2606.19156 — UNVERIFIED); confirm venue/ID before related-work freeze.**
+- **🟡 Hand-4DGS — `arXiv:2606.19156` (VERIFIED 2026-06-20, submitted 17 Jun 2026, arXiv-only, NOT peer-
+  reviewed)** — authors Jeongmin Bae, Seoha Kim, **Marc Pollefeys**, **Mahdi Rad**, Youngjung Uh, **Taein
+  Kwon** (Yonsei + ETH/Microsoft Spatial AI Lab + Oxford VGG). First feedforward 4D-hand-from-ego-video,
+  mesh-guided (MANO) Gaussians ~60 FPS, 2D-supervised, refines HaMeR init. Project page
+  jeongminb.github.io/hand-4dgs, code "Coming Soon." **HAND-ONLY: no scene, NO metric-scale claim, NO
+  world-space/W-MPJPE metric, eval on H2O + ARCTIC only (no HOT3D/HOI4D).** → Nearest-NAME collision but
+  occupies NONE of our contribution (joint scene+hand, metric-via-hand-anchor). **Reinforces our novelty.**
+  Cite + differentiate on (1) joint scene 3DGS + hand, (2) metric scale by anchoring hand into metric scene.
+  Genuinely concurrent + high-credibility (Pollefeys/Rad) → reviewers WILL know it; must cite explicitly.
 - **Human-as-anchor for SMPL bodies is essentially SOLVED:** MetricHMSR (2506.09919, "recovered metric human
   as a geometric anchor"), SynCHMR (2405.14855, "Human-aware Metric SLAM"), JOSH (2501.02158, contact-coupled
   joint scene+human), SHARE (2510.15342, scene→human grounding — inverse of our P1 scene_follows_hand),
@@ -455,3 +460,38 @@ Hand3R = `2602.03200`, **arXiv-only (submitted 3 Feb 2026), NOT peer-reviewed, n
 3. **Verify Hand-4DGS venue/ID urgently** (related-work freeze risk; no clean ID found).
 4. **New cheap differentiators to consider:** PROX/CHOIS/Interaction-4DGS penetration loss; DyTact-style MANO-
    bound surfels; test-time prior-optimization (2604.03878) as the render-and-PnP-class drift lever.
+
+---
+
+## Part 11 — HOI4D world-space data acquisition (2026-06-20): UNBLOCKED for 11 seqs
+The world-space HOI4D head-to-head (vs Hand3R 100f-W 125.81) was blocked on missing camera poses.
+RESOLVED — all 4 modalities now in hand for 11 sequences (the dense-depth set: C1/C2/C3/C5/C7 +
+C12×2/C13×2/C14×2, all `ZY20210800001_H1_*`, ~300 frames each, 2792 handpose frames total).
+
+**Source map (the Livioni HF mirror is a STRIPPED repackage — RGB+depth+frame-list JSON only, NO poses):**
+- RGB ✓ — `huggingface.co/datasets/Livioni/hoi4d/<seq>.tar.gz` → `images/*.jpg` (on cluster /work/.../hoi4d).
+- Intrinsics ✓ — `huggingface.co/datasets/yinloonga/HOI4D/resolve/main/camera_params.zip` (2.1 KB,
+  ungated) → `camera_params/ZY20210800001/intrin.npy` (fx≈1060, cx≈971, cy≈523 @1920×1080).
+- Extrinsics ✓ — `yinloonga/HOI4D/HOI4D_annotations.zip` (22 GB, range-extractable via `remotezip`;
+  central dir = 1.82M entries, ~23 s to index) → `3Dseg/output.log` (Open3D 5-line blocks, frame0
+  identity = poses relative to frame 0; ~58 KB/seq). Extracted all 11 in 34 s, no full download.
+- Handpose GT ✓ — **OneDrive/Baidu only, NO scriptable mirror anywhere** (exhaustively confirmed). Already
+  had it locally for exactly these 11 seqs at `hoi4d_gt/Hand_pose/handpose_right_hand/` (manual download).
+  Pickle keys verified: poseCoeff[48], beta[10], trans[3] (cam-frame m), kps2D[21,2]. Right hand only.
+
+**Staged + validated:** assembled a preprocess-ready annotation root at `hoi4d_gt/` (camera_params/,
+`<seq>/3Dseg/output.log`, `handpose/refinehandpose_right` → symlink to Hand_pose/handpose_right_hand).
+All 3 loaders (`load_intrinsics`/`load_extrinsics`/`load_mano_frame` in preprocess_hoi4d.py) resolve
+against it for a test seq (300/300 frames). `preprocess_hoi4d.py` patched to read the Livioni `images/`
+frame-dir (underscored seq) as RGB fallback + new `--rgb_root` arg (py_compile clean).
+
+**Remaining (cluster-only, next session — needs gb10 + venv_gb10 + SSH expect helpers):**
+1. Push `hoi4d_gt/` annotation root to cluster (tiny, ~tar+scp via expect helper).
+2. Run `preprocess_hoi4d.py` per seq: `--hoi4d_root <pushed hoi4d_gt> --rgb_root /work/scratch/dmonopoli/hoi4d
+   --seq <slashed> --out <preprocessed>`. Writes the HOT3DHandDataset cache set (incl. gt_joints_cache_world.pt).
+   ⚠️ STILL VERIFY the 3 flagged unknowns on seq 1 before scaling: (1) output.log direction (world→cam vs
+   cam→world — back-project depth / check gt_joints_2d overlays the hand in RGB), (2) 45→15 PCA pose, (3)
+   cam→world lift. Output is /work-bound (quota!) — write to node-local /tmp on the gb10 job if /work is full.
+3. Run `eval_world_space.py` on the 11 seqs → our W/WA-MPJPE (short 30f / long 100f) + C-MPJPE.
+4. Reproduce Hand3R protocol EXACTLY: 7:3 split (state seqs), first-frame W vs full-traj-Procrustes WA,
+   report BOTH alignment variants (their Procrustes-vs-Sim(3) is underspecified). Target: 100f-W < 125.81.
