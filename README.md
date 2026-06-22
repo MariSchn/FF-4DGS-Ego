@@ -120,6 +120,73 @@ Key flags: `--num_frames`, `--output_csv <path>`, `--lpips_net {alex,vgg}`, `--n
 | `models/` | Checkpoints (reconstructor, MANO, HaMeR submodule) |
 | `examples/videos/` | Sample input clips |
 
+## External libraries
+
+All third-party libraries used, with the versions this project was developed and
+tested against (Python 3.10, CUDA 12.8 / PyTorch 2.7.1). PyTorch and the
+Gaussian-splatting CUDA extensions are installed separately (see [Setup](#setup))
+so they match your CUDA toolkit; everything else is pinned in
+[`requirements.txt`](requirements.txt).
+
+**Installed separately (CUDA-matched):**
+
+| Library | Version |
+|---------|---------|
+| [torch](https://pytorch.org) | 2.7.1 (cu128); also tested 2.3.1 (cu121) |
+| [torchvision](https://github.com/pytorch/vision) | 0.22.1; also tested 0.18.1 |
+| [torch-scatter](https://github.com/rusty1s/pytorch_scatter) | 2.1.2 |
+| [gsplat](https://github.com/nerfstudio-project/gsplat) | 1.5.3 |
+
+**Pinned in `requirements.txt`:**
+
+| Library | Version |
+|---------|---------|
+| [transformers](https://github.com/huggingface/transformers) | 4.57.6 |
+| [safetensors](https://github.com/huggingface/safetensors) | 0.7.0 |
+| [einops](https://github.com/arogozhnikov/einops) | 0.8.2 |
+| [numpy](https://numpy.org) | 2.4.6 |
+| [Pillow](https://python-pillow.org) | 12.2.0 |
+| [tqdm](https://github.com/tqdm/tqdm) | 4.68.0 |
+| [sentencepiece](https://github.com/google/sentencepiece) | 0.2.1 |
+| [imageio](https://github.com/imageio/imageio) (+ [imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg)) | 2.37.3 (ffmpeg 0.6.0) |
+| [opencv-python](https://github.com/opencv/opencv-python) | 4.13.0.92 |
+| [decord](https://github.com/dmlc/decord) | 0.6.0 |
+| [huggingface_hub](https://github.com/huggingface/huggingface_hub) | 0.36.2 |
+| [modelscope](https://github.com/modelscope/modelscope) | 1.37.1 |
+| [lpips](https://github.com/richzhang/PerceptualSimilarity) | 0.1.4 |
+| [scikit-image](https://scikit-image.org) | 0.26.0 |
+| [torchmetrics](https://github.com/Lightning-AI/torchmetrics) | 1.9.0 |
+| [plyfile](https://github.com/dranjan/python-plyfile) | 1.1.4 |
+| [jaxtyping](https://github.com/patrick-kidger/jaxtyping) | 0.3.10 |
+| [scipy](https://scipy.org) | 1.17.1 |
+| [matplotlib](https://matplotlib.org) | 3.10.9 |
+| [evo](https://github.com/MichaelGrupp/evo) | 1.36.5 |
+| [e3nn](https://github.com/e3nn/e3nn) | 0.6.0 |
+| [addict](https://github.com/mewwts/addict) | 2.4.0 |
+| [moviepy](https://github.com/Zulko/moviepy) | 1.0.3 |
+| [trimesh](https://github.com/mikedh/trimesh) | 4.12.2 |
+| [viser](https://github.com/nerfstudio-project/viser) | 1.0.30 |
+| [omegaconf](https://github.com/omry/omegaconf) | 2.3.0 |
+| [tensorboard](https://github.com/tensorflow/tensorboard) | 2.20.0 |
+| [wandb](https://github.com/wandb/wandb) | 0.27.1 |
+| [pandas](https://pandas.pydata.org) | 3.0.3 |
+| [smplx](https://github.com/vchoutas/smplx) | 0.1.28 |
+| [projectaria-tools](https://github.com/facebookresearch/projectaria_tools) | 2.1.1 |
+
+**Model assets** (downloaded separately, not pip packages): the
+[MANO](https://mano.is.tue.mpg.de) hand model and the
+[HaMeR](https://github.com/geopavlakos/hamer) submodule — see [Setup](#setup).
+
+> On aarch64 (e.g. GH200) the training environment substitutes the equivalent
+> `opencv-python-headless` and `decord2` builds, since the stock `opencv-python`
+> / `decord` wheels are x86-only.
+
+## Notes
+
+- **No Android app / APK** — this project is Python/PyTorch only, so no `.apk` is included.
+- **Sample data** — a sample input clip is provided at `examples/videos/robot.mp4`
+  (with additional clips under `examples/videos/`).
+
 ## License
 
 See `LICENSE.txt`.

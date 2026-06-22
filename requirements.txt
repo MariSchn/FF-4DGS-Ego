@@ -1,49 +1,54 @@
+# Versions are pinned to those this project was developed and tested against
+# (Python 3.10, CUDA 12.8 / PyTorch 2.7.1). PyTorch and the Gaussian-splatting
+# CUDA extensions (torch, torchvision, torch-scatter, gsplat) are installed
+# separately so they match your CUDA toolkit — see the README "Setup" section.
+
 # Core dependencies
 transformers==4.57.6
-safetensors
-einops
-numpy
-Pillow
-tqdm
-sentencepiece
+safetensors==0.7.0
+einops==0.8.2
+numpy==2.4.6
+Pillow==12.2.0
+tqdm==4.68.0
+sentencepiece==0.2.1
 
 # Video/Image processing
-imageio
-imageio[ffmpeg]
-opencv-python
-decord
+imageio==2.37.3
+imageio[ffmpeg]==2.37.3
+opencv-python==4.13.0.92
+decord==0.6.0
 
 # Model downloading
-huggingface_hub
-modelscope
+huggingface_hub==0.36.2
+modelscope==1.37.1
 
 # Evaluation metrics
-lpips
-scikit-image
-torchmetrics
+lpips==0.1.4
+scikit-image==0.26.0
+torchmetrics==1.9.0
 
 # 3D reconstruction
-plyfile
-jaxtyping
-scipy
-matplotlib
-evo
-e3nn
-addict
+plyfile==1.1.4
+jaxtyping==0.3.10
+scipy==1.17.1
+matplotlib==3.10.9
+evo==1.36.5
+e3nn==0.6.0
+addict==2.4.0
 moviepy==1.0.3
 
 # Demo
-trimesh
-viser
+trimesh==4.12.2
+viser==1.0.30
 
 # Training
-omegaconf
-tensorboard
-wandb
+omegaconf==2.3.0
+tensorboard==2.20.0
+wandb==0.27.1
 
 # Dataset processing
-pandas
+pandas==3.0.3
 
 # Hand visualization (MANO)
-smplx
-projectaria-tools
+smplx==0.1.28
+projectaria-tools==2.1.1
