@@ -18,7 +18,7 @@ match your CUDA version), then the rest:
 ```bash
 conda create -n ff4dgs python=3.10 -y && conda activate ff4dgs
 
-# PyTorch — pick the wheel matching your CUDA (example: CUDA 12.1)
+# PyTorch: pick the wheel matching your CUDA (example: CUDA 12.1)
 pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
 
 pip install -r requirements.txt
@@ -30,7 +30,7 @@ pip install --no-build-isolation git+https://github.com/nerfstudio-project/gspla
 git submodule update --init --recursive   # HaMeR
 ```
 
-Place model weights under `models/` — the WorldMirror reconstructor checkpoint
+Place model weights under `models/`: the WorldMirror reconstructor checkpoint
 (`models/NeoVerse/reconstructor.ckpt`, shipped in the
 [NeoVerse release](https://huggingface.co/Yuppie1204/NeoVerse)), plus MANO and
 the HaMeR submodule. See `models/Put checkpoints here.txt`.
@@ -118,7 +118,7 @@ Key flags: `--num_frames`, `--output_csv <path>`, `--lpips_net {alex,vgg}`, `--n
 | `diffsynth/{utils,data}/` | Video I/O and geometry helpers |
 | `configs/` | Training / ablation configs |
 | `models/` | Checkpoints (reconstructor, MANO, HaMeR submodule) |
-| `examples/hot3d_sample/` | HOT3D egocentric sample (the data the hand head uses) |
+| `examples/hot3d_sample/` | HOT3D provenance and download pointer (the egocentric data we use) |
 | `examples/videos/` | Demo input clips for the reconstruction script |
 
 ## External libraries
@@ -185,11 +185,12 @@ so they match your CUDA toolkit; everything else is pinned in
 ## Notes
 
 - **No Android app / APK**: this project is Python/PyTorch only, so no `.apk` is included.
-- **Sample data**: a sample of the egocentric data this project actually uses is in
-  [`examples/hot3d_sample/`](examples/hot3d_sample/): a HOT3D frame with our MANO
-  hand-mesh overlay, plus a provenance README and a download link. The
-  reconstruction demo also ships generic monocular input clips under
-  `examples/videos/` (for example `examples/videos/robot.mp4`).
+- **Sample data**: the egocentric data this project actually uses is HOT3D. See
+  [`examples/hot3d_sample/`](examples/hot3d_sample/) for provenance and a download
+  link. We keep HOT3D imagery out of this public repo for license reasons; a real
+  preprocessed clip ships in the course submission package. The reconstruction demo
+  also ships generic monocular input clips under `examples/videos/` (for example
+  `examples/videos/robot.mp4`).
 
 ## License
 
