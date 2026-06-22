@@ -183,8 +183,8 @@ so they match your CUDA toolkit; everything else is pinned in
 
 ## Notes
 
-- **No Android app / APK** — this project is Python/PyTorch only, so no `.apk` is included.
-- **Sample data** — a sample input clip is provided at `examples/videos/robot.mp4`
+- **No Android app / APK**: this project is Python/PyTorch only, so no `.apk` is included.
+- **Sample data**: a sample input clip is provided at `examples/videos/robot.mp4`
   (with additional clips under `examples/videos/`).
 
 ## License
