@@ -118,7 +118,8 @@ Key flags: `--num_frames`, `--output_csv <path>`, `--lpips_net {alex,vgg}`, `--n
 | `diffsynth/{utils,data}/` | Video I/O and geometry helpers |
 | `configs/` | Training / ablation configs |
 | `models/` | Checkpoints (reconstructor, MANO, HaMeR submodule) |
-| `examples/videos/` | Sample input clips |
+| `examples/hot3d_sample/` | HOT3D egocentric sample (the data the hand head uses) |
+| `examples/videos/` | Demo input clips for the reconstruction script |
 
 ## External libraries
 
@@ -175,7 +176,7 @@ so they match your CUDA toolkit; everything else is pinned in
 
 **Model assets** (downloaded separately, not pip packages): the
 [MANO](https://mano.is.tue.mpg.de) hand model and the
-[HaMeR](https://github.com/geopavlakos/hamer) submodule — see [Setup](#setup).
+[HaMeR](https://github.com/geopavlakos/hamer) submodule. See [Setup](#setup).
 
 > On aarch64 (e.g. GH200) the training environment substitutes the equivalent
 > `opencv-python-headless` and `decord2` builds, since the stock `opencv-python`
@@ -184,8 +185,11 @@ so they match your CUDA toolkit; everything else is pinned in
 ## Notes
 
 - **No Android app / APK**: this project is Python/PyTorch only, so no `.apk` is included.
-- **Sample data**: a sample input clip is provided at `examples/videos/robot.mp4`
-  (with additional clips under `examples/videos/`).
+- **Sample data**: a sample of the egocentric data this project actually uses is in
+  [`examples/hot3d_sample/`](examples/hot3d_sample/): a HOT3D frame with our MANO
+  hand-mesh overlay, plus a provenance README and a download link. The
+  reconstruction demo also ships generic monocular input clips under
+  `examples/videos/` (for example `examples/videos/robot.mp4`).
 
 ## License
 
