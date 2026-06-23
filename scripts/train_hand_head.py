@@ -1355,6 +1355,7 @@ def train():
     anchor_direction = anchor_cfg.get("direction", "scene_follows_hand")
     grad_clip_norm = float(training_cfg.get("grad_clip_norm", 10.0))
     kp3d_abs_warmup_steps = int(training_cfg.get("kp3d_abs_warmup_steps", 0))
+    max_steps = int(training_cfg.get("max_steps", 0))  # >0: stop after N optimizer steps (bounded probe; final head still saved)
 
     # GT object-depth supervision config (the direct metric-depth signal).
     obj_cfg = cfg.get("obj_depth", {})
@@ -1649,6 +1650,7 @@ def train():
     consec_nan_guard = 0
 
     # --- Training loop ---
+    stop_training = False
     for epoch in tqdm(range(start_epoch, epochs + 1), desc="Epochs"):
         model.train()
         optimizer.zero_grad()
@@ -1962,6 +1964,8 @@ def train():
         "scale_head": 0.0, "scale_residual_m": 0.0,
                 }
                 global_step += 1
+                if max_steps and global_step >= max_steps:
+                    stop_training = True
 
                 # --- Train logging ---
                 if use_wandb:
@@ -2112,9 +2116,15 @@ def train():
                 if global_step % save_every == 0:
                     save_checkpoint(global_step, epoch)
 
+            if stop_training:
+                break
+
         # Flush leftover gradients from an incomplete accumulation window
         if (batch_idx + 1) % grad_accum_steps != 0:
             optimizer.zero_grad()
+
+        if stop_training:
+            break
 
     # --- Save final ---
     save_checkpoint(global_step, epoch, name="hand_head_final.pt")
