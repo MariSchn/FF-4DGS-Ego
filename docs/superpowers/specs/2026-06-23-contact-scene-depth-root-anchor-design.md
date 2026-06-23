@@ -1,8 +1,27 @@
 # Contact anchor: scene-depth root anchor (Phase 1) + hand-object contact (Phase 2)
 
 **Date:** 2026-06-23
-**Status:** design, pending review
+**Status:** approved; mechanism resolved to (c) post-hoc correction
 **Branch:** feat/hand-scene-metric-coupling
+
+## Design update (2026-06-23): mechanism is (c) post-hoc, not in-head
+
+Codebase investigation showed the validated metric depth is `gs_depth` (rendered by
+the GS head), and the GS head runs **after** the hand head in `worldmirror.forward`.
+The pre-hand-head depth head (`preds["depth"]`) is disabled and unsupervised in the
+working configs. So the original "feed scene depth into `dec_trans`" (in-head) cannot
+see the good depth.
+
+Resolved (approved) to **mechanism (c): a learned, feedforward, post-hoc root-depth
+correction**. After the model produces `params` and `gs_depth`, we project the
+predicted wrist, sample `gs_depth` there, and a small trained module emits a depth
+shift `Δz` applied to the root (rigidly shifting the hand in camera depth). It reuses
+the validated 8% `gs_depth`, samples at the true wrist (not a bbox proxy), needs no new
+depth objective, and stays end-to-end feedforward (gradients flow, no test-time
+optimisation or temporal filtering). `gs_depth` is **detached** as a fixed reference,
+which (with a frozen backbone) rules out the circularity risk below. The sections that
+follow describe the original in-head framing; the authoritative mechanism is (c) as
+captured here and in the implementation plan.
 
 ## Problem and goal
 
