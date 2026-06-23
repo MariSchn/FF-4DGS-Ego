@@ -1,0 +1,112 @@
+# ==================================================================
+# P3-ROOTTRANS: engineering attack on the hand-root absolute placement.
+# ------------------------------------------------------------------
+# Diagnosis (2026-06-22, confirmed to Cyrus): W-MPJPE is NOT scale-limited
+# (scale unbiased ~0.98 vs GT) and NOT articulation-limited (root-relative
+# C-MPJPE ~41.6mm ties Hand3R). The residual lives entirely in the hand head's
+# ABSOLUTE root translation - the camera-depth of the wrist - whose per-frame
+# variance accumulates into W (C-abs ~102mm -> W ~327mm; GT re-anchor every 16
+# frames collapses W to ~65mm).
+#
+# Cyrus's pre-contact engineering ask: (1) give the root translation its own
+# estimator instead of sharing the dec_pose projection, and (2) supervise it
+# with larger weights. This run does both:
+#   - root_refine: true  -> dedicated zero-init residual branch on transl(3),
+#     so a warm-started head starts identical and only learns a correction.
+#   - transl_z_weight: 3  -> 3x weight on the camera-depth axis of the transl
+#     loss (the under-constrained axis), on top of the restored transl + kp3d_abs.
+#
+# Forked from exp_p3_wabs.yaml. The ONLY deltas vs wabs are root_refine and
+# transl_z_weight, so roottrans-vs-wabs cleanly isolates the two new levers
+# (wabs = loss-weight-only baseline). Backbone + GS FROZEN (cheap probe).
+# ==================================================================
+data:
+  data_root: "/work/courses/3dv/team25/data/hot3d_aria/preprocessed_pinhole_f609"
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.01
+  num_workers: 4
+# ------------------------------------------------------------------
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/work/courses/3dv/team25/checkpoints/default/hand_head_final.pt"
+  freeze_backbone: true       # backbone frozen (cheap probe)
+  enable_scale_head: false    # pure absolute-placement, no metric-coupling
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: false            # hand-head-only retrain needs no GS rasterization
+  hand_to_gs_injection:
+    enabled: false
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+    root_refine: true         # <-- NEW: dedicated zero-init root-translation residual branch
+# ------------------------------------------------------------------
+loss_weights:
+  kp3d:          0.05         # root-relative shape — keep, protects articulation/WA
+  kp3d_abs:      0.3          # absolute camera-frame joints incl. metric depth
+  kp2d:          0.05         # 2D reprojection consistency
+  global_orient: 0.01
+  hand_pose:     0.01
+  betas:         0.01
+  transl:        1.0          # direct root-translation supervision (same as wabs)
+  transl_z_weight: 3.0        # <-- NEW: 3x weight on the camera-depth axis of transl
+  gs_l1:         0.0
+  gs_lpips:      0.0
+  hand_depth_anchor: 0.0
+# ------------------------------------------------------------------
+metric_scale:
+  enable: true                # eval-time only; harmless during training
+  clamp: [0.1, 10.0]
+# ------------------------------------------------------------------
+training:
+  lr: 2e-5                    # same as wabs for comparability; raise if abs depth won't move
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 4               # frozen backbone (no_grad) -> cheap
+  grad_accum_steps: 8         # effective batch ~32
+  use_amp: true
+  log_every: 25
+  val_every: 50
+  val_max_batches: 12
+  save_every: 1000000         # only final lands (scratch/$HOME quota-blocked)
+  grad_clip_norm: 5.0
+  kp3d_abs_warmup_steps: 50   # ramp the abs loss in fast
+  freeze_gs_head: true
+  keep_last_checkpoints: 0
+  seed: 42
+  output_dir: "/work/courses/3dv/team25/checkpoints/p3_roottrans"
+# ------------------------------------------------------------------
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 4
+# ------------------------------------------------------------------
+hand_crop:
+  rescale_factor: 1.5
+# ------------------------------------------------------------------
+debug:
+  enabled: false
+  max_sequences: 5
+  single_frame: false
+# ------------------------------------------------------------------
+wandb:
+  enabled: false
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "P3-ROOTTRANS: dedicated root branch + z-weighted transl (frozen backbone)"
+  tags: []
+  notes: null

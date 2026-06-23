@@ -1,0 +1,109 @@
+# ==================================================================
+# P3-WABS: attack W directly via the hand head's ABSOLUTE depth.
+# ------------------------------------------------------------------
+# Diagnosis (2026-06-22): W-MPJPE on HOI4D is NOT scale-limited (flat across
+# 3 scales) and NOT pose-limited (oracle with GT extrinsics = 363.7mm ~= chained
+# 353mm). It is capped by the hand head's ABSOLUTE camera-frame placement: the
+# hand-root depth-from-camera. Articulation/shape already transfer well
+# (WA 21/47mm, root-rel C-MPJPE 93mm); only ABSOLUTE depth is off (~365mm).
+#
+# The deployed head (warm_start below) was trained from the DEFAULT config, which
+# has NO kp3d_abs key -> absolute-3D keypoint supervision was effectively 0.0.
+# This run turns it ON and strongly up-weights it, and restores the direct
+# param-space translation loss, so the head is forced to ground the hand's
+# absolute metric placement in image evidence rather than regressing a prior.
+#
+# Cheap first probe: backbone + GS head FROZEN (only the hand head trains), no
+# scale head, no GS losses. If W/oracle on HOI4D drops -> W was supervision-
+# limited (tune further / extend). If it barely moves -> the residual is a
+# HOT3D->HOI4D domain/scale gap and the next step is HOI4D fine-tuning.
+# Forked from exp_p3_scalehead.yaml; only the loss mix + freeze knobs differ.
+# ==================================================================
+data:
+  data_root: "/work/courses/3dv/team25/data/hot3d_aria/preprocessed_pinhole_f609"
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.01
+  num_workers: 4
+# ------------------------------------------------------------------
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/work/courses/3dv/team25/checkpoints/default/hand_head_final.pt"
+  freeze_backbone: true       # backbone frozen (cheap probe; unfreeze only if depth is capacity-limited)
+  enable_scale_head: false    # not the metric-coupling run; pure absolute-placement
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: false            # OFF: hand-head-only retrain needs no GS rasterization (the original hand-only path; ~20-40s/it faster)
+  hand_to_gs_injection:
+    enabled: false            # injection is hand->GS; irrelevant with GS off and for pure hand-head training
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+# ------------------------------------------------------------------
+loss_weights:
+  kp3d:          0.05         # root-relative shape — keep, protects articulation/WA
+  kp3d_abs:      0.3          # <-- THE W LEVER: absolute camera-frame joints incl. metric depth (was 0.0 in deployed head)
+  kp2d:          0.05         # 2D reprojection consistency
+  global_orient: 0.01
+  hand_pose:     0.01
+  betas:         0.01
+  transl:        1.0          # <-- restore direct root-translation supervision (was 0.1; default 3.2)
+  gs_l1:         0.0          # GS frozen: no reconstruction training
+  gs_lpips:      0.0
+  hand_depth_anchor: 0.0      # not the coupling run
+# ------------------------------------------------------------------
+metric_scale:
+  enable: true                # eval-time only; harmless during training
+  clamp: [0.1, 10.0]
+# ------------------------------------------------------------------
+training:
+  lr: 2e-5                    # nudge the warm-started head without wrecking articulation; raise if abs depth won't move
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 4               # frozen backbone (no_grad) -> cheap
+  grad_accum_steps: 8         # effective batch ~32
+  use_amp: true
+  log_every: 25
+  val_every: 50
+  val_max_batches: 12
+  save_every: 1000000         # > run length: no multi-GB mid-run checkpoints (scratch/$HOME quota-blocked); only final lands
+  grad_clip_norm: 5.0
+  kp3d_abs_warmup_steps: 50   # short: the abs loss is the point of this run, ramp it in fast
+  freeze_gs_head: true        # keep the GS (gs_head + injection) frozen
+  keep_last_checkpoints: 0
+  seed: 42
+  output_dir: "/work/courses/3dv/team25/checkpoints/p3_wabs"  # team25 hosts checkpoints; scratch quota exhausted, $HOME inode-pressured
+# ------------------------------------------------------------------
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 4
+# ------------------------------------------------------------------
+hand_crop:
+  rescale_factor: 1.5
+# ------------------------------------------------------------------
+debug:
+  enabled: false
+  max_sequences: 5
+  single_frame: false
+# ------------------------------------------------------------------
+wandb:
+  enabled: false
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "P3-WABS: absolute hand-depth retrain (frozen backbone, kp3d_abs up)"
+  tags: []
+  notes: null

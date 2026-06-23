@@ -145,7 +145,7 @@ def _safe_quat_to_rotmat(q_wxyz: torch.Tensor) -> torch.Tensor:
 
 
 class ParameterLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, transl_axis_w=None):
         """MANO parameter loss — split into (transl, global_orient, hand_pose, betas).
 
         Mirrors HaMeR's convention (models/hamer/hamer/models/hamer.py:174-184):
@@ -157,6 +157,16 @@ class ParameterLoss(nn.Module):
         """
         super(ParameterLoss, self).__init__()
         self.loss_fn = nn.MSELoss(reduction='none')
+        if transl_axis_w is None:
+            transl_axis_w = (1.0, 1.0, 1.0)
+        # Per-axis weights on the camera-frame transl(3) loss. Axis 2 is the
+        # camera-depth offset of the wrist (transl_cam = j0_cam - j0_canon), the
+        # under-constrained axis the W-MPJPE diagnostic blamed. Up-weighting it
+        # (e.g. (1, 1, 3)) focuses supervision on root depth without touching
+        # the lateral axes. Registered as a buffer so .to(device) carries it.
+        self.register_buffer(
+            "transl_axis_w", torch.tensor(transl_axis_w, dtype=torch.float32)
+        )
 
     @staticmethod
     def _masked_mean(err: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -190,8 +200,9 @@ class ParameterLoss(nn.Module):
         # [B, S, 2, 1] for per-slice broadcasting
         mask = has_param.to(dtype).view(B, S, NUM_HANDS, 1)
 
-        # --- translation (3) ---
+        # --- translation (3), per-axis weighted (axis 2 = camera depth) ---
         transl_err = self.loss_fn(pred[..., _TRANSL_SLICE], gt[..., _TRANSL_SLICE])
+        transl_err = transl_err * self.transl_axis_w.to(transl_err.dtype)
         loss_transl = self._masked_mean(transl_err, mask)
 
         # --- global orient (4-d quaternion → 3x3 rotmat MSE) ---

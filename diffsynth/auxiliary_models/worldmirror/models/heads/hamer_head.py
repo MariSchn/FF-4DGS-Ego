@@ -10,6 +10,8 @@ from einops import rearrange
 from torchvision.ops import roi_align
 import torch.nn.functional as F
 
+from .hires_hand_encoder import HiResHandEncoder
+
 
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.0):
@@ -111,11 +113,16 @@ class HamerManoHead(nn.Module):
         crop_size=8,
         patch_size=14,
         crop_global_depth=1,
+        hires_hand=False,
+        hires_hand_kwargs=None,
+        root_refine=False,
     ):
         super().__init__()
         self.use_crop = use_crop
+        self.root_refine = bool(root_refine)
         self.crop_size = crop_size
         self.patch_size = patch_size
+        self.hires_hand = bool(hires_hand)
 
         self.context_norm = nn.LayerNorm(context_dim)
         self.context_proj = nn.Linear(context_dim, dim)
@@ -138,6 +145,13 @@ class HamerManoHead(nn.Module):
                 dropout=dropout, context_dim=dim,
             )
 
+        # High-res hand-crop encoder branch. Encodes a native-res (e.g. 256 px)
+        # crop per hand into a token sequence at `dim`, fused as extra key/value
+        # tokens for the regression cross-attention. Off by default -> the 224 px
+        # crop path is untouched.
+        if self.hires_hand:
+            self.hires_encoder = HiResHandEncoder(out_dim=dim, **(hires_hand_kwargs or {}))
+
         self.transformer = TransformerCrossAttn(
             dim, depth, heads, dim_head, mlp_dim, dropout=dropout, context_dim=dim,
         )
@@ -151,9 +165,35 @@ class HamerManoHead(nn.Module):
         nn.init.xavier_uniform_(self.dec_pose.weight, gain=0.01)
         nn.init.xavier_uniform_(self.dec_betas.weight, gain=0.01)
 
+        # Dedicated root-translation branch. The diagnostic (2026-06-22) localised
+        # the world-space error to the hand-root absolute placement (camera-depth
+        # of the wrist), while articulation/shape already transfer well. Giving
+        # the root translation its own non-linear branch lets it specialise
+        # instead of sharing the shared 22-D dec_pose projection with rot+pose.
+        # It predicts a RESIDUAL added onto dec_pose's transl(3); the final layer
+        # is zero-initialised so a warm-started head starts identical to before
+        # and only learns a correction from the (heavily weighted) transl/abs3d
+        # supervision.
+        if self.root_refine:
+            self.dec_trans = nn.Sequential(
+                nn.Linear(dim, dim // 4),
+                nn.GELU(),
+                nn.Linear(dim // 4, 3),
+            )
+            nn.init.zeros_(self.dec_trans[-1].weight)
+            nn.init.zeros_(self.dec_trans[-1].bias)
+
     def _decode_hand(self, token):
         """Decode a single hand's MANO parameters from a transformer output token."""
-        return torch.cat([self.dec_pose(token), self.dec_betas(token)], dim=-1)
+        pose = self.dec_pose(token)      # [N, 22] = transl(3) + rot(4) + pose(15)
+        betas = self.dec_betas(token)    # [N, 10]
+        if self.root_refine:
+            # Add the residual to transl(3) only; pad the rest with zeros so
+            # rot/pose stay untouched. Non-in-place to keep autograd happy.
+            dt = self.dec_trans(token)   # [N, 3]
+            pad = torch.zeros_like(pose[..., 3:])
+            pose = pose + torch.cat([dt, pad], dim=-1)
+        return torch.cat([pose, betas], dim=-1)
 
     def _prepare_rois(self, hand_bboxes, B, S, H, W):
         """Convert normalised [0,1] bboxes to roi_align format [batch_idx, x1, y1, x2, y2] in pixels."""
@@ -167,7 +207,19 @@ class HamerManoHead(nn.Module):
         rois = torch.cat([batch_idx.reshape(-1, 1), bboxes_pixel.reshape(-1, 4)], dim=1)
         return rois  # [N*2, 5]
 
-    def forward(self, token_list, images, patch_start_idx, hand_bboxes=None, hand_valid=None):
+    def _encode_hires(self, hand_crops, N):
+        """Encode native-res hand crops -> per-hand token sequence [N*2, T, dim].
+
+        hand_crops: [B, S, 2, 3, P, P] in [0,1] (left, right). Returns the encoded
+        tokens flattened to [N*2, T, dim] so they align with the per-hand crop
+        tokens (which are ordered [N*2, ...] = left/right interleaved per frame).
+        """
+        P = hand_crops.shape[-1]
+        crops = hand_crops.reshape(N * 2, 3, P, P)
+        return self.hires_encoder(crops)  # [N*2, T, dim]
+
+    def forward(self, token_list, images, patch_start_idx, hand_bboxes=None,
+                hand_valid=None, hand_crops=None):
         B, S = images.shape[:2]
         N = B * S
 
@@ -220,11 +272,25 @@ class HamerManoHead(nn.Module):
             context = self.crop_to_global(crop_ctx, context=global_ctx)  # [N*2, crop^2, dim]
             enhanced_crop_tokens = context  # keep [N*2, crop^2, dim] view for downstream consumers
 
-            # Reshape from [N*2, crop^2, dim] → [N, 2*crop^2, dim] so both
-            # hands' crop features are concatenated.  This lets the query
-            # tokens self-attend across hands (bilateral reasoning) instead
-            # of being processed in isolation.
-            context = context.reshape(N, 2 * self.crop_size * self.crop_size, -1)  # [N, 2*crop^2, dim]
+            # High-res hand-crop branch: encode the native-res per-hand crop and
+            # append its tokens to that hand's feature-space crop tokens. The
+            # regression cross-attention then attends over BOTH the 224 px feature
+            # crop and the high-frequency native crop. enhanced_crop_tokens (the
+            # GS-injection view) is left untouched at its original shape.
+            per_hand_ctx = context  # [N*2, crop^2, dim]
+            n_ctx = self.crop_size * self.crop_size
+            if self.hires_hand and hand_crops is not None:
+                hires_tokens = self._encode_hires(hand_crops, N)  # [N*2, T, dim]
+                if hand_valid is not None:
+                    hires_tokens = hires_tokens * hand_valid.reshape(N * 2, 1, 1).float()
+                per_hand_ctx = torch.cat([per_hand_ctx, hires_tokens], dim=1)  # [N*2, crop^2+T, dim]
+                n_ctx = per_hand_ctx.shape[1]
+
+            # Reshape from [N*2, n_ctx, dim] → [N, 2*n_ctx, dim] so both hands'
+            # crop features are concatenated.  This lets the query tokens
+            # self-attend across hands (bilateral reasoning) instead of being
+            # processed in isolation.
+            context = per_hand_ctx.reshape(N, 2 * n_ctx, -1)  # [N, 2*n_ctx, dim]
 
             # Two query tokens kept together: [N, 2, dim]
             queries = self.query_tokens.expand(N, -1, -1)  # [N, 2, dim]

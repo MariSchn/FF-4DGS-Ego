@@ -32,6 +32,8 @@ from diffsynth.utils.auxiliary import load_video
 
 from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
 from scripts.hand_depth_anchor_loss import hand_depth_anchor_loss
+from scripts.object_depth_loss import object_depth_loss
+from scripts.scale_head_loss import scale_head_loss
 from scripts.hand_metrics import metric_chunks_from_batch, metrics_from_chunks
 from scripts.gs_metrics import (
     LPIPSScorer,
@@ -95,12 +97,23 @@ class HOT3DHandDataset(Dataset):
     """Sliding-window clips over a list of sequences."""
 
     def __init__(self, seq_dirs, mano_model, num_frames=16, res=(224, 224), clip_stride=None,
-                 use_hand_crop=False, rescale_factor=2.0):
+                 use_hand_crop=False, rescale_factor=2.0,
+                 objects_dir=None, render_obj_depth=False, obj_render_res=224):
         self.num_frames = num_frames
         self.mano_model = mano_model
         self.res = res
         self.use_hand_crop = use_hand_crop
         self.rescale_factor = rescale_factor
+        # GT object-depth supervision (Cyrus direction a): render metric object
+        # depth from the raw HOT3D meshes per clip frame, in the dataloader worker.
+        self.objects_dir = objects_dir
+        self.render_obj_depth = bool(render_obj_depth and objects_dir)
+        self.obj_render_res = obj_render_res
+        self._obj_avail = (
+            {p[:-4] for p in os.listdir(objects_dir) if p.endswith(".glb")}
+            if self.render_obj_depth else set()
+        )
+        self._frame_objects_cache = {}  # raw_seq -> frame_objects | None (lazy, per worker)
         self.clips = []
         from collections import OrderedDict
         self.video_readers = OrderedDict()
@@ -268,6 +281,7 @@ class HOT3DHandDataset(Dataset):
                     "gt_joints":    seq_gt_joints[start : end].clone(),
                     "frame_offset": start,
                     "seq_path":     seq_path,
+                    "n_video":      n_video,
                 }
                 if self.use_hand_crop:
                     clip["hand_bboxes"] = [b.clone() for b in bbox_frames[start : start + num_frames]]
@@ -363,7 +377,67 @@ class HOT3DHandDataset(Dataset):
             out["cam_extrinsics"] = clip["cam_extrinsics"]  # [S, 4, 4]
             out["cam_intrinsics"] = clip["cam_intrinsics"]  # [3]
 
+        if self.render_obj_depth and "cam_extrinsics" in clip:
+            od_maps, od_masks = self._render_clip_obj_depth(clip)
+            out["gt_obj_depth"] = od_maps   # [S, R, R] metres (0 where no object)
+            out["gt_obj_mask"]  = od_masks  # [S, R, R] bool
+
         return out
+
+    def _render_clip_obj_depth(self, clip):
+        """Render GT metric object depth for a clip's frames (dataloader-worker side).
+
+        Mirrors scripts.eval_scene_metric_gt: map the preprocessed seq to its raw
+        HOT3D seq (object poses + meshes), build frame-aligned object poses once
+        per seq, and project each frame's meshes to a per-pixel z-min depth at the
+        chosen render resolution. ``gs_depth`` is later sampled by the SAME
+        normalized grid, so the render res need not match the model's depth res.
+        """
+        from scripts.b2_render_object_depth import build_frame_objects, render_object_depth
+
+        R = self.obj_render_res
+        S = self.num_frames
+        zeros = torch.zeros(S, R, R, dtype=torch.float32)
+        no_mask = torch.zeros(S, R, R, dtype=torch.bool)
+
+        raw_seq = clip["seq_path"].replace("/preprocessed_pinhole_f609/", "/sequences/")
+        if raw_seq not in self._frame_objects_cache:
+            try:
+                self._frame_objects_cache[raw_seq] = build_frame_objects(raw_seq, clip["n_video"])
+            except Exception:
+                self._frame_objects_cache[raw_seq] = None
+        frame_objects = self._frame_objects_cache[raw_seq]
+        if frame_objects is None:
+            return zeros, no_mask
+
+        try:
+            f0, cx0, cy0 = [float(x) for x in clip["cam_intrinsics"].tolist()]
+            scale = R / (2.0 * cx0)
+            Kf = (f0 * scale, cx0 * scale, cy0 * scale)
+            cam_extr = clip["cam_extrinsics"]  # [S, 4, 4] T_cam_world (validated w2c)
+            fo = clip["frame_offset"]
+        except Exception:
+            return zeros, no_mask
+
+        depths, masks = [], []
+        for s in range(S):
+            # A single bad frame (degenerate pose, unreadable mesh, projection
+            # edge case) must never crash the dataloader worker -> the whole job.
+            # On any failure this frame just contributes no object supervision.
+            try:
+                fi = fo + s
+                if fi >= len(frame_objects):
+                    raise IndexError
+                objs = [(u, T) for (u, T) in frame_objects[fi] if u in self._obj_avail]
+                if not objs:
+                    raise ValueError
+                T_cam_world = cam_extr[s].double().numpy()
+                od, om = render_object_depth(objs, T_cam_world, Kf, R, R, self.objects_dir)
+                od = torch.where(om, od.float(), torch.zeros_like(od, dtype=torch.float32))
+                depths.append(od); masks.append(om)
+            except Exception:
+                depths.append(zeros[s].clone()); masks.append(no_mask[s].clone())
+        return torch.stack(depths), torch.stack(masks)
 
     @staticmethod
     def _compute_projected_bboxes(seq_path, n_video, hand_ts_sorted, gt_per_frame,
@@ -730,7 +804,7 @@ def discover_sequences(data_root):
 # ------------------------------------------------------------------
 
 def build_views(imgs, num_frames, device, hand_bboxes=None, hand_valid=None,
-                 crop_local_output=False):
+                 crop_local_output=False, hand_crops=None):
     B, _, _, H, W = imgs.shape
     views = {
         "img":          imgs,
@@ -746,6 +820,8 @@ def build_views(imgs, num_frames, device, hand_bboxes=None, hand_valid=None,
         views["hand_bboxes"] = hand_bboxes
     if hand_valid is not None:
         views["hand_valid"] = hand_valid
+    if hand_crops is not None:
+        views["hand_crops"] = hand_crops
     if crop_local_output:
         views["crop_local_output"] = True
     return views
@@ -840,6 +916,8 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
         "kp3d": 0.0, "kp3d_abs": 0.0, "kp2d": 0.0,
         "gs_l1": 0.0, "gs_lpips": 0.0,
         "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
+        "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
+        "scale_head": 0.0, "scale_residual_m": 0.0,
     }
     captured = {}
     gs_captured = {}
@@ -966,6 +1044,28 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 )
                 anchor_residual_m = _anchor_info["hand_depth_residual_m"]
 
+            # GT object-depth supervision (mirror of the train loop; default kwargs).
+            loss_obj_depth = torch.zeros((), device=device)
+            obj_depth_residual_m = 0.0
+            if gs_depth_pred is not None and "gt_obj_depth" in vbatch:
+                loss_obj_depth, _obj_info = object_depth_loss(
+                    gs_depth_pred, vbatch["gt_obj_depth"].to(device),
+                    vbatch["gt_obj_mask"].to(device),
+                )
+                obj_depth_residual_m = _obj_info["obj_depth_residual_m"]
+
+            # Scale-head supervision (mirror of the train loop; default kwargs).
+            loss_scale_head = torch.zeros((), device=device)
+            scale_residual_m = 0.0
+            pred_scale = preds.get("pred_scale")
+            if (pred_scale is not None and gs_depth_pred is not None
+                    and "cam_intrinsics" in vbatch):
+                loss_scale_head, _sh_info = scale_head_loss(
+                    pred_scale, pred_joints, gs_depth_pred, has_hand,
+                    vbatch["cam_intrinsics"].to(device),
+                )
+                scale_residual_m = _sh_info["scale_residual_m"]
+
             loss = (
                 loss_weights["transl"]        * param_losses["transl"]
                 + loss_weights["global_orient"] * param_losses["global_orient"]
@@ -977,6 +1077,8 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 + loss_weights.get("gs_l1", 0.0)    * loss_gs_l1
                 + loss_weights.get("gs_lpips", 0.0) * loss_gs_lpips
                 + loss_weights.get("hand_depth_anchor", 0.0) * loss_hand_anchor
+                + loss_weights.get("obj_depth", 0.0) * loss_obj_depth
+                + loss_weights.get("scale_head", 0.0) * loss_scale_head
             )
 
             val_loss += loss.item()
@@ -989,6 +1091,10 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             val_terms["gs_lpips"] += loss_gs_lpips.item()
             val_terms["hand_depth_anchor"]    += loss_hand_anchor.item()
             val_terms["hand_depth_residual_m"] += anchor_residual_m
+            val_terms["obj_depth"]    += loss_obj_depth.item()
+            val_terms["obj_depth_residual_m"] += obj_depth_residual_m
+            val_terms["scale_head"]   += loss_scale_head.item()
+            val_terms["scale_residual_m"] += scale_residual_m
 
             # Hand-overlay capture needs a second, camera-space forward pass.
             # Only run it when this batch actually holds a target clip — avoids
@@ -1146,7 +1252,12 @@ def train():
 
     criterion_kp3d  = Keypoint3DLoss(loss_type='l2').to(device)
     criterion_kp2d  = Keypoint2DLoss(loss_type='l1').to(device)
-    criterion_param = ParameterLoss().to(device)
+    # Per-axis transl weighting: up-weight axis 2 (camera depth) to attack the
+    # hand-root absolute-placement error the W-MPJPE diagnostic localised.
+    _transl_z_w = float(cfg["loss_weights"].get("transl_z_weight", 1.0))
+    criterion_param = ParameterLoss(transl_axis_w=(1.0, 1.0, _transl_z_w)).to(device)
+    if _transl_z_w != 1.0:
+        print(f"ParameterLoss: transl depth-axis weight = {_transl_z_w}")
 
     # Optimizer parameter groups. Hand head is always trained. When the GS
     # branch is enabled we additionally train gs_head and (if built) the
@@ -1160,8 +1271,39 @@ def train():
         if getattr(model, "hand_to_gs_injection", None) is not None
         else []
     )
+    scale_head_params = (
+        list(model.scale_head.parameters())
+        if getattr(model, "enable_scale_head", False) else []
+    )
+    # Scale-head route (Cyrus direction b): keep the GS frozen, learn only the
+    # global scale (+ the hand head). Drop gs_head + injection from training.
+    freeze_gs_head = bool(training_cfg.get("freeze_gs_head", False))
+    if freeze_gs_head:
+        for p in gs_head_params + injection_params:
+            p.requires_grad = False
+        gs_head_params, injection_params = [], []
+    # Partial unfreeze (Cyrus direction a): keep the backbone frozen but re-enable
+    # grad on the LAST N frame+global transformer blocks, so the metric-depth
+    # supervision can reshape the deep features without destabilising the whole
+    # encoder. The Gaussian head + injection are trained regardless (heads are
+    # never frozen). freeze_backbone stays true; we flip the forward's grad gate
+    # via model._backbone_trainable so autograd actually reaches the unfrozen blocks.
+    unfreeze_n = int(training_cfg.get("unfreeze_last_n_blocks", 0))
+    backbone_unfrozen = []
+    if getattr(model, "freeze_backbone", True) and unfreeze_n > 0:
+        vgt = model.visual_geometry_transformer
+        for blocks in (getattr(vgt, "frame_blocks", []), getattr(vgt, "global_blocks", [])):
+            for blk in list(blocks)[-unfreeze_n:]:
+                for p in blk.parameters():
+                    p.requires_grad = True
+                    backbone_unfrozen.append(p)
+        model._backbone_trainable = True
+        print(f"Partial unfreeze: last {unfreeze_n} frame+global blocks "
+              f"({sum(p.numel() for p in backbone_unfrozen):,} params)")
+
     if getattr(model, "freeze_backbone", True):
-        trainable_params = hand_params + gs_head_params + injection_params
+        trainable_params = (hand_params + gs_head_params + injection_params
+                            + backbone_unfrozen + scale_head_params)
     else:
         # UNFREEZE experiment: freeze_backbone=false leaves the encoder's
         # requires_grad=True but the encoder is NOT in the lists above, so it
@@ -1170,12 +1312,13 @@ def train():
         # anchor are the metric-depth signal). See exp_p2_pinhole_unfreeze.yaml.
         trainable_params = [p for p in model.parameters() if p.requires_grad]
     n_backbone = sum(p.numel() for p in trainable_params) - sum(
-        p.numel() for p in hand_params + gs_head_params + injection_params)
+        p.numel() for p in hand_params + gs_head_params + injection_params + scale_head_params)
     print(
         "Trainable parameters: "
         f"hand={sum(p.numel() for p in hand_params):,} "
         f"gs_head={sum(p.numel() for p in gs_head_params):,} "
         f"injection={sum(p.numel() for p in injection_params):,} "
+        f"scale_head={sum(p.numel() for p in scale_head_params):,} "
         f"backbone(unfrozen)={n_backbone:,} "
         f"total={sum(p.numel() for p in trainable_params):,}"
     )
@@ -1213,9 +1356,29 @@ def train():
     grad_clip_norm = float(training_cfg.get("grad_clip_norm", 10.0))
     kp3d_abs_warmup_steps = int(training_cfg.get("kp3d_abs_warmup_steps", 0))
 
+    # GT object-depth supervision config (the direct metric-depth signal).
+    obj_cfg = cfg.get("obj_depth", {})
+    w_obj_depth = cfg["loss_weights"].get("obj_depth", 0.0)
+    obj_margin = float(obj_cfg.get("margin", 0.05))
+    obj_depth_min = float(obj_cfg.get("depth_min", 0.01))
+    obj_depth_max = float(obj_cfg.get("depth_max", 50.0))
+    obj_warmup_steps = int(obj_cfg.get("warmup_steps", 0))
+    obj_render_res = int(obj_cfg.get("render_res", 224))
+    objects_dir = obj_cfg.get("objects_dir")
+    render_obj_depth = w_obj_depth > 0.0 and objects_dir is not None
+
+    # Scale-head supervision config (direction b: feedforward global metric scale).
+    scale_cfg = cfg.get("scale_head", {})
+    w_scale_head = cfg["loss_weights"].get("scale_head", 0.0)
+    scale_margin = float(scale_cfg.get("margin", 0.05))
+    scale_depth_min = float(scale_cfg.get("depth_min", 0.01))
+    scale_warmup_steps = int(scale_cfg.get("warmup_steps", 0))
+
     ds_kwargs = dict(
         num_frames=num_frames, res=res, clip_stride=clip_stride,
         use_hand_crop=use_hand_crop, rescale_factor=rescale_factor,
+        objects_dir=objects_dir, render_obj_depth=render_obj_depth,
+        obj_render_res=obj_render_res,
     )
 
     if debug_cfg.get("single_frame", False):
@@ -1495,6 +1658,8 @@ def train():
             "kp3d": 0.0, "kp3d_abs": 0.0, "kp2d": 0.0,
             "gs_l1": 0.0, "gs_lpips": 0.0,
             "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
+        "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
+        "scale_head": 0.0, "scale_residual_m": 0.0,
         }
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
@@ -1644,8 +1809,36 @@ def train():
                     direction=anchor_direction,
                 )
                 anchor_residual_m = _anchor_info["hand_depth_residual_m"]
+            # GT object-depth supervision: pull gs_depth toward the metric object
+            # depth on the non-hand object surfaces (the region B2 falsified).
+            loss_obj_depth = torch.zeros((), device=device)
+            obj_depth_residual_m = 0.0
+            if (w_obj_depth > 0.0 and gs_depth_pred is not None
+                    and "gt_obj_depth" in batch):
+                loss_obj_depth, _obj_info = object_depth_loss(
+                    gs_depth_pred, batch["gt_obj_depth"].to(device),
+                    batch["gt_obj_mask"].to(device),
+                    margin=obj_margin, depth_min=obj_depth_min, depth_max=obj_depth_max,
+                )
+                obj_depth_residual_m = _obj_info["obj_depth_residual_m"]
+
+            # Scale-head supervision: train pred_scale so s*gs_depth matches the hand.
+            loss_scale_head = torch.zeros((), device=device)
+            scale_residual_m = 0.0
+            pred_scale = preds.get("pred_scale")
+            if (w_scale_head > 0.0 and pred_scale is not None
+                    and gs_depth_pred is not None and "cam_intrinsics" in batch):
+                loss_scale_head, _sh_info = scale_head_loss(
+                    pred_scale, pred_joints, gs_depth_pred, has_hand,
+                    batch["cam_intrinsics"].to(device),
+                    margin=scale_margin, depth_min=scale_depth_min,
+                )
+                scale_residual_m = _sh_info["scale_residual_m"]
+
             anchor_ramp = min(1.0, global_step / anchor_warmup_steps) if anchor_warmup_steps > 0 else 1.0
             abs_ramp = min(1.0, global_step / kp3d_abs_warmup_steps) if kp3d_abs_warmup_steps > 0 else 1.0
+            obj_ramp = min(1.0, global_step / obj_warmup_steps) if obj_warmup_steps > 0 else 1.0
+            scale_ramp = min(1.0, global_step / scale_warmup_steps) if scale_warmup_steps > 0 else 1.0
 
             w = cfg["loss_weights"]
             loss = (
@@ -1659,6 +1852,8 @@ def train():
                 + w.get("gs_l1", 0.0)    * loss_gs_l1
                 + w.get("gs_lpips", 0.0) * loss_gs_lpips
                 + w.get("hand_depth_anchor", 0.0) * anchor_ramp * loss_hand_anchor
+                + w.get("obj_depth", 0.0) * obj_ramp * loss_obj_depth
+                + w.get("scale_head", 0.0) * scale_ramp * loss_scale_head
             )
 
             # Isolation mode: backward each weighted term alone on this batch,
@@ -1669,6 +1864,8 @@ def train():
                 named_terms = [
                     ("kp3d_abs(w*ramp)",          w.get("kp3d_abs", 0.0) * abs_ramp * loss_kp3d_abs),
                     ("hand_depth_anchor(w*ramp)", w.get("hand_depth_anchor", 0.0) * anchor_ramp * loss_hand_anchor),
+                    ("obj_depth(w*ramp)",         w.get("obj_depth", 0.0) * obj_ramp * loss_obj_depth),
+                    ("scale_head(w*ramp)",        w.get("scale_head", 0.0) * scale_ramp * loss_scale_head),
                     ("kp2d(w)",                   w["kp2d"] * loss_kp2d),
                     ("gs_lpips(w)",               w.get("gs_lpips", 0.0) * loss_gs_lpips),
                     ("gs_l1(w)",                  w.get("gs_l1", 0.0) * loss_gs_l1),
@@ -1730,6 +1927,10 @@ def train():
             accum_terms["gs_lpips"] += loss_gs_lpips.item()
             accum_terms["hand_depth_anchor"]    += loss_hand_anchor.item()
             accum_terms["hand_depth_residual_m"] += anchor_residual_m
+            accum_terms["obj_depth"]    += loss_obj_depth.item()
+            accum_terms["obj_depth_residual_m"] += obj_depth_residual_m
+            accum_terms["scale_head"]   += loss_scale_head.item()
+            accum_terms["scale_residual_m"] += scale_residual_m
 
             if (batch_idx + 1) % grad_accum_steps == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=grad_clip_norm)
@@ -1757,6 +1958,8 @@ def train():
                     "kp3d": 0.0, "kp3d_abs": 0.0, "kp2d": 0.0,
                     "gs_l1": 0.0, "gs_lpips": 0.0,
                     "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
+        "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
+        "scale_head": 0.0, "scale_residual_m": 0.0,
                 }
                 global_step += 1
 
@@ -1805,8 +2008,13 @@ def train():
                     )
                     hm_all = hand_metrics.get("all")
                     if hm_all is not None:
+                        # WRIST_mm = absolute root-joint placement (the W-attack target);
+                        # RR_MPJPE = root-relative shape (the articulation guardrail, must
+                        # not regress); MPJPE = absolute incl. placement (W proxy).
                         tqdm.write(
                             f"  hand_metrics(all): MPJPE={hm_all['MPJPE']:.2f}mm "
+                            f"WRIST={hm_all['WRIST_mm']:.2f}mm "
+                            f"RR_MPJPE={hm_all['RR_MPJPE']:.2f}mm "
                             f"PA={hm_all['PA_MPJPE']:.2f}mm "
                             f"MPVPE={hm_all['MPVPE']:.2f}mm "
                             f"PA={hm_all['PA_MPVPE']:.2f}mm "
