@@ -1,0 +1,61 @@
+"""Orchestration for the Phase-1 scene-depth root anchor: project the predicted
+wrist, sample the (detached) metric gs_depth there, run RootDepthRefine, and apply
+the per-hand depth shift to the joints. Shared by train_hand_head and
+eval_world_space so train-time and eval-time corrections are identical.
+"""
+import os
+
+import torch
+import torch.nn.functional as F
+
+try:
+    from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
+        project_joints_to_norm_pixels, sample_depth_at_joints,
+    )
+except Exception:  # dev machines lack diffsynth's heavy deps (modelscope); load the pure module directly
+    import importlib.util as _ilu
+    _p = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "diffsynth/auxiliary_models/worldmirror/models/utils/hand_depth_sampling.py",
+    )
+    _spec = _ilu.spec_from_file_location("hand_depth_sampling", _p)
+    _hds = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_hds)
+    project_joints_to_norm_pixels = _hds.project_joints_to_norm_pixels
+    sample_depth_at_joints = _hds.sample_depth_at_joints
+
+WRIST_J = 0  # MANO joint 0 = wrist (pelvis_id used by the kp losses)
+
+
+def apply_root_anchor(module, pred_joints, gs_depth, gs_depth_conf, cam_intr):
+    """pred_joints [B,S,2,J,3] camera-frame (m). gs_depth [B,S,1,Hd,Wd] (detached
+    inside). cam_intr [B,3]. Returns (corrected_joints, delta_z [B,S,2], info)."""
+    wrist = pred_joints[:, :, :, WRIST_J:WRIST_J + 1, :]          # [B,S,2,1,3]
+    grid_xy, z = project_joints_to_norm_pixels(wrist, cam_intr)   # [B,S,2,1,2], [B,S,2,1]
+    d_scene, in_frame = sample_depth_at_joints(gs_depth.detach(), grid_xy)  # [B,S,2,1]
+    if gs_depth_conf is not None:
+        conf, _ = sample_depth_at_joints(gs_depth_conf.detach(), grid_xy)
+    else:
+        conf = torch.ones_like(d_scene)
+    wrist_z = z[..., 0]
+    d_scene = d_scene[..., 0]
+    conf = conf[..., 0]
+    in_frame = in_frame[..., 0]
+    in_frame = in_frame & (d_scene > 0.01) & torch.isfinite(d_scene) & torch.isfinite(wrist_z)
+
+    delta_z, gate = module(wrist_z, d_scene, conf, in_frame)       # [B,S,2]
+    corrected = pred_joints.clone()
+    corrected[..., 2] = corrected[..., 2] + delta_z.unsqueeze(-1)  # rigid depth shift per hand
+    info = {"d_scene": d_scene, "wrist_z": wrist_z, "conf": conf, "gate": gate}
+    return corrected, delta_z, info
+
+
+def root_anchor_loss(corrected_wrist_z, d_scene, gate, has_hand, delta_m: float = 0.05):
+    """Gated Huber pulling the corrected wrist depth toward the scene depth.
+    All [B,S,2]. Zero (no grad) when nothing is gated, avoiding an empty-mean NaN."""
+    mask = (gate & (has_hand > 0.5)).float()
+    denom = mask.sum()
+    if float(denom) < 1.0:
+        return corrected_wrist_z.sum() * 0.0
+    per = F.huber_loss(corrected_wrist_z, d_scene, reduction="none", delta=delta_m)
+    return (mask * per).sum() / denom
