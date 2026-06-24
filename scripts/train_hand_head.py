@@ -1275,6 +1275,10 @@ def train():
         list(model.scale_head.parameters())
         if getattr(model, "enable_scale_head", False) else []
     )
+    root_anchor_params = (
+        list(model.root_depth_refine.parameters())
+        if getattr(model, "enable_root_anchor", False) else []
+    )
     # Scale-head route (Cyrus direction b): keep the GS frozen, learn only the
     # global scale (+ the hand head). Drop gs_head + injection from training.
     freeze_gs_head = bool(training_cfg.get("freeze_gs_head", False))
@@ -1303,7 +1307,7 @@ def train():
 
     if getattr(model, "freeze_backbone", True):
         trainable_params = (hand_params + gs_head_params + injection_params
-                            + backbone_unfrozen + scale_head_params)
+                            + backbone_unfrozen + scale_head_params + root_anchor_params)
     else:
         # UNFREEZE experiment: freeze_backbone=false leaves the encoder's
         # requires_grad=True but the encoder is NOT in the lists above, so it
@@ -1312,13 +1316,15 @@ def train():
         # anchor are the metric-depth signal). See exp_p2_pinhole_unfreeze.yaml.
         trainable_params = [p for p in model.parameters() if p.requires_grad]
     n_backbone = sum(p.numel() for p in trainable_params) - sum(
-        p.numel() for p in hand_params + gs_head_params + injection_params + scale_head_params)
+        p.numel() for p in hand_params + gs_head_params + injection_params
+        + scale_head_params + root_anchor_params)
     print(
         "Trainable parameters: "
         f"hand={sum(p.numel() for p in hand_params):,} "
         f"gs_head={sum(p.numel() for p in gs_head_params):,} "
         f"injection={sum(p.numel() for p in injection_params):,} "
         f"scale_head={sum(p.numel() for p in scale_head_params):,} "
+        f"root_anchor={sum(p.numel() for p in root_anchor_params):,} "
         f"backbone(unfrozen)={n_backbone:,} "
         f"total={sum(p.numel() for p in trainable_params):,}"
     )
@@ -1356,6 +1362,10 @@ def train():
     grad_clip_norm = float(training_cfg.get("grad_clip_norm", 10.0))
     kp3d_abs_warmup_steps = int(training_cfg.get("kp3d_abs_warmup_steps", 0))
     max_steps = int(training_cfg.get("max_steps", 0))  # >0: stop after N optimizer steps (bounded probe; final head still saved)
+
+    # Contact Phase 1: scene-depth root anchor (post-hoc, gated). The loss weight is
+    # read inline from cfg["loss_weights"] in the loss sum; only the warmup is needed here.
+    root_anchor_warmup_steps = int(training_cfg.get("root_anchor_warmup_steps", 0))
 
     # GT object-depth supervision config (the direct metric-depth signal).
     obj_cfg = cfg.get("obj_depth", {})
@@ -1718,6 +1728,24 @@ def train():
 
             pred_joints = compute_joints_from_batch(pred_params, mano_model, device)
 
+            # Contact Phase 1: post-hoc root-depth correction toward the metric
+            # scene depth (gs_depth, detached). Reassigns pred_joints to the
+            # corrected joints so the kp3d / kp3d_abs losses below already
+            # supervise the corrected placement. The gated consistency loss needs
+            # has_hand (computed further down), so its inputs are stashed here and
+            # the loss is assembled once has_hand exists.
+            loss_root_anchor = torch.zeros((), device=device)
+            _ra_inputs = None
+            if getattr(model, "enable_root_anchor", False) and "cam_intrinsics" in batch:
+                _gs_depth_ra = preds.get("gs_depth")
+                if _gs_depth_ra is not None:
+                    from scripts.root_depth_anchor import apply_root_anchor
+                    pred_joints, _ra_delta, _ra_info = apply_root_anchor(
+                        model.root_depth_refine, pred_joints, _gs_depth_ra,
+                        preds.get("gs_depth_conf"), batch["cam_intrinsics"].to(device),
+                    )
+                    _ra_inputs = (pred_joints[:, :, :, 0, 2], _ra_info["d_scene"], _ra_info["gate"])
+
             # GS reconstruction loss (L1 + LPIPS) on the rendered views.
             # Gated on model.enable_gs (so disabled-GS configs are bit-for-bit
             # identical to the no-GS codepath) and on lpips_scorer presence.
@@ -1747,6 +1775,14 @@ def train():
             else:
                 gt_pack = gt_params.view(*gt_params.shape[:-1], NUM_HANDS, HAND_PARAM_DIM)
                 has_hand = (gt_pack.abs().sum(dim=-1) > 1e-6).float()
+
+            # Gated consistency loss for the root anchor: pull the corrected wrist
+            # depth toward the metric scene depth, only where the gate is open and a
+            # hand is present (deferred from above so has_hand exists).
+            if _ra_inputs is not None:
+                from scripts.root_depth_anchor import root_anchor_loss
+                _ra_cw, _ra_ds, _ra_gate = _ra_inputs
+                loss_root_anchor = root_anchor_loss(_ra_cw, _ra_ds, _ra_gate, has_hand)
 
             # Parameter loss — split per MANO key, each masked per-hand.
             # Returns dict with 'transl', 'global_orient', 'hand_pose', 'betas'.
@@ -1841,6 +1877,7 @@ def train():
             abs_ramp = min(1.0, global_step / kp3d_abs_warmup_steps) if kp3d_abs_warmup_steps > 0 else 1.0
             obj_ramp = min(1.0, global_step / obj_warmup_steps) if obj_warmup_steps > 0 else 1.0
             scale_ramp = min(1.0, global_step / scale_warmup_steps) if scale_warmup_steps > 0 else 1.0
+            root_anchor_ramp = min(1.0, global_step / root_anchor_warmup_steps) if root_anchor_warmup_steps > 0 else 1.0
 
             w = cfg["loss_weights"]
             loss = (
@@ -1856,6 +1893,7 @@ def train():
                 + w.get("hand_depth_anchor", 0.0) * anchor_ramp * loss_hand_anchor
                 + w.get("obj_depth", 0.0) * obj_ramp * loss_obj_depth
                 + w.get("scale_head", 0.0) * scale_ramp * loss_scale_head
+                + w.get("root_anchor", 0.0) * root_anchor_ramp * loss_root_anchor
             )
 
             # Isolation mode: backward each weighted term alone on this batch,
