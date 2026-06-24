@@ -10,9 +10,11 @@
 # Run on a gb10 node:
 #   srun --account=3dv --gpus=gb10:1 --mem=48G --time=01:30:00 --pty bash run_p4_contact_gb10.sh
 #
-# NOTE: this is a bounded SIGNAL probe (max_steps=80, trains on the eval seqs).
-# It answers "does it run end-to-end and does W move toward 61.5". For a real
-# number, drop the max_steps/debug overrides and eval on a held-out split.
+# NOTE: this is a bounded SIGNAL probe. global_step counts OPTIMIZER steps, so to
+# keep the GS-on train inside the srun we force grad_accum=1 (1 micro-batch per
+# step) and max_steps=50 -> 50 forward+backward passes, ~10-15 min. It answers
+# "does it run end-to-end and does W move toward 61.5". For a real number, drop
+# the overrides (restores grad_accum=8 / full run) and eval on a held-out split.
 set -uo pipefail
 
 source /work/scratch/dmonopoli/venv_gb10/bin/activate
@@ -22,11 +24,11 @@ mkdir -p /tmp/xc /tmp/th /tmp/hf /tmp/mpl
 cd /home/dmonopoli/FF-4DGS-Ego
 DR=/work/courses/3dv/team25/data/hot3d_aria/preprocessed_pinhole_f609
 
-echo "######## TRAIN p4_contact (bounded: max_steps=80) @ $(date) on $(hostname) ########"
+echo "######## TRAIN p4_contact (bounded: 50 opt-steps, grad_accum=1) @ $(date) on $(hostname) ########"
 python -u -m scripts.train_hand_head --config configs/exp_p4_contact.yaml \
-  training.output_dir=/tmp/rt_contact training.max_steps=80 \
+  training.output_dir=/tmp/rt_contact training.max_steps=50 training.grad_accum_steps=1 \
   training.root_anchor_warmup_steps=8 training.kp3d_abs_warmup_steps=8 \
-  training.log_every=5 training.val_every=40 training.val_max_batches=8 \
+  training.log_every=5 training.val_every=25 training.val_max_batches=8 \
   debug.enabled=true debug.max_sequences=8 2>&1 \
   | grep --line-buffered -vE "Loaded GT joints|Loaded 2D GT|No calibration for|\[VIS\]"
 
