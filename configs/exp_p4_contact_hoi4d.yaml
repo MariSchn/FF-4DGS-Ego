@@ -1,0 +1,112 @@
+# ==================================================================
+# P4-CONTACT-HOI4D: camera-frame contact-anchor test on HOI4D.
+# ------------------------------------------------------------------
+# The HOT3D run showed the anchor works mechanically but HOT3D's frozen gs_depth is
+# a worse reference than the head (Δgs ~122mm vs C-abs ~50mm), so it cannot help.
+# HOI4D is the FAIR test: gs_depth is validated (8% AbsRel) via the dense-depth
+# backbone in best_depth.pt, and the HOT3D-trained head is weaker on HOI4D, so the
+# anchor finally has a good reference and a bad head to fix.
+#
+# Key delta vs exp_p4_contact.yaml: warm_start_hand_head -> best_depth.pt. That
+# full-model checkpoint is loaded by build_model's full-dict fallback, bringing the
+# DENSE-DEPTH backbone + GS head (validated gs_depth) AND its hand head. The anchor
+# is trained on HOI4D on top (anchor lr override in the launcher). Camera-frame only
+# (no extrinsics): training uses cam-frame kp losses; eval uses C-abs.
+# data_root is the PREPROCESSED HOI4D output (set by the launcher / --data_root).
+# ==================================================================
+data:
+  data_root: "/tmp/hoi4d_pp"          # preprocessed HOI4D (cam caches); launcher fills this
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.05
+  num_workers: 4
+# ------------------------------------------------------------------
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/work/scratch/dmonopoli/checkpoints/hoi4d_depth/best_depth.pt"  # validated-depth backbone+GS+head
+  freeze_backbone: true
+  enable_scale_head: false
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: true              # gs_depth is the metric anchor reference (validated on HOI4D)
+  enable_root_anchor: true
+  root_anchor_kwargs:
+    hidden: 32
+    conf_thresh: 0.1
+    band_m: 0.5
+  hand_to_gs_injection:
+    enabled: false
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+# ------------------------------------------------------------------
+loss_weights:
+  kp3d:          0.05
+  kp3d_abs:      0.3
+  kp2d:          0.05
+  global_orient: 0.01
+  hand_pose:     0.01
+  betas:         0.01
+  transl:        1.0
+  root_anchor:   1.0
+  gs_l1:         0.0
+  gs_lpips:      0.0
+  hand_depth_anchor: 0.0
+# ------------------------------------------------------------------
+metric_scale:
+  enable: true
+  clamp: [0.1, 10.0]
+# ------------------------------------------------------------------
+training:
+  lr: 2e-5
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 4
+  grad_accum_steps: 8
+  use_amp: true
+  log_every: 10
+  val_every: 40
+  val_max_batches: 8
+  save_every: 1000000
+  grad_clip_norm: 5.0
+  kp3d_abs_warmup_steps: 8
+  root_anchor_warmup_steps: 8
+  root_anchor_lr: 1e-3           # the zero-init anchor MLP needs its own high lr (HOT3D lesson)
+  freeze_gs_head: true
+  keep_last_checkpoints: 0
+  seed: 42
+  output_dir: "/tmp/rt_hoi4d"
+# ------------------------------------------------------------------
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 4
+# ------------------------------------------------------------------
+hand_crop:
+  rescale_factor: 1.5
+# ------------------------------------------------------------------
+debug:
+  enabled: false
+  max_sequences: 20
+  single_frame: false
+# ------------------------------------------------------------------
+wandb:
+  enabled: false
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "P4-CONTACT-HOI4D: cam-frame anchor (validated gs_depth)"
+  tags: []
+  notes: null
