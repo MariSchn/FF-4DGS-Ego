@@ -12,6 +12,16 @@
 # Run on a gb10 node (inside tmux):
 #   srun --account=3dv --gpus=gb10:1 --mem=48G --time=02:00:00 --pty bash run_hoi4d_cam_anchor_gb10.sh
 set -uo pipefail
+# GUARD: venv_gb10 is aarch64 (built for the gb10 nodes). On the x86 LOGIN node its
+# torch .so files can't load (libtorch_global_deps.so OSError). Refuse in 1s instead of
+# failing slowly mid-run. If this trips, you forgot to srun onto a gb10 node first.
+if [ "$(uname -m)" != "aarch64" ]; then
+  echo "ERROR: arch=$(uname -m) (expected aarch64). You are on the x86 LOGIN node, not a"
+  echo "       gb10 compute node. Start an interactive gb10 shell first, THEN re-run:"
+  echo "         srun --account=3dv --gpus=gb10:1 --mem=48G --time=02:30:00 --pty bash"
+  echo "       (wait for the studgpu-spark... prompt before running this script)"
+  exit 3
+fi
 source /work/scratch/dmonopoli/venv_gb10/bin/activate
 export XDG_CACHE_HOME=/tmp/xc TORCH_HOME=/tmp/th HF_HOME=/tmp/hf MPLCONFIGDIR=/tmp/mpl
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONUNBUFFERED=1
