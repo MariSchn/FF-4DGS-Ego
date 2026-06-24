@@ -62,8 +62,13 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         self.hand_head_type = kwargs.get("hand_head_type", "hamer")
         self.use_hand_crop = kwargs.get("use_hand_crop", False)
         self.hand_crop_size = kwargs.get("hand_crop_size", 8)
+        self.hires_hand = kwargs.get("hires_hand", False)
+        self.hires_hand_kwargs = kwargs.get("hires_hand_kwargs", {})
         self.hamer_head_kwargs = kwargs.get("hamer_head_kwargs", {})
         self.hand_to_gs_injection_cfg = kwargs.get("hand_to_gs_injection", {})
+        self.enable_scale_head = kwargs.get("enable_scale_head", False)
+        self.enable_root_anchor = kwargs.get("enable_root_anchor", False)
+        self.root_anchor_kwargs = kwargs.get("root_anchor_kwargs", {})
 
         self.life_span_gamma = life_span_gamma
         self.dynamic_threshold = dynamic_threshold
@@ -95,6 +100,11 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         if self.freeze_backbone:
             for param in self.visual_geometry_transformer.parameters():
                 param.requires_grad = False
+        # Whether the backbone forward should build an autograd graph. Defaults to
+        # the freeze flag, but the trainer flips this to True when it partially
+        # unfreezes a few transformer blocks (freeze_backbone stays True for the
+        # head-grouping logic, yet the unfrozen blocks still need gradients).
+        self._backbone_trainable = not self.freeze_backbone
 
         # Initialize prediction heads
         self._init_heads(embed_dim, patch_size, gs_dim)
@@ -112,9 +122,11 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             "enable_norm": self.enable_norm,
             "enable_gs": self.enable_gs,
             "enable_hand": self.enable_hand,
+            "enable_root_anchor": getattr(self, "enable_root_anchor", False),
             "hand_head_type": self.hand_head_type,
             "use_hand_crop": self.use_hand_crop,
             "hand_crop_size": self.hand_crop_size,
+            "hires_hand": self.hires_hand,
             "patch_embed": self.patch_embed,
             "sampling_strategy": self.sampling,
             "dpt_checkpoint": self.dpt_checkpoint,
@@ -127,6 +139,14 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         # Camera pose prediction head
         if self.enable_cam:
             self.cam_head = CameraHead(dim_in=2 * dim)
+
+        # Feedforward global metric-scale head (the "scale head" route). Predicts
+        # one positive scale per clip from the register token; trained to match the
+        # metric hand (scripts.scale_head_loss). Optional + off by default so it
+        # does not affect other experiments / older checkpoints.
+        if getattr(self, "enable_scale_head", False):
+            from ..heads.scale_head import ScaleHead
+            self.scale_head = ScaleHead(dim_in=2 * dim)
 
         # 3D point prediction head
         if self.enable_pts:
@@ -215,6 +235,8 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
                     use_crop=self.use_hand_crop,
                     crop_size=self.hand_crop_size,
                     patch_size=patch_size,
+                    hires_hand=self.hires_hand,
+                    hires_hand_kwargs=self.hires_hand_kwargs,
                     **self.hamer_head_kwargs,
                 )
             elif self.hand_head_type == "dpt":
@@ -248,6 +270,13 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
                 **cfg,
             )
 
+        # Optional post-hoc root-depth anchor (contact Phase 1). Owned here so it
+        # trains with the head and is saved in the model state dict. Applied
+        # outside the forward (after gs_depth exists) by the train loop / eval.
+        if getattr(self, "enable_root_anchor", False):
+            from ..heads.root_depth_refine import RootDepthRefine
+            self.root_depth_refine = RootDepthRefine(**(self.root_anchor_kwargs or {}))
+
     def forward(self, views: Dict[str, torch.Tensor], cond_flags: List[int]=[0, 0, 0], is_inference=True, use_motion=True):
         """
         Execute forward pass through the WorldMirror model.
@@ -267,7 +296,7 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             use_motion = False
 
         # Extract priors and process features based on conditional input
-        backbone_ctx = torch.no_grad() if self.freeze_backbone else torch.enable_grad()
+        backbone_ctx = torch.enable_grad() if getattr(self, "_backbone_trainable", not self.freeze_backbone) else torch.no_grad()
         with backbone_ctx:
             if use_cond:
                 priors = self.extract_priors(views)
@@ -307,6 +336,10 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             preds["camera_poses"] = c2w_mat  # C2W pose (OpenCV) in world coordinates: [B, S, 4, 4]
             preds["camera_intrs"] = int_mat  # Camera intrinsic matrix: [B, S, 3, 3]
 
+        # Feedforward global metric scale (the scale-head route); [B] positive scalar.
+        if getattr(self, "enable_scale_head", False):
+            preds["pred_scale"] = self.scale_head(token_list)
+
         # Depth prediction
         if self.enable_depth:
             depth, depth_conf = self.depth_head(
@@ -331,6 +364,8 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
                 if self.use_hand_crop:
                     hamer_kwargs["hand_bboxes"] = views.get("hand_bboxes")
                     hamer_kwargs["hand_valid"] = views.get("hand_valid")
+                if self.hires_hand:
+                    hamer_kwargs["hand_crops"] = views.get("hand_crops")
                 hand_out = self.hand_head(
                     token_list,
                     images=imgs,
