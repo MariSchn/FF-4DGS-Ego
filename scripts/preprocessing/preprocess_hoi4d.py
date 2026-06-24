@@ -69,14 +69,26 @@ def _R_to_quat_wxyz(R: np.ndarray) -> np.ndarray:
 
 
 # ------------------------------------------------------------------ HOI4D I/O
-def load_intrinsics(hoi4d_root: str, cam_id: str, full_w: int, full_h: int, res: int):
-    """intrin.npy (3x3 @ full_w x full_h) -> [focal, cx, cy] for a CENTER-SQUARE crop -> res.
+def load_K(hoi4d_root: str, cam_id: str, intrin_npy=None, intrin_vals=None) -> np.ndarray:
+    """Resolve the 3x3 intrinsic K (@ full_w x full_h). Priority: explicit npy path,
+    then explicit 'fx fy cx cy' string, else the default HOI4D
+    camera_params/<cam_id>/intrin.npy. The explicit forms let layouts without a
+    camera_params/ tree (e.g. the Livioni mirror) pass the known ZY-camera intrinsic."""
+    if intrin_npy:
+        return np.load(intrin_npy)
+    if intrin_vals:
+        fx, fy, cx, cy = [float(x) for x in intrin_vals.replace(",", " ").split()]
+        return np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+    return np.load(os.path.join(hoi4d_root, "camera_params", cam_id, "intrin.npy"))
+
+
+def load_intrinsics(K: np.ndarray, full_w: int, full_h: int, res: int):
+    """3x3 K (@ full_w x full_h) -> [focal, cx, cy] for a CENTER-SQUARE crop -> res.
 
     Our pipeline is single-focal square-pinhole. HOI4D is 1920x1080 with fx!=fy, so
     we center-crop to (full_h x full_h), shift cx by the crop offset, take fx as the
     focal, then scale to `res`.
     """
-    K = np.load(os.path.join(hoi4d_root, "camera_params", cam_id, "intrin.npy"))
     fx, cx, fy, cy = K[0, 0], K[0, 2], K[1, 1], K[1, 2]
     crop = min(full_w, full_h)
     x0 = (full_w - crop) // 2
@@ -108,9 +120,14 @@ def load_extrinsics(seq_dir: str, n: int) -> torch.Tensor:
     return torch.from_numpy(np.stack(mats[:n])).float()
 
 
-def load_mano_frame(hoi4d_root: str, seq: str, frame: int):
-    """refinehandpose_right/<seq>/<frame>.pickle -> (global_aa[3], pose45[45], beta[10], trans[3]) or None."""
-    p = os.path.join(hoi4d_root, "handpose", "refinehandpose_right", seq, f"{frame}.pickle")
+def load_mano_frame(handpose_root: str, seq: str, frame: int):
+    """<handpose_root>/<seq>/<frame>.pickle -> (global_aa[3], pose45[45], beta[10], trans[3]) or None.
+
+    ``handpose_root`` already includes the per-hand subfolder (e.g.
+    ``.../handpose_right_hand`` on the Livioni mirror, or ``.../refinehandpose_right``
+    on the official release); ``seq`` is the nested ZY.../H*/C*/... path.
+    """
+    p = os.path.join(handpose_root, seq, f"{frame}.pickle")
     if not os.path.exists(p):
         return None
     with open(p, "rb") as f:
@@ -202,6 +219,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--hoi4d_root", required=True, help="annotation root holding camera_params/, handpose/, and <seq>/3Dseg/output.log")
     ap.add_argument("--rgb_root", default=None, help="root holding RGB (defaults to hoi4d_root). Livioni mirror = <rgb_root>/<seq_underscored>/images/")
+    ap.add_argument("--handpose_root", default=None, help="root holding <seq nested>/<frame>.pickle (default: <hoi4d_root>/handpose/refinehandpose_right). Livioni mirror = <gt>/Hand_pose/handpose_right_hand")
+    ap.add_argument("--intrin_npy", default=None, help="explicit 3x3 intrinsic .npy at full_w x full_h (overrides camera_params lookup)")
+    ap.add_argument("--intrin_vals", default=None, help="explicit 'fx fy cx cy' at full_w x full_h (overrides camera_params lookup)")
     ap.add_argument("--seq", required=True, help="sequence subpath ZY.../H*/C*/N*/S*/s*/T*")
     ap.add_argument("--out", required=True)
     ap.add_argument("--mano_model", default="models/MANO")
@@ -217,6 +237,7 @@ def main() -> None:
 
     seq_dir = os.path.join(args.hoi4d_root, args.seq)
     cam_id = args.seq.split("/")[0]                   # ZY... camera id is the first path token
+    handpose_root = args.handpose_root or os.path.join(args.hoi4d_root, "handpose", "refinehandpose_right")
     out_seq = os.path.join(args.out, args.seq.replace("/", "_"))
     hd = os.path.join(out_seq, "hand_data")
     os.makedirs(hd, exist_ok=True)
@@ -231,7 +252,8 @@ def main() -> None:
     print(f"[rgb] {n} frames -> {args.res}x{args.res}  (src={rgb_src})")
 
     # 2) intrinsics + extrinsics
-    cam_intr = load_intrinsics(args.hoi4d_root, cam_id, args.full_w, args.full_h, args.res)
+    K = load_K(args.hoi4d_root, cam_id, args.intrin_npy, args.intrin_vals)
+    cam_intr = load_intrinsics(K, args.full_w, args.full_h, args.res)
     # Extrinsics (3Dseg/output.log) are ONLY needed for the world-frame cache. When
     # they are absent (e.g. the Livioni HF mirror has images + depth but no poses),
     # fall back to building CAMERA-FRAME caches only — enough for camera-frame
@@ -265,7 +287,7 @@ def main() -> None:
         for h in range(NUM_HANDS):
             if h != RH:
                 continue
-            m = load_mano_frame(args.hoi4d_root, args.seq, fi)
+            m = load_mano_frame(handpose_root, args.seq, fi)
             if m is None:
                 continue
             g_aa, pose45, beta, trans = m                     # camera frame
