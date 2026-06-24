@@ -121,12 +121,28 @@ def metrics_for(pred, gt):
 
 
 def aggregate(pred_j, gt_j, pred_v, gt_v):
-    """{MPJPE, PA_MPJPE, AUC_J, MPVPE, PA_MPVPE, AUC_V}."""
+    """{MPJPE, PA_MPJPE, RR_MPJPE, WRIST_mm, AUC_J, MPVPE, PA_MPVPE, AUC_V}.
+
+    Note on conventions (common practice, per Cyrus): ``MPJPE`` here is the
+    ABSOLUTE joint error (no alignment), i.e. it includes global placement.
+    ``WRIST_mm`` is the absolute position error of the root joint (MANO index 0)
+    alone — the cleanest read on whether the hand is in the right *place*.
+    ``RR_MPJPE`` is the root-relative ("standard") MPJPE: shape only, after
+    subtracting the wrist. ``PA_MPJPE`` is Procrustes-aligned (shape, scale-free).
+    """
     j = metrics_for(pred_j, gt_j)
     v = metrics_for(pred_v, gt_v)
+    # Absolute wrist (root joint, MANO index 0) position error — global placement.
+    wrist_mm = _per_point_l2_mm(pred_j[:, 0:1], gt_j[:, 0:1]).mean().item()
+    # Root-relative MPJPE: subtract each hand's wrist before comparing (shape only).
+    pred_rr = pred_j - pred_j[:, 0:1]
+    gt_rr   = gt_j  - gt_j[:, 0:1]
+    rr_mm = _per_point_l2_mm(pred_rr, gt_rr).mean().item()
     return {
-        "MPJPE":    j["mean_mm"],
-        "PA_MPJPE": j["pa_mean_mm"],
+        "MPJPE":    j["mean_mm"],      # absolute (no alignment)
+        "PA_MPJPE": j["pa_mean_mm"],   # Procrustes-aligned
+        "RR_MPJPE": rr_mm,             # root-relative (standard MPJPE)
+        "WRIST_mm": wrist_mm,          # absolute wrist (root) position error
         "AUC_J":    j["auc"],
         "MPVPE":    v["mean_mm"],
         "PA_MPVPE": v["pa_mean_mm"],
