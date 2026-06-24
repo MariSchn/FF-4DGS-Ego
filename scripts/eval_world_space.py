@@ -131,10 +131,17 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
             gated = gate.float()
             n_gate = float(gated.sum())
             dz_gated = float((_dz.abs() * gated).sum() / n_gate) if n_gate > 0 else 0.0
+            # Disagreement = |d_scene - wrist_z| where gated. This is the headroom Δz
+            # converges toward under the consistency loss. If disagree >> |dz|, the
+            # anchor is UNDERTRAINED (room to correct, hasn't learned). If disagree
+            # ~= |dz| ~= 0, there is NOTHING to fix (head wrist depth already ~ gs_depth).
+            disagree = (_info["d_scene"] - _info["wrist_z"]).abs()
+            disagree_gated = float((disagree * gated).sum() / n_gate) if n_gate > 0 else 0.0
             anchor_log.append({
                 "gate_rate": float(gated.mean()),
                 "dz_gated_m": dz_gated,
                 "dz_max_m": float(_dz.abs().max()),
+                "disagree_gated_m": disagree_gated,
             })
     return pred_joints[0].float().cpu(), c2w.cpu(), s, ratios
 
@@ -343,10 +350,13 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             g = sum(a["gate_rate"] for a in anchor_log) / len(anchor_log)
             dz = sum(a["dz_gated_m"] for a in anchor_log) / len(anchor_log)
             dzmax = max(a["dz_max_m"] for a in anchor_log)
+            disagree = sum(a.get("disagree_gated_m", 0.0) for a in anchor_log) / len(anchor_log)
             row["anchor_gate_rate"] = g
             row["anchor_dz_gated_mm"] = dz * 1000.0
             row["anchor_dz_max_mm"] = dzmax * 1000.0
-            anchor_str = f" | anchor gate={g * 100:.0f}% |dz|={dz * 1000:.1f}mm(max {dzmax * 1000:.1f})"
+            row["anchor_disagree_mm"] = disagree * 1000.0
+            anchor_str = (f" | anchor gate={g * 100:.0f}% |dz|={dz * 1000:.1f}mm"
+                          f"(max {dzmax * 1000:.1f}) Δgs={disagree * 1000:.1f}mm")
         out.append(row)
         sm_str = ""
         if smooth_windows:
