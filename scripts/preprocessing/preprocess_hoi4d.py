@@ -251,10 +251,14 @@ def recover_K_from_kps2d(handpose_root: str, seq: str, mano, full_w: int, full_h
         pose15 = pose45_to_pca15(pose45, mano, is_right=is_right)
         q_cam = _R_to_quat_wxyz(_aa_to_R(g_aa))
         param = np.concatenate([trans, q_cam, pose15, beta]).astype(np.float32)  # [32]
-        jc = mano.get_joints21_batched(torch.from_numpy(param).unsqueeze(0),
-                                       is_right=is_right)[0].detach().cpu().numpy()  # [21,3] cam
+        # 16-joint MANO (committed get_joints_batched). kps2D[:16] are the same
+        # kinematic joints in MANO order; the 5 fingertips (kps2D[16:]) are the
+        # convention-sensitive part, so dropping them avoids any tip-order mismatch
+        # and is plenty (16 joints x 2 axes x n_use frames >> 4 unknowns).
+        jc = mano.get_joints_batched(torch.from_numpy(param).unsqueeze(0),
+                                     is_right=is_right)[0].detach().cpu().numpy()  # [16,3] cam
         z = np.clip(jc[:, 2], 1e-3, None)
-        for i in range(21):
+        for i in range(jc.shape[0]):
             rows_u.append([jc[i, 0] / z[i], 1.0]); rhs_u.append(kps[i, 0])
             rows_v.append([jc[i, 1] / z[i], 1.0]); rhs_v.append(kps[i, 1])
         used += 1
