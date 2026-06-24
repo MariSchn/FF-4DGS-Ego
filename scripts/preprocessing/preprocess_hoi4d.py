@@ -232,9 +232,22 @@ def main() -> None:
 
     # 2) intrinsics + extrinsics
     cam_intr = load_intrinsics(args.hoi4d_root, cam_id, args.full_w, args.full_h, args.res)
-    cam_extr = load_extrinsics(seq_dir, n)            # [N,4,4] T_camera_world (VERIFY direction)
+    # Extrinsics (3Dseg/output.log) are ONLY needed for the world-frame cache. When
+    # they are absent (e.g. the Livioni HF mirror has images + depth but no poses),
+    # fall back to building CAMERA-FRAME caches only — enough for camera-frame
+    # C-MPJPE / C-abs (the HOI4D MANO is already camera-frame, so no extrinsics
+    # are required to get gt_joints_cache_cam_v2.pt).
+    try:
+        cam_extr = load_extrinsics(seq_dir, n)        # [N,4,4] T_camera_world (VERIFY direction)
+        have_extr = True
+    except (FileNotFoundError, OSError) as e:
+        cam_extr = None
+        have_extr = False
+        print(f"[warn] no extrinsics ({type(e).__name__}); building CAMERA-FRAME caches "
+              f"only (skipping gt_joints_cache_world.pt + cam_extrinsics_cache.pt)")
     torch.save(cam_intr, os.path.join(hd, "cam_intrinsics.pt"))
-    torch.save(cam_extr, os.path.join(hd, "cam_extrinsics_cache.pt"))
+    if have_extr:
+        torch.save(cam_extr, os.path.join(hd, "cam_extrinsics_cache.pt"))
     f0, cx0, cy0 = [float(x) for x in cam_intr.tolist()]
 
     # 3) hands: pickle -> world-frame params + joints + 2d + bboxes
@@ -258,32 +271,48 @@ def main() -> None:
             g_aa, pose45, beta, trans = m                     # camera frame
             pose15 = pose45_to_pca15(pose45, mano, is_right=True)
 
-            # VERIFY(3): lift camera-frame global pose -> world frame via T_world_camera.
-            T_cw = cam_extr[fi].double().numpy()              # world->cam (assumed)
-            T_wc = np.linalg.inv(T_cw)                        # cam->world
-            R_cam = _aa_to_R(g_aa); t_cam = trans
-            R_world = T_wc[:3, :3] @ R_cam
-            t_world = T_wc[:3, :3] @ t_cam + T_wc[:3, 3]
-            q_world = _R_to_quat_wxyz(R_world)
-
-            hp[str(h)] = {
-                "wrist_xform": {"t_xyz": t_world.tolist(), "q_wxyz": q_world.tolist()},
-                "pose": [float(x) for x in pose15.tolist()],
-                "betas": [float(x) for x in beta.tolist()],
-            }
             off = h * HAND_PARAM_DIM
-            gt64[fi, off:off + 3] = torch.tensor(t_world, dtype=torch.float32)
-            gt64[fi, off + 3:off + 7] = torch.tensor(q_world, dtype=torch.float32)
-            gt64[fi, off + 7:off + 22] = torch.tensor(pose15, dtype=torch.float32)
-            gt64[fi, off + 22:off + 32] = torch.tensor(beta, dtype=torch.float32)
-
-            # joints via OUR MANO (consistent 16-joint convention), world frame
-            jw = mano.get_joints_from_tensor(gt64[fi, off:off + HAND_PARAM_DIM],
-                                             is_right=True, return_tensor=False)
-            jw = np.asarray(jw).reshape(-1, 3)[:NUM_JOINTS]
-            j_world[fi, h] = torch.tensor(jw, dtype=torch.float32)
-            # camera frame
-            jc = (T_cw[:3, :3] @ jw.T + T_cw[:3, 3:4]).T
+            R_cam = _aa_to_R(g_aa); t_cam = trans
+            if have_extr:
+                # VERIFY(3): lift camera-frame global pose -> world frame via T_world_camera.
+                T_cw = cam_extr[fi].double().numpy()              # world->cam (assumed)
+                T_wc = np.linalg.inv(T_cw)                        # cam->world
+                R_world = T_wc[:3, :3] @ R_cam
+                t_world = T_wc[:3, :3] @ t_cam + T_wc[:3, 3]
+                q_world = _R_to_quat_wxyz(R_world)
+                hp[str(h)] = {
+                    "wrist_xform": {"t_xyz": t_world.tolist(), "q_wxyz": q_world.tolist()},
+                    "pose": [float(x) for x in pose15.tolist()],
+                    "betas": [float(x) for x in beta.tolist()],
+                }
+                gt64[fi, off:off + 3] = torch.tensor(t_world, dtype=torch.float32)
+                gt64[fi, off + 3:off + 7] = torch.tensor(q_world, dtype=torch.float32)
+                gt64[fi, off + 7:off + 22] = torch.tensor(pose15, dtype=torch.float32)
+                gt64[fi, off + 22:off + 32] = torch.tensor(beta, dtype=torch.float32)
+                # joints via OUR MANO (consistent 16-joint convention), world frame
+                jw = mano.get_joints_from_tensor(gt64[fi, off:off + HAND_PARAM_DIM],
+                                                 is_right=True, return_tensor=False)
+                jw = np.asarray(jw).reshape(-1, 3)[:NUM_JOINTS]
+                j_world[fi, h] = torch.tensor(jw, dtype=torch.float32)
+                # camera frame = world joints transformed back via T_cw
+                jc = (T_cw[:3, :3] @ jw.T + T_cw[:3, 3:4]).T
+            else:
+                # No extrinsics: the HOI4D MANO is already camera-frame, so build the
+                # camera-frame joints directly. (Provably identical to the roundtrip
+                # above: the T_cw/T_wc terms cancel to R_cam @ J + t_cam.)
+                q_cam = _R_to_quat_wxyz(R_cam)
+                gt64[fi, off:off + 3] = torch.tensor(t_cam, dtype=torch.float32)
+                gt64[fi, off + 3:off + 7] = torch.tensor(q_cam, dtype=torch.float32)
+                gt64[fi, off + 7:off + 22] = torch.tensor(pose15, dtype=torch.float32)
+                gt64[fi, off + 22:off + 32] = torch.tensor(beta, dtype=torch.float32)
+                hp[str(h)] = {
+                    "wrist_xform": {"t_xyz": [float(x) for x in t_cam], "q_wxyz": q_cam.tolist()},
+                    "pose": [float(x) for x in pose15.tolist()],
+                    "betas": [float(x) for x in beta.tolist()],
+                }
+                jc = mano.get_joints_from_tensor(gt64[fi, off:off + HAND_PARAM_DIM],
+                                                 is_right=True, return_tensor=False)
+                jc = np.asarray(jc).reshape(-1, 3)[:NUM_JOINTS]
             j_cam[fi, h] = torch.tensor(jc, dtype=torch.float32)
             # 2d projection (pinhole)
             z = np.clip(jc[:, 2], 1e-3, None)
@@ -309,7 +338,8 @@ def main() -> None:
     with open(os.path.join(hd, "mano_hand_pose_trajectory.jsonl"), "w") as f:
         for e in jl:
             f.write(json.dumps(e) + "\n")
-    torch.save(j_world, os.path.join(hd, "gt_joints_cache_world.pt"))
+    if have_extr:
+        torch.save(j_world, os.path.join(hd, "gt_joints_cache_world.pt"))
     torch.save(j_cam, os.path.join(hd, "gt_joints_cache_cam_v2.pt"))
     torch.save(j_2d, os.path.join(hd, "gt_joints_2d_cache.pt"))
     bbox_name = f"hand_bboxes_v2_rf{args.rescale_factor}_res{args.res}x{args.res}.pt"
