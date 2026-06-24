@@ -1,0 +1,101 @@
+# ==================================================================
+# P4-SUPONLY: ablation control for the contact anchor. IDENTICAL to
+# exp_p4_contact.yaml EXCEPT the anchor is OFF (enable_root_anchor:false,
+# root_anchor:0.0). Same GS-on path, same kp3d_abs=0.3 supervision, same steps.
+# ------------------------------------------------------------------
+# Purpose: isolate the anchor's marginal contribution. Run the same bounded
+# train+W-eval as run_p4_contact; compare W. If suponly-W ~= contact-W (246),
+# the gain is all kp3d_abs supervision. If suponly-W > contact-W, the delta is
+# the contact anchor. This is the A/B that turns "something improved" into "the
+# anchor works".
+# ==================================================================
+data:
+  data_root: "/work/courses/3dv/team25/data/hot3d_aria/preprocessed_pinhole_f609"
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.01
+  num_workers: 4
+# ------------------------------------------------------------------
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/work/courses/3dv/team25/checkpoints/default/hand_head_final.pt"
+  freeze_backbone: true
+  enable_scale_head: false
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: true              # kept ON so the GS path + eval world-placement match the contact run exactly
+  enable_root_anchor: false    # <-- ablation: anchor OFF
+  hand_to_gs_injection:
+    enabled: false
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+# ------------------------------------------------------------------
+loss_weights:
+  kp3d:          0.05
+  kp3d_abs:      0.3
+  kp2d:          0.05
+  global_orient: 0.01
+  hand_pose:     0.01
+  betas:         0.01
+  transl:        1.0
+  root_anchor:   0.0          # <-- ablation: no anchor consistency loss
+  gs_l1:         0.0
+  gs_lpips:      0.0
+  hand_depth_anchor: 0.0
+# ------------------------------------------------------------------
+metric_scale:
+  enable: true
+  clamp: [0.1, 10.0]
+# ------------------------------------------------------------------
+training:
+  lr: 2e-5
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 4
+  grad_accum_steps: 8
+  use_amp: true
+  log_every: 25
+  val_every: 50
+  val_max_batches: 12
+  save_every: 1000000
+  grad_clip_norm: 5.0
+  kp3d_abs_warmup_steps: 50
+  freeze_gs_head: true
+  keep_last_checkpoints: 0
+  seed: 42
+  output_dir: "/work/courses/3dv/team25/checkpoints/p4_suponly"
+# ------------------------------------------------------------------
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 4
+# ------------------------------------------------------------------
+hand_crop:
+  rescale_factor: 1.5
+# ------------------------------------------------------------------
+debug:
+  enabled: false
+  max_sequences: 5
+  single_frame: false
+# ------------------------------------------------------------------
+wandb:
+  enabled: false
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "P4-SUPONLY: anchor-off control (kp3d_abs only, GS on)"
+  tags: []
+  notes: null
