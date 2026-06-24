@@ -313,7 +313,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         row.update(scale_gt)
         out.append(row)
         sm_str = ""
-        if sm_rows:
+        if smooth_windows:
             sm_str = " | Wsm " + " ".join(
                 f"w{w}={sm_rows[f'W_MPJPE_sm{w}']:.1f}" for w in smooth_windows)
         print(f"[{os.path.basename(seq_dir)} seg{seg}] "
