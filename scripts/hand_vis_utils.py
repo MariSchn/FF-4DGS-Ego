@@ -102,6 +102,32 @@ class MANOModel:
         ):
             self.left.shapedirs[:, 0, :] *= -1
 
+        # HOI4D / manopth convention: the released poseCoeff carries a FULL 45-dim
+        # axis-angle hand pose with flat_hand_mean=True (no mean folded in). The PCA(15)
+        # + smplx-default flat_hand_mean=False layers above both truncate that pose AND
+        # add ~11.7rad of hand-mean bend, which scrambles every finger joint. These
+        # dedicated layers consume the raw 45-dim pose exactly as HOI4D intends, so MANO
+        # forward kinematics reproduce the dataset's kps2D to <1px. Joint order is
+        # identical to self.right/left (out.joints [N,16,3]), so every joint-index map
+        # (e.g. _KPS2D_FOR_SMPLX16) is unchanged. CPU-only; not on the training path.
+        self.right_full = smplx.create(
+            os.path.join(mano_model_folder, "MANO_RIGHT.pkl"), "mano",
+            use_pca=False, is_rhand=True, flat_hand_mean=True, num_pca_comps=45,
+        )
+        self.left_full = smplx.create(
+            os.path.join(mano_model_folder, "MANO_LEFT.pkl"), "mano",
+            use_pca=False, is_rhand=False, flat_hand_mean=True, num_pca_comps=45,
+        )
+        if (
+            torch.sum(
+                torch.abs(
+                    self.left_full.shapedirs[:, 0, :] - self.right_full.shapedirs[:, 0, :]
+                )
+            )
+            < 1
+        ):
+            self.left_full.shapedirs[:, 0, :] *= -1
+
         self._layer_device = torch.device("cpu")
 
     def _ensure_device(self, device):
@@ -142,6 +168,46 @@ class MANOModel:
             return_verts=True,
         )
         return out.joints
+
+    def get_joints21_batched(self, params, is_right, device=None):
+        """Like get_joints_batched but returns [N,21,3] = 16 MANO joints + 5 fingertips.
+
+        Fingertips are appended in (thumb, index, middle, ring, pinky) order from the
+        mesh vertices at the standard MANO tip indices. Used for the 21-joint MPJPE
+        that matches the H2O / hand-pose SOTA convention (the tips are the hardest).
+        """
+        device = torch.device(device) if device is not None else params.device
+        self._ensure_device(device)
+        params = params.to(device)
+        transl, quat_wxyz = params[:, 0:3], params[:, 3:7]
+        hand_pose_pca, betas = params[:, 7:22], params[:, 22:32]
+        global_orient = quat_wxyz_to_axis_angle_torch(quat_wxyz)
+        layer = self.right if is_right else self.left
+        out = layer(betas=betas, global_orient=global_orient, hand_pose=hand_pose_pca,
+                    transl=transl, return_verts=True)
+        tips = out.vertices[:, [745, 317, 444, 556, 673], :]   # thumb,index,middle,ring,pinky
+        return torch.cat([out.joints, tips], dim=1)            # [N,21,3]
+
+    def get_joints_full_pose(self, global_aa, pose45, beta, trans, is_right):
+        """MANO 3D joints [16,3] (camera frame) from HOI4D's RAW params: 3-dim global
+        axis-angle, 45-dim FULL axis-angle hand pose (NO PCA), 10 betas, 3 translation.
+
+        Uses the dedicated use_pca=False / flat_hand_mean=True layer so the forward
+        kinematics match HOI4D's manopth exactly (reproduces the dataset kps2D to
+        ~0.4px, vs ~12px through the lossy PCA15 path). Joint order is the same MANO
+        16-joint kinematic order as get_joints_batched, so _KPS2D_FOR_SMPLX16 and every
+        other joint-index map are unchanged. CPU-side (preprocessing); the *_full layers
+        are never moved by _ensure_device, so this stays off the training device path.
+        """
+        layer = self.right_full if is_right else self.left_full
+        out = layer(
+            betas=torch.as_tensor(beta, dtype=torch.float32).reshape(1, -1),
+            global_orient=torch.as_tensor(global_aa, dtype=torch.float32).reshape(1, 3),
+            hand_pose=torch.as_tensor(pose45, dtype=torch.float32).reshape(1, 45),
+            transl=torch.as_tensor(trans, dtype=torch.float32).reshape(1, 3),
+            return_verts=True,
+        )
+        return out.joints[0].detach().cpu().numpy()           # [16,3] camera frame
 
     def get_mesh(self, hand_data, is_right):
         """Generate mesh from raw JSONL hand data dict.

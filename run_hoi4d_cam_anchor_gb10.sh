@@ -54,10 +54,16 @@ echo "######## PREPROCESS (camera-frame caches, K recovered from kps2D) ########
 for SEQ_US in "${SEQS[@]}"; do
   SEQ_NESTED="${SEQ_US//_//}"
   echo "--- $SEQ_US ---"
+  # Authoritative ZY20210800001 intrinsic (HOI4D camera_params/.../intrin.npy, the
+  # dataset's own Kinect-Azure RGB K @ 1920x1080): fx fy cx cy. This is the SOURCE of
+  # truth; --recover_k still runs as a live kps2D cross-check (should agree to ~1% with
+  # the full-45-pose MANO FK). The earlier lstsq-only recovery gave fx=910/fy=955 — a
+  # corrupted fit from the lossy PCA15 pose path, now fixed (get_joints_full_pose).
   python -u -m scripts.preprocessing.preprocess_hoi4d \
     --hoi4d_root "$HOI4D" --rgb_root "$HOI4D" --handpose_root "$HANDPOSE" \
     --seq "$SEQ_NESTED" --out "$PP" --mano_model models/MANO \
-    --res 224 --full_w 1920 --full_h 1080 --recover_k 2>&1 \
+    --res 224 --full_w 1920 --full_h 1080 --recover_k \
+    --intrin_vals "1060.2955 1061.5068 971.52105 523.2619" 2>&1 \
     | grep -vE "^VERIFY" || true
 done
 

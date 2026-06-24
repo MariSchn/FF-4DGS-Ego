@@ -140,14 +140,15 @@ def load_mano_frame(handpose_root: str, seq: str, frame: int):
 def pose45_to_pca15(pose45: np.ndarray, mano_model, is_right: bool) -> np.ndarray:
     """Project HOI4D's 45 full (no-PCA, flat-hand-mean) pose onto our 15 PCA coeffs.
 
-    VERIFY(2): assumes the smplx MANO layer exposes `hands_components` (45x45) and
-    `hands_mean` (45). HOI4D uses flat_hand_mean=True (no mean added), so we subtract
-    our layer's mean before projecting. Compare resulting joints to the manopth joints
-    on one frame before trusting at scale.
+    smplx MANO registers `hand_components` and `hand_mean` (SINGULAR — the plural names
+    return None and silently truncate). HOI4D uses flat_hand_mean=True (no mean added),
+    so we subtract our layer's mean before projecting onto the PCA basis. NOTE: this is a
+    lossy 45->15 projection and is only used to fill gt64's (supervision-unused) pose15
+    slot; the GT joints themselves come from get_joints_full_pose (no truncation).
     """
     layer = mano_model.right if is_right else mano_model.left
-    comps = getattr(layer, "hands_components", None)
-    mean = getattr(layer, "hands_mean", None)
+    comps = getattr(layer, "hand_components", None)
+    mean = getattr(layer, "hand_mean", None)
     if comps is None:
         return pose45[:15]                            # fallback: truncate (flagged)
     comps = comps.detach().cpu().numpy() if torch.is_tensor(comps) else np.asarray(comps)
@@ -258,14 +259,12 @@ def recover_K_from_kps2d(handpose_root: str, seq: str, mano, full_w: int, full_h
         if kps.shape != (21, 2):
             continue
         g_aa, pose45, beta, trans = m
-        pose15 = pose45_to_pca15(pose45, mano, is_right=is_right)
-        q_cam = _R_to_quat_wxyz(_aa_to_R(g_aa))
-        param = np.concatenate([trans, q_cam, pose15, beta]).astype(np.float32)  # [32]
-        # 16 smplx joints (committed get_joints_batched), matched to their REORDERED
-        # kps2D slots via _KPS2D_FOR_SMPLX16 (HOI4D uses manopth's interleaved layout,
-        # not [16 joints + 5 tips]). 16 corresps x 2 axes x n_use frames >> 4 unknowns.
-        jc = mano.get_joints_batched(torch.from_numpy(param).unsqueeze(0),
-                                     is_right=is_right)[0].detach().cpu().numpy()  # [16,3] cam
+        # Full 45-dim axis-angle pose through the no-PCA / flat-hand-mean layer:
+        # reproduces HOI4D's manopth joints to ~0.4px (the lossy PCA15 path gave ~12px
+        # and a corrupted fx!=fy). 16 smplx joints matched to their REORDERED kps2D slots
+        # via _KPS2D_FOR_SMPLX16 (HOI4D uses manopth's interleaved layout, not [16 joints
+        # + 5 tips]). 16 corresps x 2 axes x n_use frames >> 4 unknowns.
+        jc = mano.get_joints_full_pose(g_aa, pose45, beta, trans, is_right=is_right)  # [16,3] cam
         z = np.clip(jc[:, 2], 1e-3, None)
         for i in range(jc.shape[0]):
             k = _KPS2D_FOR_SMPLX16[i]
@@ -325,12 +324,28 @@ def main() -> None:
     print(f"[rgb] {n} frames -> {args.res}x{args.res}  (src={rgb_src})")
 
     # 2) intrinsics + extrinsics
-    if args.recover_k and not (args.intrin_npy or args.intrin_vals):
-        K, k_rmse, k_n = recover_K_from_kps2d(handpose_root, args.seq, mano,
-                                              args.full_w, args.full_h, n_use=args.recover_k_frames)
-        flag = "" if k_rmse < 10.0 else "  [WARN rmse>10px: check kps2D joint order/res]"
+    # An explicit intrinsic (--intrin_npy / --intrin_vals, or camera_params) is the
+    # source of truth. --recover_k solves K from the pickles' kps2D; when an explicit K
+    # is ALSO given it runs purely as a cross-check that validates the full MANO forward
+    # kinematics end to end (with the full-45-pose layer it agrees to ~1% / rmse<~1px;
+    # a >3px residual means the kps2D order or pose convention regressed).
+    K_explicit = (args.intrin_npy is not None) or (args.intrin_vals is not None)
+    if args.recover_k:
+        K_rec, k_rmse, k_n = recover_K_from_kps2d(handpose_root, args.seq, mano,
+                                                  args.full_w, args.full_h, n_use=args.recover_k_frames)
+        flag = "" if k_rmse < 3.0 else "  [WARN rmse>3px: check kps2D order / MANO pose convention]"
         print(f"[intrin] recovered K from kps2D over {k_n} frames  rmse={k_rmse:.2f}px  "
-              f"fx={K[0,0]:.1f} fy={K[1,1]:.1f} cx={K[0,2]:.1f} cy={K[1,2]:.1f}{flag}", flush=True)
+              f"fx={K_rec[0,0]:.1f} fy={K_rec[1,1]:.1f} cx={K_rec[0,2]:.1f} cy={K_rec[1,2]:.1f}{flag}",
+              flush=True)
+    if K_explicit:
+        K = load_K(args.hoi4d_root, cam_id, args.intrin_npy, args.intrin_vals)
+        if args.recover_k:
+            dfx = abs(K_rec[0, 0] - K[0, 0]) / K[0, 0] * 100.0
+            xflag = "" if dfx < 2.0 else "  [WARN cross-check >2% off source K]"
+            print(f"[intrin] using SOURCE K  fx={K[0,0]:.1f} fy={K[1,1]:.1f} cx={K[0,2]:.1f} "
+                  f"cy={K[1,2]:.1f}  (kps2D cross-check fx within {dfx:.1f}%){xflag}", flush=True)
+    elif args.recover_k:
+        K = K_rec
     else:
         K = load_K(args.hoi4d_root, cam_id, args.intrin_npy, args.intrin_vals)
     cam_intr = load_intrinsics(K, args.full_w, args.full_h, args.res)
@@ -391,13 +406,14 @@ def main() -> None:
                 gt64[fi, off + 3:off + 7] = torch.tensor(q_world, dtype=torch.float32)
                 gt64[fi, off + 7:off + 22] = torch.tensor(pose15, dtype=torch.float32)
                 gt64[fi, off + 22:off + 32] = torch.tensor(beta, dtype=torch.float32)
-                # joints via OUR MANO (consistent 16-joint convention), world frame
-                jw = mano.get_joints_from_tensor(gt64[fi, off:off + HAND_PARAM_DIM],
-                                                 is_right=True, return_tensor=False)
-                jw = np.asarray(jw).reshape(-1, 3)[:NUM_JOINTS]
+                # camera-frame joints from the FULL 45-dim pose (manopth-accurate),
+                # then lifted to world via T_wc for the world cache. jc (camera frame)
+                # feeds j_cam below; same structure as the old world->cam roundtrip but
+                # built from the correct joints rather than the lossy PCA15 in gt64.
+                jc = mano.get_joints_full_pose(g_aa, pose45, beta, t_cam, is_right=True)
+                jc = np.asarray(jc).reshape(-1, 3)[:NUM_JOINTS]
+                jw = (T_wc[:3, :3] @ jc.T + T_wc[:3, 3:4]).T
                 j_world[fi, h] = torch.tensor(jw, dtype=torch.float32)
-                # camera frame = world joints transformed back via T_cw
-                jc = (T_cw[:3, :3] @ jw.T + T_cw[:3, 3:4]).T
             else:
                 # No extrinsics: the HOI4D MANO is already camera-frame, so build the
                 # camera-frame joints directly. (Provably identical to the roundtrip
@@ -412,8 +428,10 @@ def main() -> None:
                     "pose": [float(x) for x in pose15.tolist()],
                     "betas": [float(x) for x in beta.tolist()],
                 }
-                jc = mano.get_joints_from_tensor(gt64[fi, off:off + HAND_PARAM_DIM],
-                                                 is_right=True, return_tensor=False)
+                # GT joints from the FULL 45-dim pose (manopth-accurate), NOT the lossy
+                # PCA15 packed into gt64 — gt64's pose15 is unused for supervision; the
+                # cached joints below are the C-abs / kp3d_abs ground truth.
+                jc = mano.get_joints_full_pose(g_aa, pose45, beta, t_cam, is_right=True)
                 jc = np.asarray(jc).reshape(-1, 3)[:NUM_JOINTS]
             j_cam[fi, h] = torch.tensor(jc, dtype=torch.float32)
             # 2d projection (pinhole)
