@@ -78,7 +78,7 @@ def _world_from_cam(pj, c2w, s):
     return world
 
 
-def predict_clip(preds, mano_model, device, cam_intr):
+def predict_clip(preds, mano_model, device, cam_intr, model=None):
     """Run the hand head for one clip and gather its metric-scale correspondences.
 
     Returns ``(pj_cam, c2w, s_clip, ratios)``: ``pj_cam`` [S,H,J,3] metric camera-frame joints
@@ -110,6 +110,18 @@ def predict_clip(preds, mano_model, device, cam_intr):
         if bool(valid.any()):
             ratios = (z / sampled)[valid].detach().float().cpu()    # [n_valid] z_hand/scene_depth
             s = float(ratios.median().clamp(0.1, 10.0))
+
+    # Contact Phase 1: post-hoc root-depth correction. Applied AFTER the scene-scale
+    # solve (so the scene scale stays an independent property, no anchor->scale
+    # feedback — the design's circularity guard) but before world placement, using
+    # the same apply_root_anchor as training. Behind the enable flag; needs gs_depth.
+    if (model is not None and getattr(model, "enable_root_anchor", False)
+            and gs_depth is not None and cam_intr is not None):
+        from scripts.root_depth_anchor import apply_root_anchor
+        pred_joints, _, _ = apply_root_anchor(
+            model.root_depth_refine, pred_joints, gs_depth,
+            preds.get("gs_depth_conf"), cam_intr.to(device),
+        )
     return pred_joints[0].float().cpu(), c2w.cpu(), s, ratios
 
 
@@ -176,7 +188,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                 cond_flags = [0, 0, 1]
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 preds = model(views, cond_flags=cond_flags, is_inference=True, use_motion=False)
-            cc = predict_clip(preds, mano_model, device, cam_intr)
+            cc = predict_clip(preds, mano_model, device, cam_intr, model=model)
             clip_cams.append(cc)
 
             # (b) GROUND-TRUTH SCALE check: the world placement scales the up-to-scale camera
