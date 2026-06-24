@@ -24,6 +24,16 @@ mkdir -p /tmp/xc /tmp/th /tmp/hf /tmp/mpl
 cd /home/dmonopoli/FF-4DGS-Ego
 DR=/work/courses/3dv/team25/data/hot3d_aria/preprocessed_pinhole_f609
 
+# Persist all output to scratch — home is inode-full and node-local /tmp dies with
+# the job, so a --pty run loses its W number when the terminal/tmux goes away. Tee
+# stdout here and write the eval JSON here too. For disconnect-survival, run this
+# inside tmux (or via sbatch). Check progress/results: tail this log.
+OUT=/work/scratch/dmonopoli/joblogs
+mkdir -p "$OUT"
+LOG="$OUT/contact_run.log"
+exec > >(tee "$LOG") 2>&1
+echo "### output -> $LOG | node $(hostname) | $(date) ###"
+
 echo "######## TRAIN p4_contact (bounded: 50 opt-steps, grad_accum=1) @ $(date) on $(hostname) ########"
 python -u -m scripts.train_hand_head --config configs/exp_p4_contact.yaml \
   training.output_dir=/tmp/rt_contact training.max_steps=50 training.grad_accum_steps=1 \
@@ -45,7 +55,7 @@ echo "######## W-EVAL: contact-anchored head (same args as wabs baseline) ######
 python -u -m scripts.eval_world_space --config /tmp/eval_contact.yaml \
   --data_root "$DR" \
   --max_seqs 4 --max_segs 2 --segment_len 128 --clip_len 16 --stride 8 --wa_short 16 \
-  --out /tmp/world_eval_contact.json 2>&1 \
+  --out "$OUT/world_eval_contact.json" 2>&1 \
   | grep --line-buffered -vE "fwd\+lift|Loaded GT joints|Loaded 2D GT|No calibration for|\[VIS\]"
 echo "######## DONE @ $(date) ########"
 echo "Compare: contact W-MPJPE pooled vs baseline 308.3, ceiling reanchor16=61.5"
