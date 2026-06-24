@@ -215,6 +215,16 @@ def write_square_video(src: str, dst_mp4: str, res: int, limit: int | None) -> i
 
 
 # ------------------------------------------------------------------ intrinsic recovery
+# HOI4D's kps2D[21,2] is NOT [16 smplx joints + 5 trailing tips]. It is manopth's
+# reordered ("OpenPose-style", fingertips interleaved) 21-joint layout, from
+# hassony2/manopth manolayer.py reorder [0,13,14,15,16, 1,2,3,17, 4,5,6,18,
+# 10,11,12,19, 7,8,9,20] -> kps2D = wrist; thumb1,2,3,TIP; index..TIP; middle..TIP;
+# ring..TIP; pinky..TIP. So this maps each smplx get_joints_batched joint (16, MANO
+# kinematic order: wrist, index, middle, pinky, ring, thumb) to its slot in kps2D.
+# (The 5 fingertips at kps2D[4,8,12,16,20] are dropped — get_joints_batched has no tips.)
+_KPS2D_FOR_SMPLX16 = [0, 5, 6, 7, 9, 10, 11, 17, 18, 19, 13, 14, 15, 1, 2, 3]
+
+
 def recover_K_from_kps2d(handpose_root: str, seq: str, mano, full_w: int, full_h: int,
                          n_use: int = 8, is_right: bool = True):
     """Recover the full-res pinhole intrinsic K by least-squares from HOI4D's GT kps2D.
@@ -251,16 +261,16 @@ def recover_K_from_kps2d(handpose_root: str, seq: str, mano, full_w: int, full_h
         pose15 = pose45_to_pca15(pose45, mano, is_right=is_right)
         q_cam = _R_to_quat_wxyz(_aa_to_R(g_aa))
         param = np.concatenate([trans, q_cam, pose15, beta]).astype(np.float32)  # [32]
-        # 16-joint MANO (committed get_joints_batched). kps2D[:16] are the same
-        # kinematic joints in MANO order; the 5 fingertips (kps2D[16:]) are the
-        # convention-sensitive part, so dropping them avoids any tip-order mismatch
-        # and is plenty (16 joints x 2 axes x n_use frames >> 4 unknowns).
+        # 16 smplx joints (committed get_joints_batched), matched to their REORDERED
+        # kps2D slots via _KPS2D_FOR_SMPLX16 (HOI4D uses manopth's interleaved layout,
+        # not [16 joints + 5 tips]). 16 corresps x 2 axes x n_use frames >> 4 unknowns.
         jc = mano.get_joints_batched(torch.from_numpy(param).unsqueeze(0),
                                      is_right=is_right)[0].detach().cpu().numpy()  # [16,3] cam
         z = np.clip(jc[:, 2], 1e-3, None)
         for i in range(jc.shape[0]):
-            rows_u.append([jc[i, 0] / z[i], 1.0]); rhs_u.append(kps[i, 0])
-            rows_v.append([jc[i, 1] / z[i], 1.0]); rhs_v.append(kps[i, 1])
+            k = _KPS2D_FOR_SMPLX16[i]
+            rows_u.append([jc[i, 0] / z[i], 1.0]); rhs_u.append(kps[k, 0])
+            rows_v.append([jc[i, 1] / z[i], 1.0]); rhs_v.append(kps[k, 1])
         used += 1
         if used >= n_use:
             break
