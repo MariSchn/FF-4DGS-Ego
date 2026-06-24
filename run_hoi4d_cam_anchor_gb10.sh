@@ -5,7 +5,9 @@
 # This is the FAIR test the HOT3D run could not do: HOT3D gs_depth was a worse
 # reference than the head (Δgs ~122 vs C-abs ~50); HOI4D gs_depth is validated.
 #
-# >>> BEFORE RUNNING: set INTRIN to the ZY20210800001 1920x1080 "fx fy cx cy" <<<
+# Intrinsics: NOT on this mirror (camera/recon/split_0 has only info.json). But every
+# handpose pickle carries kps2D[21,2], so preprocess --recover_k solves the full-res K
+# by least-squares from the MANO 3D joints vs kps2D (camera is fixed across HOI4D).
 #
 # Run on a gb10 node (inside tmux):
 #   srun --account=3dv --gpus=gb10:1 --mem=48G --time=02:00:00 --pty bash run_hoi4d_cam_anchor_gb10.sh
@@ -21,28 +23,31 @@ echo "### HOI4D cam-anchor A/B | node $(hostname) | $(date) ###"
 
 HOI4D=/work/scratch/dmonopoli/hoi4d
 HANDPOSE=/work/scratch/dmonopoli/hoi4d_handpose_gt/Hand_pose/handpose_right_hand
-INTRIN="FILL_ME"          # <-- ZY20210800001 intrinsic at 1920x1080: "fx fy cx cy"
 PP=/tmp/hoi4d_pp
-# Flat seq dir names (underscored). Handpose path derives by replacing _ with /.
+# The 11 flat seq dirs that have BOTH images/ AND right-hand handpose pickles
+# (verified on-cluster). Handpose path derives by replacing _ with /.
 SEQS=(
-  ZY20210800001_H1_C11_N07_S185_s02_T2
-  ZY20210800001_H1_C11_N08_S185_s02_T2
+  ZY20210800001_H1_C1_N19_S100_s02_T1
   ZY20210800001_H1_C12_N11_S169_s03_T1
+  ZY20210800001_H1_C12_N26_S165_s01_T1
   ZY20210800001_H1_C13_N11_S132_s03_T1
+  ZY20210800001_H1_C13_N12_S132_s03_T1
   ZY20210800001_H1_C14_N15_S158_s02_T1
-  ZY20210800001_H1_C17_N13_S159_s02_T3
+  ZY20210800001_H1_C14_N17_S158_s02_T1
+  ZY20210800001_H1_C2_N11_S212_s03_T2
+  ZY20210800001_H1_C3_N01_S54_s05_T2
+  ZY20210800001_H1_C5_N15_S57_s03_T1
+  ZY20210800001_H1_C7_N11_S280_s03_T5
 )
 
-if [ "$INTRIN" = "FILL_ME" ]; then echo "ERROR: set INTRIN (fx fy cx cy) first"; exit 2; fi
-
-echo "######## PREPROCESS (camera-frame caches, no extrinsics) ########"
+echo "######## PREPROCESS (camera-frame caches, K recovered from kps2D) ########"
 for SEQ_US in "${SEQS[@]}"; do
   SEQ_NESTED="${SEQ_US//_//}"
   echo "--- $SEQ_US ---"
   python -u -m scripts.preprocessing.preprocess_hoi4d \
     --hoi4d_root "$HOI4D" --rgb_root "$HOI4D" --handpose_root "$HANDPOSE" \
     --seq "$SEQ_NESTED" --out "$PP" --mano_model models/MANO \
-    --res 224 --full_w 1920 --full_h 1080 --intrin_vals "$INTRIN" 2>&1 \
+    --res 224 --full_w 1920 --full_h 1080 --recover_k 2>&1 \
     | grep -vE "^VERIFY" || true
 done
 

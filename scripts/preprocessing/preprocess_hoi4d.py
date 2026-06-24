@@ -214,6 +214,63 @@ def write_square_video(src: str, dst_mp4: str, res: int, limit: int | None) -> i
     return written
 
 
+# ------------------------------------------------------------------ intrinsic recovery
+def recover_K_from_kps2d(handpose_root: str, seq: str, mano, full_w: int, full_h: int,
+                         n_use: int = 8, is_right: bool = True):
+    """Recover the full-res pinhole intrinsic K by least-squares from HOI4D's GT kps2D.
+
+    This mirror ships no camera_params/, but every handpose pickle carries
+    ``kps2D[21,2]`` — the 2D projection of the 21 MANO joints. With the MANO 3D joints
+    (camera frame, from poseCoeff/beta/trans) and their 2D projections, a skewless
+    distortion-free pinhole solves directly:  u = fx*(X/Z)+cx,  v = fy*(Y/Z)+cy.
+    Each axis is an independent 2-unknown least-squares over all joints/frames, so a
+    handful of frames is hugely overdetermined. The camera is fixed across HOI4D, so
+    one sequence's recovery serves all of them; reproj RMSE validates joint ordering.
+
+    Returns (K[3x3] @ full_w x full_h, reproj_rmse_px, n_frames_used).
+    """
+    import glob
+    pk_dir = os.path.join(handpose_root, seq)
+    frames = sorted(int(os.path.basename(p)[:-7])
+                    for p in glob.glob(os.path.join(pk_dir, "[0-9]*.pickle")))
+    rows_u, rhs_u, rows_v, rhs_v = [], [], [], []
+    used = 0
+    for fi in frames:
+        m = load_mano_frame(handpose_root, seq, fi)
+        if m is None:
+            continue
+        with open(os.path.join(pk_dir, f"{fi}.pickle"), "rb") as f:
+            d = pickle.load(f, encoding="latin1")
+        kps = d.get("kps2D")
+        if kps is None:
+            continue
+        kps = np.asarray(kps, dtype=np.float64)               # [21,2] @ full res
+        if kps.shape != (21, 2):
+            continue
+        g_aa, pose45, beta, trans = m
+        pose15 = pose45_to_pca15(pose45, mano, is_right=is_right)
+        q_cam = _R_to_quat_wxyz(_aa_to_R(g_aa))
+        param = np.concatenate([trans, q_cam, pose15, beta]).astype(np.float32)  # [32]
+        jc = mano.get_joints21_batched(torch.from_numpy(param).unsqueeze(0),
+                                       is_right=is_right)[0].detach().cpu().numpy()  # [21,3] cam
+        z = np.clip(jc[:, 2], 1e-3, None)
+        for i in range(21):
+            rows_u.append([jc[i, 0] / z[i], 1.0]); rhs_u.append(kps[i, 0])
+            rows_v.append([jc[i, 1] / z[i], 1.0]); rhs_v.append(kps[i, 1])
+        used += 1
+        if used >= n_use:
+            break
+    if used == 0:
+        raise RuntimeError(f"recover_K: no usable kps2D frames under {pk_dir}")
+    Au, bu = np.asarray(rows_u), np.asarray(rhs_u)
+    Av, bv = np.asarray(rows_v), np.asarray(rhs_v)
+    (fx, cx), *_ = np.linalg.lstsq(Au, bu, rcond=None)
+    (fy, cy), *_ = np.linalg.lstsq(Av, bv, rcond=None)
+    rmse = float(np.sqrt(np.mean((Au @ [fx, cx] - bu) ** 2 + (Av @ [fy, cy] - bv) ** 2)))
+    K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
+    return K, rmse, used
+
+
 # ------------------------------------------------------------------ main
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -222,6 +279,8 @@ def main() -> None:
     ap.add_argument("--handpose_root", default=None, help="root holding <seq nested>/<frame>.pickle (default: <hoi4d_root>/handpose/refinehandpose_right). Livioni mirror = <gt>/Hand_pose/handpose_right_hand")
     ap.add_argument("--intrin_npy", default=None, help="explicit 3x3 intrinsic .npy at full_w x full_h (overrides camera_params lookup)")
     ap.add_argument("--intrin_vals", default=None, help="explicit 'fx fy cx cy' at full_w x full_h (overrides camera_params lookup)")
+    ap.add_argument("--recover_k", action="store_true", help="recover the full-res intrinsic by least-squares from the pickles' kps2D vs MANO 3D joints (no camera_params needed)")
+    ap.add_argument("--recover_k_frames", type=int, default=8, help="how many handpose frames to use for --recover_k")
     ap.add_argument("--seq", required=True, help="sequence subpath ZY.../H*/C*/N*/S*/s*/T*")
     ap.add_argument("--out", required=True)
     ap.add_argument("--mano_model", default="models/MANO")
@@ -252,7 +311,14 @@ def main() -> None:
     print(f"[rgb] {n} frames -> {args.res}x{args.res}  (src={rgb_src})")
 
     # 2) intrinsics + extrinsics
-    K = load_K(args.hoi4d_root, cam_id, args.intrin_npy, args.intrin_vals)
+    if args.recover_k and not (args.intrin_npy or args.intrin_vals):
+        K, k_rmse, k_n = recover_K_from_kps2d(handpose_root, args.seq, mano,
+                                              args.full_w, args.full_h, n_use=args.recover_k_frames)
+        flag = "" if k_rmse < 10.0 else "  [WARN rmse>10px: check kps2D joint order/res]"
+        print(f"[intrin] recovered K from kps2D over {k_n} frames  rmse={k_rmse:.2f}px  "
+              f"fx={K[0,0]:.1f} fy={K[1,1]:.1f} cx={K[0,2]:.1f} cy={K[1,2]:.1f}{flag}", flush=True)
+    else:
+        K = load_K(args.hoi4d_root, cam_id, args.intrin_npy, args.intrin_vals)
     cam_intr = load_intrinsics(K, args.full_w, args.full_h, args.res)
     # Extrinsics (3Dseg/output.log) are ONLY needed for the world-frame cache. When
     # they are absent (e.g. the Livioni HF mirror has images + depth but no poses),
