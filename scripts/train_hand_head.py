@@ -1466,7 +1466,22 @@ def train():
     epochs     = training_cfg["epochs"]
     steps_per_epoch = len(train_loader) // grad_accum_steps
     total_steps = epochs * steps_per_epoch
-    optimizer  = Adam(trainable_params, lr=float(training_cfg["lr"]))
+    base_lr = float(training_cfg["lr"])
+    # The root-anchor MLP is zero-init and trains from scratch, so the head's tiny
+    # warm-start lr starves it (|dz| stayed ~1mm in the 50-step probe). Give it its
+    # own (higher) lr via a separate param group; defaults to base_lr if unset.
+    anchor_lr = float(training_cfg.get("root_anchor_lr", base_lr))
+    if root_anchor_params and anchor_lr != base_lr:
+        anchor_ids = {id(p) for p in root_anchor_params}
+        base_group = [p for p in trainable_params if id(p) not in anchor_ids]
+        optimizer = Adam([
+            {"params": base_group, "lr": base_lr},
+            {"params": root_anchor_params, "lr": anchor_lr},
+        ], lr=base_lr)
+        print(f"Optimizer: base lr={base_lr:.2e} ({len(base_group)} tensors) | "
+              f"root_anchor lr={anchor_lr:.2e} ({len(root_anchor_params)} tensors)")
+    else:
+        optimizer = Adam(trainable_params, lr=base_lr)
     scheduler  = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=float(training_cfg.get("min_lr", 1e-6)))
 
     log_every  = training_cfg.get("log_every", 500)

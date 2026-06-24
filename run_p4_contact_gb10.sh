@@ -35,11 +35,12 @@ LOG="$OUT/contact_run.log"
 exec > >(tee "$LOG") 2>&1
 echo "### output -> $LOG (node-local, read live) | node $(hostname) | $(date) ###"
 
-echo "######## TRAIN p4_contact (bounded: 50 opt-steps, grad_accum=1) @ $(date) on $(hostname) ########"
+echo "######## TRAIN p4_contact (anchor-hard: 120 steps, anchor lr=1e-3) @ $(date) on $(hostname) ########"
 python -u -m scripts.train_hand_head --config configs/exp_p4_contact.yaml \
-  training.output_dir=/tmp/rt_contact training.max_steps=50 training.grad_accum_steps=1 \
+  training.output_dir=/tmp/rt_contact training.max_steps=120 training.grad_accum_steps=1 \
+  training.root_anchor_lr=1e-3 \
   training.root_anchor_warmup_steps=8 training.kp3d_abs_warmup_steps=8 \
-  training.log_every=5 training.val_every=25 training.val_max_batches=8 \
+  training.log_every=10 training.val_every=40 training.val_max_batches=8 \
   debug.enabled=true debug.max_sequences=8 2>&1 \
   | grep --line-buffered -vE "Loaded GT joints|Loaded 2D GT|No calibration for|\[VIS\]"
 
