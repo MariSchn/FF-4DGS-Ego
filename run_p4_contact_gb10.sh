@@ -24,15 +24,16 @@ mkdir -p /tmp/xc /tmp/th /tmp/hf /tmp/mpl
 cd /home/dmonopoli/FF-4DGS-Ego
 DR=/work/courses/3dv/team25/data/hot3d_aria/preprocessed_pinhole_f609
 
-# Persist all output to scratch — home is inode-full and node-local /tmp dies with
-# the job, so a --pty run loses its W number when the terminal/tmux goes away. Tee
-# stdout here and write the eval JSON here too. For disconnect-survival, run this
-# inside tmux (or via sbatch). Check progress/results: tail this log.
-OUT=/work/scratch/dmonopoli/joblogs
+# Scratch is at its inode quota and home/team25 are full, so write everything to
+# node-local /tmp (tens of GB free) and READ THE RESULT LIVE in tmux. /tmp dies
+# with the job, but the eval prints its full aggregate + per-seg gate-rate to
+# stdout, so nothing important is lost as long as you watch (or scroll back) the
+# tmux pane. Best-effort copy of the small JSON to home at the end (harmless if full).
+OUT=/tmp/p4out
 mkdir -p "$OUT"
 LOG="$OUT/contact_run.log"
 exec > >(tee "$LOG") 2>&1
-echo "### output -> $LOG | node $(hostname) | $(date) ###"
+echo "### output -> $LOG (node-local, read live) | node $(hostname) | $(date) ###"
 
 echo "######## TRAIN p4_contact (bounded: 50 opt-steps, grad_accum=1) @ $(date) on $(hostname) ########"
 python -u -m scripts.train_hand_head --config configs/exp_p4_contact.yaml \
@@ -58,4 +59,9 @@ python -u -m scripts.eval_world_space --config /tmp/eval_contact.yaml \
   --out "$OUT/world_eval_contact.json" 2>&1 \
   | grep --line-buffered -vE "fwd\+lift|Loaded GT joints|Loaded 2D GT|No calibration for|\[VIS\]"
 echo "######## DONE @ $(date) ########"
-echo "Compare: contact W-MPJPE pooled vs baseline 308.3, ceiling reanchor16=61.5"
+# Best-effort persist of the small JSON to home (few KB; harmless if home is full).
+cp "$OUT/world_eval_contact.json" "$HOME/world_eval_contact.json" 2>/dev/null \
+  && echo "saved JSON -> $HOME/world_eval_contact.json" \
+  || echo "(could not copy JSON to home — read the OURS/anchor lines above; /tmp is ephemeral)"
+echo "Compare: contact W-MPJPE pooled vs baseline 308.3 / suponly 250.2; ceiling re16~50-61"
+echo ">>> KEY DIAGNOSTIC: the per-seg 'anchor gate=..% |dz|=..mm' tells us if the anchor fired."

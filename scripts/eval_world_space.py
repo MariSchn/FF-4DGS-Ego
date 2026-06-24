@@ -78,7 +78,7 @@ def _world_from_cam(pj, c2w, s):
     return world
 
 
-def predict_clip(preds, mano_model, device, cam_intr, model=None):
+def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=None):
     """Run the hand head for one clip and gather its metric-scale correspondences.
 
     Returns ``(pj_cam, c2w, s_clip, ratios)``: ``pj_cam`` [S,H,J,3] metric camera-frame joints
@@ -118,10 +118,24 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None):
     if (model is not None and getattr(model, "enable_root_anchor", False)
             and gs_depth is not None and cam_intr is not None):
         from scripts.root_depth_anchor import apply_root_anchor
-        pred_joints, _, _ = apply_root_anchor(
+        pred_joints, _dz, _info = apply_root_anchor(
             model.root_depth_refine, pred_joints, gs_depth,
             preds.get("gs_depth_conf"), cam_intr.to(device),
         )
+        # Diagnostic: did the anchor fire (gate) and how big a correction (|dz|)?
+        # A near-zero gate-rate means the scene-depth reference was never trusted
+        # (HOT3D frozen gs_depth too weak / out of band); near-zero |dz| on a firing
+        # gate means the module never learned. Either explains an inert anchor.
+        if anchor_log is not None:
+            gate = _info["gate"]
+            gated = gate.float()
+            n_gate = float(gated.sum())
+            dz_gated = float((_dz.abs() * gated).sum() / n_gate) if n_gate > 0 else 0.0
+            anchor_log.append({
+                "gate_rate": float(gated.mean()),
+                "dz_gated_m": dz_gated,
+                "dz_max_m": float(_dz.abs().max()),
+            })
     return pred_joints[0].float().cpu(), c2w.cpu(), s, ratios
 
 
@@ -173,6 +187,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         base = seg * clips_per_seg
         clip_cams = []   # [(pj_cam [S,H,J,3], c2w [S,4,4], s_perclip), ...]
         s_pairs = []     # (s_gt, s_hand) per clip: GT camera-trajectory scale vs our hand scale (b)
+        anchor_log = []  # per-clip {gate_rate, dz_gated_m, dz_max_m} when the root anchor is active
         for c in range(clips_per_seg):
             print(f"  [clip seg{seg} {c + 1}/{clips_per_seg}] fwd+lift", flush=True)
             batch = ds[base + c]
@@ -188,7 +203,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                 cond_flags = [0, 0, 1]
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 preds = model(views, cond_flags=cond_flags, is_inference=True, use_motion=False)
-            cc = predict_clip(preds, mano_model, device, cam_intr, model=model)
+            cc = predict_clip(preds, mano_model, device, cam_intr, model=model, anchor_log=anchor_log)
             clip_cams.append(cc)
 
             # (b) GROUND-TRUTH SCALE check: the world placement scales the up-to-scale camera
@@ -323,6 +338,15 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             row[k + "_spool"] = g_pl[k]            # per-seq pooled scale (principled, sequence-level)
         row.update(sm_rows)
         row.update(scale_gt)
+        anchor_str = ""
+        if anchor_log:
+            g = sum(a["gate_rate"] for a in anchor_log) / len(anchor_log)
+            dz = sum(a["dz_gated_m"] for a in anchor_log) / len(anchor_log)
+            dzmax = max(a["dz_max_m"] for a in anchor_log)
+            row["anchor_gate_rate"] = g
+            row["anchor_dz_gated_mm"] = dz * 1000.0
+            row["anchor_dz_max_mm"] = dzmax * 1000.0
+            anchor_str = f" | anchor gate={g * 100:.0f}% |dz|={dz * 1000:.1f}mm(max {dzmax * 1000:.1f})"
         out.append(row)
         sm_str = ""
         if smooth_windows:
@@ -332,7 +356,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
               f"W perclip={g_pc['W_MPJPE']:.1f} smed={g_md['W_MPJPE']:.1f} spool={g_pl['W_MPJPE']:.1f} | "
               f"WA(s/l)={g_pc['WA_MPJPE_short']:.1f}/{g_pc['WA_MPJPE_long']:.1f} | "
               f"C(rr/abs)={c_rr:.1f}/{c_ab:.1f} | s med/pool={s_med:.3f}/{s_pool:.3f} ±{s_std:.3f} "
-              f"({g_pc['frames']}f){sm_str}", flush=True)
+              f"({g_pc['frames']}f){sm_str}{anchor_str}", flush=True)
     return out
 
 
