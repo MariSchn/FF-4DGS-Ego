@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import traceback
 
 import torch
 import yaml
@@ -421,6 +422,7 @@ def main():
                                     args.clip_len, args.stride, max_clips=args.max_clips)
             except Exception as ex:
                 print(f"[skip {os.path.basename(sq)}] {type(ex).__name__}: {ex}", flush=True)
+                traceback.print_exc()
                 e = None
             if e is not None:
                 ceil.append(e)
@@ -441,6 +443,7 @@ def main():
                                      smooth_windows=smooth_windows, dump_list=dump_list)
         except Exception as e:
             print(f"[skip {os.path.basename(sq)}] {type(e).__name__}: {e}", flush=True)
+            traceback.print_exc()
 
     if dump_list is not None:
         torch.save(dump_list, args.dump_traj)
