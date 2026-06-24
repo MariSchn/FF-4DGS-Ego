@@ -1,0 +1,108 @@
+# ==================================================================
+# P4-CONTACT: Phase-1 scene-depth root anchor. Forked from exp_p3_wabs.yaml.
+# ------------------------------------------------------------------
+# Same head + loss mix as the supervision-only W run (exp_p3_wabs), so
+# contact-W vs wabs-W isolates the anchor's contribution. Three deltas only:
+#   1. enable_gs: true        — gs_depth is the metric anchor reference (wabs had it off)
+#   2. enable_root_anchor: true + root_anchor_kwargs — own + apply RootDepthRefine
+#   3. loss_weights.root_anchor — gated consistency (corrected wrist z -> gs_depth)
+# Backbone + GS head stay frozen (freeze_gs_head: true); gs_depth is DETACHED in
+# the anchor, so with the backbone frozen there is no scene<->hand circularity.
+# The anchor is a post-hoc, feedforward, SLAM-free analog of the re16 GT-reanchor
+# oracle: re-anchor the hand root to the metric scene at every gated frame.
+# ==================================================================
+data:
+  data_root: "/work/courses/3dv/team25/data/hot3d_aria/preprocessed_pinhole_f609"
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.01
+  num_workers: 4
+# ------------------------------------------------------------------
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/work/courses/3dv/team25/checkpoints/default/hand_head_final.pt"
+  freeze_backbone: true
+  enable_scale_head: false
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: true              # <-- delta 1: gs_depth is the metric anchor reference
+  enable_root_anchor: true     # <-- delta 2: own + apply RootDepthRefine
+  root_anchor_kwargs:
+    hidden: 32
+    conf_thresh: 0.1
+    band_m: 0.5
+  hand_to_gs_injection:
+    enabled: false
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+# ------------------------------------------------------------------
+loss_weights:
+  kp3d:          0.05         # root-relative shape — protects articulation/WA
+  kp3d_abs:      0.3          # absolute camera-frame joints (same lever as wabs)
+  kp2d:          0.05
+  global_orient: 0.01
+  hand_pose:     0.01
+  betas:         0.01
+  transl:        1.0
+  root_anchor:   1.0          # <-- delta 3: gated consistency, corrected wrist z -> gs_depth
+  gs_l1:         0.0          # GS frozen: no reconstruction training
+  gs_lpips:      0.0
+  hand_depth_anchor: 0.0      # this is hand->scene; the anchor is scene->hand
+# ------------------------------------------------------------------
+metric_scale:
+  enable: true
+  clamp: [0.1, 10.0]
+# ------------------------------------------------------------------
+training:
+  lr: 2e-5                    # nudge the warm-started head; same as wabs
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 4
+  grad_accum_steps: 8
+  use_amp: true
+  log_every: 25
+  val_every: 50
+  val_max_batches: 12
+  save_every: 1000000
+  grad_clip_norm: 5.0
+  kp3d_abs_warmup_steps: 50
+  root_anchor_warmup_steps: 50   # ramp the gated consistency loss in fast
+  freeze_gs_head: true           # keep the GS (gs_head + injection) frozen; anchor only READS gs_depth
+  keep_last_checkpoints: 0
+  seed: 42
+  output_dir: "/work/courses/3dv/team25/checkpoints/p4_contact"
+# ------------------------------------------------------------------
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 4
+# ------------------------------------------------------------------
+hand_crop:
+  rescale_factor: 1.5
+# ------------------------------------------------------------------
+debug:
+  enabled: false
+  max_sequences: 5
+  single_frame: false
+# ------------------------------------------------------------------
+wandb:
+  enabled: false
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "P4-CONTACT: scene-depth root anchor (frozen backbone, GS on)"
+  tags: []
+  notes: null
