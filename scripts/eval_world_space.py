@@ -159,7 +159,7 @@ def _intr_3x3(cam_intr, res, device):
 def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len, stride, wa_short,
                   max_segs=0, feed_intrinsics=False, smooth_windows=None, dump_list=None,
                   refine_pose=False, refine_iters=40, refine_lr=3e-3, refine_frame_stride=1,
-                  refine_sanity=False):
+                  refine_sanity=False, robust_scale=False):
     """Eval all `segment_len` segments of one sequence; return list of per-segment metrics.
 
     ``feed_intrinsics``: condition the backbone on the *known* camera intrinsics (ray prior,
@@ -282,7 +282,18 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         s_std = float(scales.std()) if scales.numel() > 1 else 0.0
         pooled = [r for (_, _, _, r) in clip_cams if r.numel()]
         all_ratios = torch.cat(pooled) if pooled else torch.empty(0)
-        s_pool = float(all_ratios.median().clamp(0.1, 10.0)) if all_ratios.numel() else s_med
+        if robust_scale and all_ratios.numel():
+            # MAD outlier rejection before the median: the W-decomposition flagged the pooled
+            # hand scale as biased (+14-27% vs the true cam-center scale) AND heavy-tailed, and the
+            # world-lift multiplies camera translation by it. Tukey/MAD reject (k=3) trims the
+            # heavy z_hand/scene_depth tails so a few bad depth samples stop dragging the median.
+            med = all_ratios.median()
+            mad = (all_ratios - med).abs().median().clamp_min(1e-6)
+            keep = (all_ratios - med).abs() <= 3.0 * 1.4826 * mad
+            rr = all_ratios[keep] if bool(keep.any()) else all_ratios
+            s_pool = float(rr.median().clamp(0.1, 10.0))
+        else:
+            s_pool = float(all_ratios.median().clamp(0.1, 10.0)) if all_ratios.numel() else s_med
 
         worlds_pc = [_world_from_cam(pj, c2w, s) for (pj, c2w, s, _) in clip_cams]       # per-clip
         worlds_md = [_world_from_cam(pj, c2w, s_med) for (pj, c2w, _, _) in clip_cams]   # per-seq median
@@ -465,6 +476,8 @@ def main():
     ap.add_argument("--refine_iters", type=int, default=40, help="pose-refine Adam iters per frame")
     ap.add_argument("--refine_lr", type=float, default=3e-3, help="pose-refine se3 learning rate")
     ap.add_argument("--refine_frame_stride", type=int, default=1, help="refine every Nth frame (speed)")
+    ap.add_argument("--robust_scale", action="store_true",
+                    help="MAD-reject z_hand/scene_depth outliers before the per-seq pooled scale median")
     ap.add_argument("--out", default="world_eval.json")
     args = ap.parse_args()
 
@@ -516,7 +529,7 @@ def main():
                                      smooth_windows=smooth_windows, dump_list=dump_list,
                                      refine_pose=args.refine_pose, refine_iters=args.refine_iters,
                                      refine_lr=args.refine_lr, refine_frame_stride=args.refine_frame_stride,
-                                     refine_sanity=args.refine_sanity)
+                                     refine_sanity=args.refine_sanity, robust_scale=args.robust_scale)
         except Exception as e:
             print(f"[skip {os.path.basename(sq)}] {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
