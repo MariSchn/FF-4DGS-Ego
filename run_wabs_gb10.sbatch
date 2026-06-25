@@ -2,7 +2,7 @@
 #SBATCH --account=3dv
 #SBATCH --gpus=gb10:1
 #SBATCH --mem=48G
-#SBATCH --time=02:00:00
+#SBATCH --time=03:00:00
 #SBATCH --job-name=wabs
 #SBATCH --output=/work/scratch/dmonopoli/joblogs/wabs_%j.out
 #SBATCH --error=/work/scratch/dmonopoli/joblogs/wabs_%j.err
@@ -39,9 +39,13 @@ RES=/work/scratch/dmonopoli/wabs_results
 mkdir -p "$RES"
 
 echo "######## TRAIN exp_p3_wabs (kp3d_abs 0->0.3, frozen backbone, GS off) ########"
+# grad_accum_steps=1 so max_steps directly bounds FORWARD iterations (the config's
+# default grad_accum=8 made max_steps=600 mean 4800 iters ~= 13h, which timed out at
+# the 2h wall). ~9.7s/it on the frozen backbone -> 400 iters ~= 65 min train, +eval.
 python -u -m scripts.train_hand_head --config configs/exp_p3_wabs.yaml \
   data.data_root="$HOT3D" training.output_dir="$OUT" \
-  training.max_steps=600 training.val_every=100 training.log_every=20 2>&1 \
+  training.grad_accum_steps=1 training.max_steps=400 \
+  training.val_every=100 training.log_every=20 2>&1 \
   | grep --line-buffered -vE "Loaded GT joints|Loaded 2D GT|No calibration for|\[VIS\]"
 
 CKPT="$OUT/hand_head_final.pt"
