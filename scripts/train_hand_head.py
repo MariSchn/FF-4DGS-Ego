@@ -225,6 +225,17 @@ class HOT3DHandDataset(Dataset):
                 else:
                     print(f"No calibration for {seq_path} — 2D loss unavailable for this sequence.")
 
+            # cam_intrinsics is needed by the root anchor + metric/2D-reproj losses and
+            # is written by EVERY preprocessor (incl. the HOI4D cam-only path) even when
+            # the 2D / extrinsics caches are absent. The branches above only load it on a
+            # HOT3D-style three-cache hit (or a successful compute), so load it
+            # independently here: gating cam_intrinsics behind the 2D/extrinsics caches
+            # silently dropped it for HOI4D, starving the root anchor (its train block
+            # requires "cam_intrinsics" in batch and so never fired -> Δz stayed zero).
+            if seq_cam_intrinsics is None and os.path.exists(cam_intr_cache_path):
+                seq_cam_intrinsics = torch.load(cam_intr_cache_path, weights_only=True)
+                print(f"Loaded cam_intrinsics (no 2D/extrinsics cache) for {seq_path}.")
+
             # Handle Bounding Boxes (rewrites gt_per_frame into camera frame on a hit).
             if self.use_hand_crop:
                 cache_name = f"hand_bboxes_v2_rf{self.rescale_factor}_res{res[0]}x{res[1]}.pt"
@@ -289,6 +300,9 @@ class HOT3DHandDataset(Dataset):
                 if seq_gt_joints_2d is not None:
                     clip["gt_joints_2d"]   = seq_gt_joints_2d[start : end].clone()    # [S, 2, 16, 3]
                     clip["cam_extrinsics"] = seq_cam_extrinsics[start : end].clone()  # [S, 4, 4]
+                # cam_intrinsics is attached independently of the 2D/extrinsics caches:
+                # the root anchor + metric losses need it even when there is no 2D GT.
+                if seq_cam_intrinsics is not None:
                     clip["cam_intrinsics"] = seq_cam_intrinsics                # [3]
                 self.clips.append(clip)
         self.mano_model = None
@@ -375,6 +389,9 @@ class HOT3DHandDataset(Dataset):
         if "gt_joints_2d" in clip:
             out["gt_joints_2d"]   = clip["gt_joints_2d"]    # [S, 2, 16, 3]
             out["cam_extrinsics"] = clip["cam_extrinsics"]  # [S, 4, 4]
+        # Emitted independently of the 2D cache so HOI4D (cam-only) batches still carry
+        # intrinsics for the root anchor + metric losses.
+        if "cam_intrinsics" in clip:
             out["cam_intrinsics"] = clip["cam_intrinsics"]  # [3]
 
         if self.render_obj_depth and "cam_extrinsics" in clip:
@@ -1751,15 +1768,31 @@ def train():
             # the loss is assembled once has_hand exists.
             loss_root_anchor = torch.zeros((), device=device)
             _ra_inputs = None
-            if getattr(model, "enable_root_anchor", False) and "cam_intrinsics" in batch:
-                _gs_depth_ra = preds.get("gs_depth")
-                if _gs_depth_ra is not None:
-                    from scripts.root_depth_anchor import apply_root_anchor
-                    pred_joints, _ra_delta, _ra_info = apply_root_anchor(
-                        model.root_depth_refine, pred_joints, _gs_depth_ra,
-                        preds.get("gs_depth_conf"), batch["cam_intrinsics"].to(device),
-                    )
-                    _ra_inputs = (pred_joints[:, :, :, 0, 2], _ra_info["d_scene"], _ra_info["gate"])
+            if getattr(model, "enable_root_anchor", False):
+                # Self-diagnosing guard: if the anchor is enabled but cam_intrinsics is
+                # missing from the batch, the apply block can never run and the zero-init
+                # Δz MLP never trains (it stays at exactly 0 -> eval shows dz==0, ON==OFF).
+                # That silent starvation is exactly what a missing-intrinsics dataset path
+                # caused on HOI4D; warn ONCE so it can't pass unnoticed again.
+                if "cam_intrinsics" not in batch:
+                    if not getattr(model, "_warned_anchor_no_intr", False):
+                        print("[anchor][WARN] enable_root_anchor=True but cam_intrinsics is "
+                              "absent from the batch — the root anchor is INERT (Δz never "
+                              "trains). Check the dataset cam_intrinsics path / preprocess cache.")
+                        model._warned_anchor_no_intr = True
+                else:
+                    _gs_depth_ra = preds.get("gs_depth")
+                    if _gs_depth_ra is not None:
+                        from scripts.root_depth_anchor import apply_root_anchor
+                        pred_joints, _ra_delta, _ra_info = apply_root_anchor(
+                            model.root_depth_refine, pred_joints, _gs_depth_ra,
+                            preds.get("gs_depth_conf"), batch["cam_intrinsics"].to(device),
+                        )
+                        if not getattr(model, "_logged_anchor_fired", False):
+                            print("[anchor] block fired (cam_intrinsics + gs_depth present) — "
+                                  "Δz MLP is receiving gradient")
+                            model._logged_anchor_fired = True
+                        _ra_inputs = (pred_joints[:, :, :, 0, 2], _ra_info["d_scene"], _ra_info["gate"])
 
             # GS reconstruction loss (L1 + LPIPS) on the rendered views.
             # Gated on model.enable_gs (so disabled-GS configs are bit-for-bit
