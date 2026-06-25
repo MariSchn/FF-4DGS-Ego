@@ -157,7 +157,9 @@ def _intr_3x3(cam_intr, res, device):
 
 
 def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len, stride, wa_short,
-                  max_segs=0, feed_intrinsics=False, smooth_windows=None, dump_list=None):
+                  max_segs=0, feed_intrinsics=False, smooth_windows=None, dump_list=None,
+                  refine_pose=False, refine_iters=40, refine_lr=3e-3, refine_frame_stride=1,
+                  refine_sanity=False):
     """Eval all `segment_len` segments of one sequence; return list of per-segment metrics.
 
     ``feed_intrinsics``: condition the backbone on the *known* camera intrinsics (ray prior,
@@ -210,6 +212,24 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                 cond_flags = [0, 0, 1]
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 preds = model(views, cond_flags=cond_flags, is_inference=True, use_motion=False)
+            # Per-clip camera-pose refinement: sharpen each frame's pose against the clip's own
+            # static Gaussian map (the per-clip-pose bottleneck the oracle-cam diagnostic exposed).
+            # Runs in fp32 outside the autocast block; overwrites the c2w predict_clip lifts with.
+            if refine_pose and "splats" in preds and "rendered_extrinsics" in preds:
+                from scripts.pose_refine import refine_clip_poses
+                ref_ext, rinfo = refine_clip_poses(
+                    model.gs_renderer.rasterizer, preds["splats"][0],
+                    preds["rendered_extrinsics"][0].float(), preds["rendered_intrinsics"][0].float(),
+                    imgs[0].float(), hand_bboxes=(hb[0].float() if hb is not None else None),
+                    iters=refine_iters, lr=refine_lr, frame_stride=refine_frame_stride,
+                    sanity=refine_sanity)
+                if not refine_sanity:
+                    preds["rendered_extrinsics"] = ref_ext.unsqueeze(0).to(
+                        preds["rendered_extrinsics"].dtype)
+                print(f"  [refine seg{seg} c{c + 1}] conv={rinfo.get('conv')} nG={rinfo.get('n_gauss')} "
+                      f"psnr ff={rinfo.get('psnr_ff_mean', float('nan')):.1f}"
+                      f"->ref={rinfo.get('psnr_ref_mean', float('nan')):.1f} "
+                      f"improved={rinfo.get('improved')}/{rinfo.get('n_frames')}", flush=True)
             cc = predict_clip(preds, mano_model, device, cam_intr, model=model, anchor_log=anchor_log)
             clip_cams.append(cc)
 
@@ -438,6 +458,13 @@ def main():
                     help="comma-separated odd window sizes for the root-smoothing diagnostic (e.g. 3,9,15,31)")
     ap.add_argument("--dump_traj", default="",
                     help="if set, torch.save per-segment pooled trajectories here for an offline smoothing sweep")
+    ap.add_argument("--refine_pose", action="store_true",
+                    help="per-clip camera-pose refinement (render-and-optimize against the clip's static map)")
+    ap.add_argument("--refine_sanity", action="store_true",
+                    help="refine_pose plumbing check: report feedforward-pose render PSNR only, no optimization")
+    ap.add_argument("--refine_iters", type=int, default=40, help="pose-refine Adam iters per frame")
+    ap.add_argument("--refine_lr", type=float, default=3e-3, help="pose-refine se3 learning rate")
+    ap.add_argument("--refine_frame_stride", type=int, default=1, help="refine every Nth frame (speed)")
     ap.add_argument("--out", default="world_eval.json")
     args = ap.parse_args()
 
@@ -486,7 +513,10 @@ def main():
             results += eval_sequence(model, mano_model, device, sq, cfg,
                                      args.segment_len, args.clip_len, args.stride, args.wa_short,
                                      max_segs=args.max_segs, feed_intrinsics=args.feed_intrinsics,
-                                     smooth_windows=smooth_windows, dump_list=dump_list)
+                                     smooth_windows=smooth_windows, dump_list=dump_list,
+                                     refine_pose=args.refine_pose, refine_iters=args.refine_iters,
+                                     refine_lr=args.refine_lr, refine_frame_stride=args.refine_frame_stride,
+                                     refine_sanity=args.refine_sanity)
         except Exception as e:
             print(f"[skip {os.path.basename(sq)}] {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
