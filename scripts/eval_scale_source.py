@@ -123,8 +123,8 @@ def main():
         seqs = seqs[:1]
     print(f"[scale-source] {len(seqs)} seqs with BOTH raw_depth and hand caches", flush=True)
 
-    acc = {k: [] for k in ("none", "hand", "oracle", "fm")}
-    s_acc = {k: [] for k in ("hand", "oracle", "fm")}
+    acc = {k: [] for k in ("none", "hand", "hand_robust", "oracle", "fm")}
+    s_acc = {k: [] for k in ("hand", "hand_robust", "oracle", "fm")}
     per_seq = []
     S, res = args.num_frames, args.res
     for sq in seqs:
@@ -135,6 +135,8 @@ def main():
         deps_f = sorted(glob.glob(os.path.join(args.raw, sq, "raw_depth", "*.png")))
         n = min(len(imgs_f), len(deps_f), gtj.shape[0])
         seq_err = {k: [] for k in acc}
+        seq_s_hand = []                 # per-clip hand scales -> one robust seq scale below
+        seq_clip_gv = []                # per-clip (valid gs, valid gt) to re-score with that scale
         clips = list(range(0, n - S + 1, args.stride))[: (2 if args.smoke else args.max_clips_per_seq)]
         for t in clips:
             img = torch.stack([_load_img(imgs_f[t + k], res) for k in range(S)]).unsqueeze(0).to(device)  # [1,S,3,res,res]
@@ -175,6 +177,21 @@ def main():
             s_acc["hand"].append(s_hand); s_acc["oracle"].append(s_oracle)
             if fm is not None:
                 s_acc["fm"].append(s_fm)
+            seq_s_hand.append(s_hand)
+            seq_clip_gv.append((gsf[v].detach(), gtf[v].detach()))
+        # ROBUST hand scale: pool this seq's per-clip scales, MAD-reject outliers (the clips
+        # whose scale collapses to the 0.1 floor), take one median scale, re-score every clip.
+        if seq_s_hand:
+            rs = np.asarray(seq_s_hand, dtype=np.float64)
+            med = float(np.median(rs))
+            mad = float(np.median(np.abs(rs - med)))
+            tol = 3.0 * 1.4826 * mad if mad > 1e-6 else float("inf")
+            keep = np.abs(rs - med) <= tol
+            robust_s = float(np.median(rs[keep])) if keep.any() else med
+            s_acc["hand_robust"].append(robust_s)
+            for gv, tv in seq_clip_gv:
+                if gv.numel():
+                    seq_err["hand_robust"].append(float((robust_s * gv - tv).abs().mean() * 100.0))
         row = {"seq": sq, "n_clips": len(clips)}
         for k in acc:
             vals = [e for e in seq_err[k] if e == e]
@@ -190,9 +207,10 @@ def main():
     agg["fm_available"] = fm is not None
     json.dump({"aggregate": agg, "per_seq": per_seq}, open(args.out, "w"), indent=2)
     print("\n==== SCALE-SOURCE ABLATION (non-hand scene depth error, cm; lower better) ====")
-    print(f"  none(s=1)={agg['none_cm']:.1f}  HAND={agg['hand_cm']:.1f}  oracle={agg['oracle_cm']:.1f}  "
-          f"fm(UniDepth)={agg.get('fm_cm', float('nan')):.1f}  (fm_available={fm is not None})")
-    print(f"  scales: s_hand={agg['s_hand_med']:.3f}  s_oracle={agg['s_oracle_med']:.3f}  s_fm={agg.get('s_fm_med', float('nan')):.3f}")
+    print(f"  none(s=1)={agg['none_cm']:.1f}  HAND={agg['hand_cm']:.1f}  HAND_robust={agg['hand_robust_cm']:.1f}  "
+          f"oracle={agg['oracle_cm']:.1f}  fm(UniDepth)={agg.get('fm_cm', float('nan')):.1f}  (fm_available={fm is not None})")
+    print(f"  scales: s_hand={agg['s_hand_med']:.3f}  s_hand_robust={agg['s_hand_robust_med']:.3f}  "
+          f"s_oracle={agg['s_oracle_med']:.3f}  s_fm={agg.get('s_fm_med', float('nan')):.3f}")
     print(f"  -> CLAIM holds if HAND approx oracle AND HAND < fm. n={agg['n_seqs']} seqs -> {args.out}")
 
 
