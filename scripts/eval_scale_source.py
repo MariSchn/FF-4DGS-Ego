@@ -31,7 +31,7 @@ import yaml
 
 from scripts.train_hoi4d_depth import build_model
 from scripts.train_hand_head import build_views
-from scripts.metric_scale_head import solve_metric_scale
+from diffsynth.auxiliary_models.worldmirror.models.heads.metric_scale_head import solve_metric_scale
 from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
     project_joints_to_norm_pixels, sample_depth_at_joints,
 )
