@@ -1,0 +1,118 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.7in]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\renewcommand{\arraystretch}{1.05}
+\begin{document}
+\pagestyle{empty}
+
+\begin{center}
+{\large\textbf{FF-4DGS-Ego: hand pose, placement, and metric scale}}
+\end{center}
+
+\vspace{0.2em}
+{\small\noindent Protocols differ. EgoGrasp, Dyn-HaMR and HaWoR evaluate over 128-frame world-space
+segments with SLAM at full resolution; ours is feedforward, per 16-frame clip, in the camera frame at
+224\,px. The numbers below are therefore not a direct head-to-head, and we do not claim to beat these
+methods on hand metrics.}
+
+\vspace{0.5em}
+\noindent\textbf{Table 1.\quad H2O hand pose, PA-MPJPE (mm, lower is better).}
+\begin{center}\begin{tabular}{lcc}
+\toprule
+Method & PA-MPJPE & Protocol \\
+\midrule
+Dyn-HaMR & \textbf{16.7} & world-space, SLAM (reported) \\
+EgoGrasp & 18.9 & world-space, SLAM (reported) \\
+HaWoR & 30.8 & world-space, SLAM (reported) \\
+Ours (FF-4DGS-Ego) & 46.8 & feedforward, per-clip (clean subj1$\to$4) \\
+WiLoR (single-image) & 47.6 & our run \\
+\bottomrule
+\end{tabular}\end{center}
+{\small\noindent The Dyn-HaMR / EgoGrasp / HaWoR H2O PA-MPJPE values are re-runs reported in
+\emph{EgoGrasp} (arXiv:2601.01050, v2) Table~2; the methods' own papers do not all self-report H2O
+PA-MPJPE. \textbf{Verify against EgoGrasp v2 Table~2 before submission.}}
+
+\vspace{0.3em}
+\noindent\textbf{Table 2.\quad Our H2O numbers (21-joint, mm). PA on the clean subject1$\to$4 split;
+the absolute columns are from the mixed eval set (clean-split re-eval pending).}
+\begin{center}\begin{tabular}{lccc}
+\toprule
+ & PA-MPJPE & C-MPJPE (abs.) & WRIST (abs.) \\
+\midrule
+Ours (FF-4DGS-Ego) & 46.8 & 58.0$^\dagger$ & 36.6$^\dagger$ \\
+\bottomrule
+\end{tabular}\end{center}
+{\small\noindent $^\dagger$ C-MPJPE / WRIST are from the mixed all-subjects eval set, \emph{not} the
+held-out subject-4 split; a clean-split re-evaluation of the fine-tuned head is pending.}
+
+\vspace{0.3em}
+\noindent\textbf{Table 3.\quad Absolute placement gain from the 3D-joint loss (HOT3D, 9-seq split, mm).}
+\begin{center}\begin{tabular}{lcc}
+\toprule
+ & Absolute MPJPE & Hand depth \\
+\midrule
+Shape-only loss (no abs-3D) & 81 & n/a \\
+With absolute 3D-joint loss (ours) & \textbf{53}\ ($-$35\%) & $\sim$4.5\,cm \\
+\bottomrule
+\end{tabular}\end{center}
+{\small\noindent Both rows report \emph{absolute} MPJPE (no alignment); the Procrustes-aligned
+shape error (PA-MPJPE) is $\approx$\,8\,mm and is not what this table measures.}
+
+\vspace{0.3em}
+\noindent\textbf{Table 4.\quad Metric scale and depth (lower is better).}
+\begin{center}\begin{tabular}{llc}
+\toprule
+Setting & Source & Depth error \\
+\midrule
+Hand anchor (HOT3D) & in-scene MANO hand (ours) & \textbf{4.5\,cm} \\
+Hand anchor (HOT3D) & UniDepth-V2 (depth FM) & 15.7\,cm \\
+GS scene depth (HOI4D) & no supervision & 20.5\,cm \\
+GS scene depth (HOI4D) & with GT depth (ours, no mask) & \textbf{13.4\,cm} \\
+Object depth (HOT3D) & frozen, no metric loss & 62\,cm \\
+Object depth (HOT3D) & frozen + hand anchor (sep.\ ckpt) & 135\,cm (degrades) \\
+\bottomrule
+\end{tabular}\end{center}
+{\small\noindent The two object-depth rows are \emph{separate} frozen-backbone checkpoints
+(hand-anchor weight 0.0 vs 0.1); the anchor distorts non-hand-region depth when the backbone is frozen.
+The HOI4D 13.4\,cm is best-so-far from an interrupted run (see Table 6 note).}
+
+\vspace{0.3em}
+\noindent\textbf{Table 5.\quad World-space placement, reported competitors (mm, lower is better).}
+\begin{center}\begin{tabular}{lccl}
+\toprule
+Method & C-MPJPE & WA-MPJPE (short / long) & Dataset \\
+\midrule
+HaWoR & 51.8 & 22.5 / 27.4 & HOI4D \\
+Hand3R & 42.6 & 38.0 / 56.7 & HOI4D \\
+Ours (FF-4DGS-Ego, SLAM-free) & 93.0 & \textbf{21.1} / 46.6 & HOI4D \\
+\bottomrule
+\end{tabular}\end{center}
+{\small\noindent The HaWoR HOI4D row is a re-run reported in \emph{Hand3R Table II}
+(arXiv:2602.03200), not HaWoR's own paper (which has no HOI4D / C-MPJPE); Hand3R's row is its own.
+C-MPJPE is absolute camera-frame (no alignment); WA-MPJPE aligns the trajectory (short/long
+$=30/100$ frames). Ours: SLAM-free feedforward per-clip chaining (no DROID-SLAM), over 11 HOI4D
+sequences (ZY20210800001), one 128-frame segment each; absolute W-MPJPE $=353$\,mm, and WA-MPJPE
+(our per-window Umeyama Sim(3)) is $21/47$\,mm short/long, so the W-vs-WA gap is global chaining/scale
+drift. For reference, HaWoR reports HOT3D \emph{W-MPJPE} $33.2$ / WA $11.3$ in its own Table~3 (a
+different dataset and metric, not directly comparable). Competitors use SLAM for the global trajectory.}
+
+\vspace{0.3em}
+\noindent\textbf{Table 6.\quad Scale-mechanism verdicts (trend over training, lower is better).}
+\begin{center}\begin{tabular}{llc}
+\toprule
+Route & Quantity & Trend \\
+\midrule
+(b) feedforward scale head & metric-scale residual & 14.1 $\rightarrow$ 13.1 cm \\
+(a) partial unfreeze + GT depth & HOT3D object depth & 23.8 $\rightarrow$ 22.3 cm \\
+(a) HOI4D dense depth (best-so-far) & dense scene depth & \textbf{20.5 $\rightarrow$ 13.4 cm} \\
+\bottomrule
+\end{tabular}\end{center}
+{\small\noindent The (a) and (b) trends are directional, from short runs on a few sequences
+(storage-quota limited); the HOI4D row is best-so-far from a run cancelled at step 80 (residuals still
+oscillating 3--12\,cm), \emph{not} a converged number. They establish that the metric coupling is
+learnable (b) and that unfreezing pulls the scene toward metric rather than distorting it (a, opposite
+sign to the frozen-backbone baseline). Converged magnitudes are in progress.}
+
+\end{document}
