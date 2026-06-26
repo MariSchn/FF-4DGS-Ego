@@ -147,7 +147,10 @@ def main():
             if gsd is None:
                 continue
             gsd = gsd.float().reshape(S, res, res)                                                         # up-to-scale depth
-            has_hand = torch.ones(1, S, 2, device=device)
+            has_hand = torch.zeros(1, S, 2, device=device)
+            has_hand[..., RH] = 1.0          # HOI4D releases the RIGHT hand only; the left
+            #                                  slot is empty -> marking it valid collapses the
+            #                                  scale median onto the 0.1 clamp floor.
             s_hand = float(solve_metric_scale(j, gsd.reshape(1, S, 1, res, res), has_hand, ci))
             hm = _hand_mask(j, ci, S, res, res, device)                                                    # [S,res,res] hand region
             # FM scale (masked scene): scale gs to the FM's metric depth over non-hand pixels.
