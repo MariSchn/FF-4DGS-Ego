@@ -6,12 +6,15 @@
 # Creds inherited from the submit env ($H2O_USER / $H2O_PASS); never hardcode them.
 #SBATCH --job-name=h2opack4
 #SBATCH --account=3dv
-#SBATCH --partition=interactive-cpu
-#SBATCH --cpus-per-task=4
+#SBATCH --ntasks=1
 #SBATCH --mem=16G
 #SBATCH --time=04:00:00
 #SBATCH --output=/work/scratch/dmonopoli/joblogs/%j_h2opack4.out
 #SBATCH --error=/work/scratch/dmonopoli/joblogs/%j_h2opack4.out
+# NOTE: dropped --cpus-per-task / --partition=interactive-cpu (cluster rejected them:
+# "TRES per task not allowed" + "Invalid gres"). Default partition, single task. If the
+# default partition lands this on a GPU node and blocks QOS=1, instead run the one-liner
+# at the bottom of this file directly (it is just a curl|python stream, no GPU needed).
 set -uo pipefail
 cd /home/dmonopoli/FF-4DGS-Ego
 
@@ -38,3 +41,12 @@ echo ">>> subject4 npz now present:"
 ls -1 "$OUT" | grep -c "^subject4" | sed 's/^/    subject4 seqs: /'
 echo ">>> total packed seqs: $(ls -1 "$OUT"/*.npz 2>/dev/null | wc -l)"
 echo ">>> next: re-run  sbatch run_b3_h2o_subj4.sbatch  (GPU) to get the held-out numbers."
+
+# ---------------------------------------------------------------------------
+# FALLBACK (no SLURM): if sbatch keeps rejecting the header, run this in a tmux
+# pane on a CPU/interactive node (NOT a heavy job, just a stream). Needs
+# H2O_USER/H2O_PASS exported and system python3 with numpy+PIL:
+#   curl -fsSL -u "$H2O_USER:$H2O_PASS" \
+#     https://h2odataset.ethz.ch/data/dataset/subject4_ego_v1_1.tar.gz \
+#     | python3 scripts/pack_h2o.py --out /work/scratch/dmonopoli/h2o_packed --res 224
+# ---------------------------------------------------------------------------
