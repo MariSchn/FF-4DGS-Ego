@@ -12,6 +12,9 @@ CPU machine.
 import torch
 
 from scripts.contact_mask import is_contact
+from diffsynth.auxiliary_models.worldmirror.models.heads.root_depth_refine import (
+    RootDepthRefine,
+)
 
 
 def test_is_contact_true_when_within_threshold():
@@ -28,3 +31,28 @@ def test_is_contact_false_when_out_of_frame_or_no_depth():
     in_frame = torch.tensor([[[False, True]]])  # hand0 out of frame
     m = is_contact(wrist_z, dense_at, in_frame, thresh_m=0.05)
     assert m.tolist() == [[[False, False]]]
+
+
+def test_external_contact_gate_overrides_band():
+    m = RootDepthRefine(hidden=4, conf_thresh=0.1, band_m=0.05)
+    with torch.no_grad():                       # force a non-zero delta so gating is observable
+        m.net[-1].weight.fill_(1.0)
+        m.net[-1].bias.fill_(0.5)
+    wrist_z = torch.tensor([[[0.40, 0.40]]])
+    d_scene = torch.tensor([[[0.90, 0.90]]])    # disagree 0.50 >> band_m
+    conf = torch.ones(1, 1, 2)
+    in_frame = torch.ones(1, 1, 2, dtype=torch.bool)
+    contact = torch.tensor([[[True, False]]])
+    delta, gate = m(wrist_z, d_scene, conf, in_frame, contact=contact)
+    assert gate.tolist() == [[[True, False]]]   # contact fires hand0 despite 50cm disagreement
+    assert delta[0, 0, 1].item() == 0.0          # hand1 gated off
+
+
+def test_falls_back_to_band_when_no_contact():
+    m = RootDepthRefine(hidden=4, conf_thresh=0.1, band_m=0.05)
+    wrist_z = torch.tensor([[[0.40, 0.40]]])
+    d_scene = torch.tensor([[[0.42, 0.90]]])    # hand0 2cm (in band), hand1 50cm (out)
+    conf = torch.ones(1, 1, 2)
+    in_frame = torch.ones(1, 1, 2, dtype=torch.bool)
+    _, gate = m(wrist_z, d_scene, conf, in_frame)   # no contact arg -> band proxy
+    assert gate.tolist() == [[[True, False]]]

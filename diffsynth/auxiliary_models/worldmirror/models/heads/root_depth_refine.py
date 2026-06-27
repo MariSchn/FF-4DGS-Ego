@@ -26,10 +26,15 @@ class RootDepthRefine(nn.Module):
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
 
-    def forward(self, wrist_z, d_scene, conf, in_frame):
-        """All inputs [B, S, 2] (per hand). Returns (delta_z [B,S,2], gate bool [B,S,2])."""
+    def forward(self, wrist_z, d_scene, conf, in_frame, contact=None):
+        """All inputs [B, S, 2] (per hand). Returns (delta_z [B,S,2], gate bool [B,S,2]).
+        When ``contact`` (bool [B,S,2]) is given it REPLACES the |disagree|<band_m
+        proxy: fire where the hand actually touches the surface (the scale-source
+        test showed the scene depth is reliable there, biased in free space). The
+        proxy gate is kept as the fallback for inputs without a contact signal."""
         disagree = d_scene - wrist_z
         feats = torch.stack([wrist_z, d_scene, disagree, conf], dim=-1)  # [B,S,2,4]
         delta = self.net(feats).squeeze(-1)  # [B,S,2]
-        gate = in_frame & (conf > self.conf_thresh) & (disagree.abs() < self.band_m)
+        reliable = contact.bool() if contact is not None else (disagree.abs() < self.band_m)
+        gate = in_frame & (conf > self.conf_thresh) & reliable
         return delta * gate.float(), gate
