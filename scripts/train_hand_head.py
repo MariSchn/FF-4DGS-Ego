@@ -236,6 +236,14 @@ class HOT3DHandDataset(Dataset):
                 seq_cam_intrinsics = torch.load(cam_intr_cache_path, weights_only=True)
                 print(f"Loaded cam_intrinsics (no 2D/extrinsics cache) for {seq_path}.")
 
+            # contact_cache (Phase-2 anchor gate): per-frame, per-hand bool from
+            # scripts.build_contact_cache (GT wrist on the GT surface). Loaded
+            # independently like cam_intrinsics; absent -> None -> the anchor falls
+            # back to the |disagree|<band_m proxy (back-compat, no crash).
+            contact_cache_path = os.path.join(hand_data_root, "contact_cache.pt")
+            seq_contact = (torch.load(contact_cache_path, weights_only=True).bool()
+                           if os.path.exists(contact_cache_path) else None)
+
             # Handle Bounding Boxes (rewrites gt_per_frame into camera frame on a hit).
             if self.use_hand_crop:
                 cache_name = f"hand_bboxes_v2_rf{self.rescale_factor}_res{res[0]}x{res[1]}.pt"
@@ -304,6 +312,8 @@ class HOT3DHandDataset(Dataset):
                 # the root anchor + metric losses need it even when there is no 2D GT.
                 if seq_cam_intrinsics is not None:
                     clip["cam_intrinsics"] = seq_cam_intrinsics                # [3]
+                if seq_contact is not None:
+                    clip["contact"] = seq_contact[start : end].clone()         # [S, 2] bool
                 self.clips.append(clip)
         self.mano_model = None
 
@@ -393,6 +403,8 @@ class HOT3DHandDataset(Dataset):
         # intrinsics for the root anchor + metric losses.
         if "cam_intrinsics" in clip:
             out["cam_intrinsics"] = clip["cam_intrinsics"]  # [3]
+        if "contact" in clip:
+            out["contact"] = clip["contact"]                # [S, 2] bool (Phase-2 anchor gate)
 
         if self.render_obj_depth and "cam_extrinsics" in clip:
             od_maps, od_masks = self._render_clip_obj_depth(clip)
@@ -1787,6 +1799,7 @@ def train():
                         pred_joints, _ra_delta, _ra_info = apply_root_anchor(
                             model.root_depth_refine, pred_joints, _gs_depth_ra,
                             preds.get("gs_depth_conf"), batch["cam_intrinsics"].to(device),
+                            contact_mask=(batch["contact"].to(device) if "contact" in batch else None),
                         )
                         if not getattr(model, "_logged_anchor_fired", False):
                             print("[anchor] block fired (cam_intrinsics + gs_depth present) — "
