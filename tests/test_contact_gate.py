@@ -15,6 +15,7 @@ from scripts.contact_mask import is_contact
 from diffsynth.auxiliary_models.worldmirror.models.heads.root_depth_refine import (
     RootDepthRefine,
 )
+from scripts.root_depth_anchor import apply_root_anchor
 
 
 def test_is_contact_true_when_within_threshold():
@@ -56,3 +57,20 @@ def test_falls_back_to_band_when_no_contact():
     in_frame = torch.ones(1, 1, 2, dtype=torch.bool)
     _, gate = m(wrist_z, d_scene, conf, in_frame)   # no contact arg -> band proxy
     assert gate.tolist() == [[[True, False]]]
+
+
+def test_apply_root_anchor_passes_contact_to_gate():
+    # band so tight only an explicit contact can fire (disagree is 0.40m >> band).
+    m = RootDepthRefine(hidden=4, conf_thresh=0.0, band_m=0.001)
+    with torch.no_grad():
+        m.net[-1].weight.fill_(1.0)
+        m.net[-1].bias.fill_(0.3)
+    B, S = 1, 1
+    pred = torch.zeros(B, S, 2, 1, 3)
+    pred[..., 2] = 0.5                                  # both wrists at depth 0.5m, single joint
+    gs = torch.full((B, S, 1, 8, 8), 0.9)              # uniform scene depth 0.9m -> 40cm disagree
+    cam_intr = torch.tensor([[600.0, 704.0, 704.0]])   # locked 1408-square intrinsics (center => in-frame)
+    contact = torch.tensor([[[True, False]]])
+    _, _delta, info = apply_root_anchor(m, pred, gs, None, cam_intr, contact_mask=contact)
+    assert bool(info["gate"][0, 0, 0]) is True         # contact fires hand0 despite 40cm disagreement
+    assert bool(info["gate"][0, 0, 1]) is False        # hand1 gated off

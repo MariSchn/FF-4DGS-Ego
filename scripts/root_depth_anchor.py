@@ -27,9 +27,11 @@ except Exception:  # dev machines lack diffsynth's heavy deps (modelscope); load
 WRIST_J = 0  # MANO joint 0 = wrist (pelvis_id used by the kp losses)
 
 
-def apply_root_anchor(module, pred_joints, gs_depth, gs_depth_conf, cam_intr):
+def apply_root_anchor(module, pred_joints, gs_depth, gs_depth_conf, cam_intr, contact_mask=None):
     """pred_joints [B,S,2,J,3] camera-frame (m). gs_depth [B,S,1,Hd,Wd] (detached
-    inside). cam_intr [B,3]. Returns (corrected_joints, delta_z [B,S,2], info)."""
+    inside). cam_intr [B,3]. contact_mask [B,S,2] bool optional: when given it
+    REPLACES the module's |disagree|<band_m proxy gate (fire only at true contact,
+    where the scene depth is reliable). Returns (corrected_joints, delta_z, info)."""
     wrist = pred_joints[:, :, :, WRIST_J:WRIST_J + 1, :]          # [B,S,2,1,3]
     grid_xy, z = project_joints_to_norm_pixels(wrist, cam_intr)   # [B,S,2,1,2], [B,S,2,1]
     d_scene, in_frame = sample_depth_at_joints(gs_depth.detach(), grid_xy)  # [B,S,2,1]
@@ -43,7 +45,7 @@ def apply_root_anchor(module, pred_joints, gs_depth, gs_depth_conf, cam_intr):
     in_frame = in_frame[..., 0]
     in_frame = in_frame & (d_scene > 0.01) & torch.isfinite(d_scene) & torch.isfinite(wrist_z)
 
-    delta_z, gate = module(wrist_z, d_scene, conf, in_frame)       # [B,S,2]
+    delta_z, gate = module(wrist_z, d_scene, conf, in_frame, contact=contact_mask)  # [B,S,2]
     corrected = pred_joints.clone()
     corrected[..., 2] = corrected[..., 2] + delta_z.unsqueeze(-1)  # rigid depth shift per hand
     info = {"d_scene": d_scene, "wrist_z": wrist_z, "conf": conf, "gate": gate}
