@@ -78,7 +78,7 @@ def _world_from_cam(pj, c2w, s):
     return world
 
 
-def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=None):
+def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=None, contact_mask=None):
     """Run the hand head for one clip and gather its metric-scale correspondences.
 
     Returns ``(pj_cam, c2w, s_clip, ratios)``: ``pj_cam`` [S,H,J,3] metric camera-frame joints
@@ -121,6 +121,7 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
         pred_joints, _dz, _info = apply_root_anchor(
             model.root_depth_refine, pred_joints, gs_depth,
             preds.get("gs_depth_conf"), cam_intr.to(device),
+            contact_mask=contact_mask,
         )
         # Diagnostic: did the anchor fire (gate) and how big a correction (|dz|)?
         # A near-zero gate-rate means the scene-depth reference was never trusted

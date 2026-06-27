@@ -32,8 +32,12 @@ def _has_cam_cache(seq_dir):
     return os.path.exists(os.path.join(seq_dir, "hand_data", "gt_joints_cache_cam_v2.pt"))
 
 
-def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_clips=0):
-    """Run all clips of one sequence, apply the anchor, return camera-frame metrics."""
+def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_clips=0,
+                 contact_gate="proxy"):
+    """Run all clips of one sequence, apply the anchor, return camera-frame metrics.
+    contact_gate: 'oracle' gates the anchor by the cached GT contact mask (mechanism
+    ceiling); 'proxy' uses the module's |disagree|<band_m gate; 'off' handled by the
+    caller disabling enable_root_anchor."""
     from scripts.train_hand_head import HOT3DHandDataset, build_views
 
     mcfg = cfg["model"]
@@ -48,6 +52,11 @@ def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_
     cam_intr = torch.load(os.path.join(hd, "cam_intrinsics.pt"), map_location="cpu").float().view(1, 3)
     bb = torch.load(os.path.join(hd, f"hand_bboxes_v2_rf{rescale}_res{res}x{res}.pt"), map_location="cpu")
     gt_valid = bb["valid"].bool()                          # [N,2]
+    # oracle contact gate: per-frame, per-hand GT contact mask (scripts.build_contact_cache).
+    contact_seq = None
+    if contact_gate == "oracle":
+        cpath = os.path.join(hd, "contact_cache.pt")
+        contact_seq = torch.load(cpath, map_location="cpu").bool() if os.path.exists(cpath) else None
 
     n_clips = len(ds) if max_clips <= 0 else min(len(ds), max_clips)
     anchor_log = []
@@ -62,8 +71,14 @@ def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_
             preds = model(views, is_inference=True, use_motion=False)
         # predict_clip lifts joints and applies the anchor (when model.enable_root_anchor)
         # exactly as the world eval does; we use only its camera-frame joints here.
-        pj = predict_clip(preds, mano_model, device, cam_intr, model=model, anchor_log=anchor_log)[0]
         start = j * stride
+        contact_clip = None
+        if contact_seq is not None:
+            sl = contact_seq[start:start + clip_len]
+            if sl.shape[0] == clip_len:
+                contact_clip = sl.unsqueeze(0).to(device)   # [1, S, 2]
+        pj = predict_clip(preds, mano_model, device, cam_intr, model=model,
+                          anchor_log=anchor_log, contact_mask=contact_clip)[0]
         for kk in range(pj.shape[0]):
             f = start + kk
             if f not in pcf and f < gt_cam.shape[0]:
@@ -98,11 +113,16 @@ def main():
     ap.add_argument("--stride", type=int, default=8)
     ap.add_argument("--max_clips", type=int, default=0)
     ap.add_argument("--out", default="/tmp/hoi4d_cam_eval.json")
+    ap.add_argument("--contact_gate", choices=["proxy", "oracle", "off"], default="proxy",
+                    help="oracle = gate the anchor by the cached GT contact mask (mechanism "
+                         "ceiling); proxy = the deployable |disagree|<band_m gate; off = no anchor.")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = build_model(cfg, device)
+    if args.contact_gate == "off":
+        model.enable_root_anchor = False        # control arm: no anchor applied
 
     from scripts.hand_vis_utils import MANOModel
     mano_model = MANOModel(cfg["visualization"]["mano_model_folder"])
@@ -118,7 +138,8 @@ def main():
     results = []
     for sq in seqs:
         try:
-            r = eval_seq_cam(model, mano_model, device, sq, cfg, args.clip_len, args.stride, args.max_clips)
+            r = eval_seq_cam(model, mano_model, device, sq, cfg, args.clip_len, args.stride,
+                             args.max_clips, contact_gate=args.contact_gate)
             if r is None:
                 continue
             results.append(r)
