@@ -1395,6 +1395,9 @@ def train():
     # Contact Phase 1: scene-depth root anchor (post-hoc, gated). The loss weight is
     # read inline from cfg["loss_weights"] in the loss sum; only the warmup is needed here.
     root_anchor_warmup_steps = int(training_cfg.get("root_anchor_warmup_steps", 0))
+    # Phase 2: gate the anchor by the cached GT contact mask. False -> the band proxy
+    # (so the proxy-vs-contact arms can each train with their own gate).
+    use_contact_gate = bool(training_cfg.get("use_contact_gate", True))
 
     # GT object-depth supervision config (the direct metric-depth signal).
     obj_cfg = cfg.get("obj_depth", {})
@@ -1799,7 +1802,8 @@ def train():
                         pred_joints, _ra_delta, _ra_info = apply_root_anchor(
                             model.root_depth_refine, pred_joints, _gs_depth_ra,
                             preds.get("gs_depth_conf"), batch["cam_intrinsics"].to(device),
-                            contact_mask=(batch["contact"].to(device) if "contact" in batch else None),
+                            contact_mask=(batch["contact"].to(device)
+                                          if (use_contact_gate and "contact" in batch) else None),
                         )
                         if not getattr(model, "_logged_anchor_fired", False):
                             print("[anchor] block fired (cam_intrinsics + gs_depth present) — "
