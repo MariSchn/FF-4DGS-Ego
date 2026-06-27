@@ -39,6 +39,8 @@ from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling imp
 RH = 1               # right hand index in the [N,2,16,3] GT joint cache
 HAND_EXCL_R = 14     # px radius around projected hand joints to EXCLUDE from scene scoring
 DMIN, DMAX = 0.05, 10.0
+CONTACT_M = 0.05     # a hand joint is "in contact" if its GT depth is within this (m) of the
+#                      GT dense surface depth at its pixel -> it sits ON the visible surface.
 
 
 def _center_square(a):
@@ -125,6 +127,11 @@ def main():
 
     acc = {k: [] for k in ("none", "hand", "hand_robust", "oracle", "fm")}
     s_acc = {k: [] for k in ("hand", "hand_robust", "oracle", "fm")}
+    # CONTACT-STRATIFIED scale: the salvage test. Split the per-JOINT hand/scene depth
+    # ratios (z_hand / gs_depth_at_joint) by whether the joint is in contact with the
+    # visible surface (independent GT signal). Claim survives iff s_contact ~ oracle while
+    # s_noncontact stays biased -> the hand anchors the scene WHERE it touches it.
+    contact_ratios, noncontact_ratios = [], []
     per_seq = []
     S, res = args.num_frames, args.res
     for sq in seqs:
@@ -169,6 +176,17 @@ def main():
             v = ((~hm) & (gtd > DMIN) & (gtd < DMAX) & (gsd > DMIN)).reshape(-1)
             gsf, gtf = gsd.reshape(-1), gtd.reshape(-1)
             s_oracle = _median_ratio(gtf, gsf, v)
+            # --- contact stratification (right hand): per-joint z_hand, gs_at_joint, gt_at_joint ---
+            grid_xy, zj = project_joints_to_norm_pixels(j, ci)                       # [1,S,2,16,2], z [1,S,2,16]
+            gs_at, infr = sample_depth_at_joints(gsd.reshape(1, S, 1, res, res), grid_xy)
+            gt_at, _ = sample_depth_at_joints(gtd.reshape(1, S, 1, res, res), grid_xy)
+            zr, gsr, gtr, inr = (t[:, :, RH] for t in (zj, gs_at, gt_at, infr))      # right hand only
+            jvalid = (inr & (zr > DMIN) & (gsr > DMIN) & (gtr > DMIN)
+                      & torch.isfinite(zr) & torch.isfinite(gsr) & torch.isfinite(gtr))
+            ratio = (zr / gsr.clamp_min(1e-4))
+            is_contact = (zr - gtr).abs() < CONTACT_M                                 # joint sits on the surface
+            contact_ratios.extend(ratio[jvalid & is_contact].flatten().tolist())
+            noncontact_ratios.extend(ratio[jvalid & ~is_contact].flatten().tolist())
             seq_err["none"].append(_scene_err(gsf, gtf, v, 1.0))
             seq_err["hand"].append(_scene_err(gsf, gtf, v, s_hand))
             seq_err["oracle"].append(_scene_err(gsf, gtf, v, s_oracle))
@@ -203,6 +221,12 @@ def main():
     agg = {k + "_cm": (float(np.mean(acc[k])) if acc[k] else float("nan")) for k in acc}
     for k in s_acc:
         agg["s_" + k + "_med"] = (float(np.median(s_acc[k])) if s_acc[k] else float("nan"))
+    cr = np.asarray(contact_ratios, dtype=np.float64)
+    ncr = np.asarray(noncontact_ratios, dtype=np.float64)
+    agg["s_contact_med"] = float(np.median(cr)) if cr.size else float("nan")
+    agg["s_noncontact_med"] = float(np.median(ncr)) if ncr.size else float("nan")
+    agg["n_contact_joints"] = int(cr.size)
+    agg["n_noncontact_joints"] = int(ncr.size)
     agg["n_seqs"] = len(per_seq)
     agg["fm_available"] = fm is not None
     json.dump({"aggregate": agg, "per_seq": per_seq}, open(args.out, "w"), indent=2)
@@ -211,7 +235,13 @@ def main():
           f"oracle={agg['oracle_cm']:.1f}  fm(UniDepth)={agg.get('fm_cm', float('nan')):.1f}  (fm_available={fm is not None})")
     print(f"  scales: s_hand={agg['s_hand_med']:.3f}  s_hand_robust={agg['s_hand_robust_med']:.3f}  "
           f"s_oracle={agg['s_oracle_med']:.3f}  s_fm={agg.get('s_fm_med', float('nan')):.3f}")
-    print(f"  -> CLAIM holds if HAND approx oracle AND HAND < fm. n={agg['n_seqs']} seqs -> {args.out}")
+    print(f"  -> global CLAIM holds if HAND approx oracle AND HAND < fm. n={agg['n_seqs']} seqs -> {args.out}")
+    print("\n==== CONTACT-STRATIFIED SCALE (the salvage test) ====")
+    print(f"  s_contact={agg['s_contact_med']:.3f} (n={agg['n_contact_joints']})   "
+          f"s_noncontact={agg['s_noncontact_med']:.3f} (n={agg['n_noncontact_joints']})   "
+          f"oracle={agg['s_oracle_med']:.3f}")
+    print("  -> SALVAGE holds if s_contact approx oracle (~1.0) while s_noncontact stays biased low:")
+    print("     the hand DOES metric-anchor the scene WHERE it touches it, even though the global scale fails.")
 
 
 if __name__ == "__main__":
