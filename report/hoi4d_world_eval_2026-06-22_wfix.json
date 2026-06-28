@@ -1,0 +1,134 @@
+{
+  "aggregate": {
+    "W_MPJPE": 353.09726677157664,
+    "WA_MPJPE_short": 21.068453873423014,
+    "WA_MPJPE_long": 46.61135832694444,
+    "W_MPJPE_global": 353.0414727601138,
+    "WA_MPJPE_short_global": 21.07657255096869,
+    "WA_MPJPE_long_global": 46.62733203308149,
+    "n_segments": 11
+  },
+  "per_segment": [
+    {
+      "seq": "ZY20210800001_H1_C12_N11_S169_s03_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 442.6792562007904,
+      "W_MPJPE_global": 442.93317198753357,
+      "WA_MPJPE_short": 22.111736238002777,
+      "WA_MPJPE_short_global": 22.125793620944023,
+      "WA_MPJPE_long": 37.26653382182121,
+      "WA_MPJPE_long_global": 37.29312866926193
+    },
+    {
+      "seq": "ZY20210800001_H1_C12_N26_S165_s01_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 558.1520795822144,
+      "W_MPJPE_global": 557.6474070549011,
+      "WA_MPJPE_short": 20.260347053408623,
+      "WA_MPJPE_short_global": 20.257754251360893,
+      "WA_MPJPE_long": 35.1625494658947,
+      "WA_MPJPE_long_global": 35.1768434047699
+    },
+    {
+      "seq": "ZY20210800001_H1_C13_N11_S132_s03_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 207.2802484035492,
+      "W_MPJPE_global": 206.95358514785767,
+      "WA_MPJPE_short": 18.16227287054062,
+      "WA_MPJPE_short_global": 18.16692389547825,
+      "WA_MPJPE_long": 41.46742820739746,
+      "WA_MPJPE_long_global": 41.45355895161629
+    },
+    {
+      "seq": "ZY20210800001_H1_C13_N12_S132_s03_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 208.45192670822144,
+      "W_MPJPE_global": 208.98336172103882,
+      "WA_MPJPE_short": 15.646243467926979,
+      "WA_MPJPE_short_global": 15.661140903830528,
+      "WA_MPJPE_long": 49.211885780096054,
+      "WA_MPJPE_long_global": 49.29038509726524
+    },
+    {
+      "seq": "ZY20210800001_H1_C14_N15_S158_s02_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 378.5940706729889,
+      "W_MPJPE_global": 378.4068524837494,
+      "WA_MPJPE_short": 21.99321985244751,
+      "WA_MPJPE_short_global": 22.010406479239464,
+      "WA_MPJPE_long": 37.668779492378235,
+      "WA_MPJPE_long_global": 37.679675966501236
+    },
+    {
+      "seq": "ZY20210800001_H1_C14_N17_S158_s02_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 352.0564138889313,
+      "W_MPJPE_global": 352.1248400211334,
+      "WA_MPJPE_short": 20.040443167090416,
+      "WA_MPJPE_short_global": 20.055748522281647,
+      "WA_MPJPE_long": 35.070065408945084,
+      "WA_MPJPE_long_global": 35.09123623371124
+    },
+    {
+      "seq": "ZY20210800001_H1_C1_N19_S100_s02_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 150.16785264015198,
+      "W_MPJPE_global": 150.1680612564087,
+      "WA_MPJPE_short": 11.501812376081944,
+      "WA_MPJPE_short_global": 11.508346535265446,
+      "WA_MPJPE_long": 20.667627453804016,
+      "WA_MPJPE_long_global": 20.674312487244606
+    },
+    {
+      "seq": "ZY20210800001_H1_C2_N11_S212_s03_T2",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 750.0414848327637,
+      "W_MPJPE_global": 749.4820356369019,
+      "WA_MPJPE_short": 30.485857278108597,
+      "WA_MPJPE_short_global": 30.496811494231224,
+      "WA_MPJPE_long": 93.58607232570648,
+      "WA_MPJPE_long_global": 93.54645758867264
+    },
+    {
+      "seq": "ZY20210800001_H1_C3_N01_S54_s05_T2",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 217.06897020339966,
+      "W_MPJPE_global": 216.92733466625214,
+      "WA_MPJPE_short": 29.564891010522842,
+      "WA_MPJPE_short_global": 29.56875041127205,
+      "WA_MPJPE_long": 53.68683114647865,
+      "WA_MPJPE_long_global": 53.7404865026474
+    },
+    {
+      "seq": "ZY20210800001_H1_C5_N15_S57_s03_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 174.9155968427658,
+      "W_MPJPE_global": 175.37851631641388,
+      "WA_MPJPE_short": 13.673273846507072,
+      "WA_MPJPE_short_global": 13.678164221346378,
+      "WA_MPJPE_long": 24.8685572296381,
+      "WA_MPJPE_long_global": 24.876970797777176
+    },
+    {
+      "seq": "ZY20210800001_H1_C7_N11_S280_s03_T5",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 444.66203451156616,
+      "W_MPJPE_global": 444.4510340690613,
+      "WA_MPJPE_short": 28.312895447015762,
+      "WA_MPJPE_short_global": 28.312457725405693,
+      "WA_MPJPE_long": 84.06861126422882,
+      "WA_MPJPE_long_global": 84.07759666442871
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+# ==================================================================
+# HOI4D-DEPTH: the dense-supervision experiment (CVPR pivot core).
+# ------------------------------------------------------------------
+# Supervise the predicted scene depth on HOI4D's DENSE sensor depth (no masking,
+# unlike the HOT3D object-render path). Question: does the predicted depth become
+# metric/accurate (residual drops below the frozen baseline) under dense GT? Hand
+# head disabled — this isolates "dense depth makes the scene metric". The backbone
+# smoke already confirmed gs_depth is sane on HOI4D (0.28-1.51 m). H2O + the metric
+# hand layer on after this validates.
+# ==================================================================
+data:
+  data_root: "/work/scratch/dmonopoli/hoi4d"
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.25
+  num_workers: 4
+# ------------------------------------------------------------------
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  freeze_backbone: true        # partial unfreeze below
+  enable_hand: false           # overridden in build_model too; pure backbone+GS
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: true
+  hand_to_gs_injection:
+    enabled: false
+# ------------------------------------------------------------------
+obj_depth:
+  render_res: 224              # dense depth resolution (matches model input)
+  margin: 0.05                 # smooth-L1 beta (m)
+  depth_min: 0.05
+  depth_max: 10.0
+# ------------------------------------------------------------------
+training:
+  lr: 1e-5
+  epochs: 10
+  batch_size: 2
+  grad_accum_steps: 4          # effective batch ~8
+  use_amp: true
+  log_every: 5
+  val_every: 20
+  val_max_batches: 12
+  grad_clip_norm: 5.0
+  unfreeze_last_n_blocks: 4
+  output_dir: "/work/scratch/dmonopoli/checkpoints/hoi4d_depth"

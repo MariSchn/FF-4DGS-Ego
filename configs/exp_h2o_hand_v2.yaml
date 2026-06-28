@@ -1,0 +1,58 @@
+# ==================================================================
+# H2O hand fine-tune v2 — cosine-annealed re-run to settle past the v1 plateau.
+# v1 (constant lr 1e-5, 8 blocks) reached C-MPJPE 55 by step 120 then oscillated
+# 55-65 for 680 steps. v2 keeps the same recipe but anneals lr 1e-5 -> 5e-7 over
+# max_steps so it can settle below 55 instead of bouncing. New output_dir so v1's
+# best_cmpjpe.pt (the proven 55mm / PA 41.6 checkpoint) is preserved.
+# ==================================================================
+data:
+  data_root: "/work/scratch/dmonopoli/h2o_packed"
+  num_frames: 16
+  clip_stride: 8
+  val_split: 0.2
+  test_subject: "subject4"
+  num_workers: 4
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/work/courses/3dv/team25/checkpoints/default/hand_head_final.pt"
+  freeze_backbone: true
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: false
+  hand_to_gs_injection:
+    enabled: false
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+training:
+  lr: 1e-5
+  lr_min: 5e-7
+  max_steps: 700
+  epochs: 10
+  batch_size: 2
+  grad_accum_steps: 4
+  use_amp: true
+  log_every: 10
+  val_every: 40
+  val_max_batches: 40
+  grad_clip_norm: 5.0
+  unfreeze_last_n_blocks: 8
+  w_abs: 1.0
+  w_rr: 1.0
+  output_dir: "/work/scratch/dmonopoli/checkpoints/h2o_hand_v2"
+visualization:
+  mano_model_folder: "models/MANO"
+hand_crop:
+  rescale_factor: 1.5

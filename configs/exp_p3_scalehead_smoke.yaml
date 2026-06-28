@@ -1,0 +1,106 @@
+# ==================================================================
+# P3-SCALEHEAD: the simpler unified-metric route (Cyrus direction b).
+# ------------------------------------------------------------------
+# Keep the Gaussian backbone AND the gs_head frozen (don't touch the up-to-scale
+# scene), and add a small feedforward ScaleHead that predicts ONE global metric
+# scale per clip from the camera/register token. It is trained so that
+# s * gs_depth matches the metric MANO hand at the joints (scripts.scale_head_loss),
+# whose optimum equals the closed-form solve_metric_scale — so the head learns the
+# metric coupling in a single forward pass (no per-clip solve, and a scale exists
+# even when the hand is briefly out of view). At eval we multiply s onto the camera
+# translation + gs_depth to unify the metric hand with the GS scene.
+# This needs only the HAND (one scalar), not dense scene depth.
+# ==================================================================
+data:
+  data_root: "/work/courses/3dv/team25/data/hot3d_aria/preprocessed_pinhole_f609"
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.34
+  num_workers: 2
+# ------------------------------------------------------------------
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/work/courses/3dv/team25/checkpoints/default/hand_head_final.pt"
+  freeze_backbone: true       # GS backbone frozen
+  enable_scale_head: true     # <-- the experiment: a feedforward global-scale head
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: true             # need gs_depth (frozen) for the scale supervision
+  hand_to_gs_injection:
+    enabled: true
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+# ------------------------------------------------------------------
+loss_weights:
+  kp3d:          0.05
+  kp3d_abs:      0.05
+  kp2d:          0.05
+  global_orient: 0.01
+  hand_pose:     0.01
+  betas:         0.01
+  transl:        0.1
+  gs_l1:         0.0          # GS frozen: no reconstruction training
+  gs_lpips:      0.0
+  hand_depth_anchor: 0.0      # the scale head replaces the anchor's scale role
+  scale_head:    1.0          # <-- train the feedforward metric scale
+# ------------------------------------------------------------------
+scale_head:
+  margin: 0.05                # smooth-L1 beta (m) on s*gs_depth vs hand depth
+  depth_min: 0.01
+  warmup_steps: 0
+metric_scale:
+  enable: true
+  clamp: [0.1, 10.0]
+# ------------------------------------------------------------------
+training:
+  lr: 1e-5                    # only small heads train (no backbone) -> safe + faster
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 4               # frozen backbone forward (no_grad) -> cheaper than unfreeze
+  grad_accum_steps: 4         # effective batch ~32
+  use_amp: true
+  log_every: 2
+  val_every: 20
+  val_max_batches: 4
+  save_every: 999999
+  grad_clip_norm: 5.0
+  kp3d_abs_warmup_steps: 5
+  freeze_gs_head: true        # <-- keep the GS (gs_head + injection) frozen
+  keep_last_checkpoints: 0
+  seed: 42
+  output_dir: "checkpoints/p3_scalehead_smoke"
+# ------------------------------------------------------------------
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 4
+# ------------------------------------------------------------------
+hand_crop:
+  rescale_factor: 1.5
+# ------------------------------------------------------------------
+debug:
+  enabled: true
+  max_sequences: 3
+  single_frame: false
+# ------------------------------------------------------------------
+wandb:
+  enabled: false
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "P3 scalehead smoke"
+  tags: []
+  notes: null

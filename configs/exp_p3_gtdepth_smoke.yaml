@@ -1,0 +1,99 @@
+# Smoke test for exp_p3_gtdepth_unfreeze: 3 sequences, one short epoch.
+# Purpose: verify the GT object-depth pipeline runs end-to-end on a gb10 node
+# (dataset renders object depth in the worker, object_depth_loss populates with
+# n_valid>0, partial-unfreeze grads flow, no NaN) BEFORE committing the 7h run.
+# Inspect the log for: "Partial unfreeze: last 4 frame+global blocks", a non-zero
+# obj_depth term, and finite grad norms.
+data:
+  data_root: "/work/courses/3dv/team25/data/hot3d_aria/preprocessed_pinhole_f609"
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.34
+  num_workers: 2
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/work/courses/3dv/team25/checkpoints/default/hand_head_final.pt"
+  freeze_backbone: true
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: true
+  hand_to_gs_injection:
+    enabled: true
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+loss_weights:
+  kp3d:          0.05
+  kp3d_abs:      0.05
+  kp2d:          0.05
+  global_orient: 0.01
+  hand_pose:     0.01
+  betas:         0.01
+  transl:        0.1
+  gs_l1:         0.5
+  gs_lpips:      0.5
+  hand_depth_anchor: 0.1
+  obj_depth:     0.5
+hand_depth_anchor:
+  margin: 0.02
+  warmup_steps: 5
+  depth_min: 0.01
+  conf_thresh: 0.0
+  direction: scene_follows_hand
+obj_depth:
+  objects_dir: "/work/scratch/dmonopoli/hot3d_assets"
+  render_res: 224
+  margin: 0.05
+  depth_min: 0.01
+  depth_max: 50.0
+  warmup_steps: 5
+metric_scale:
+  enable: true
+  clamp: [0.1, 10.0]
+training:
+  lr: 5e-6
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 2
+  grad_accum_steps: 4
+  use_amp: true
+  log_every: 2
+  val_every: 20
+  val_max_batches: 4
+  save_every: 999999
+  grad_clip_norm: 5.0
+  kp3d_abs_warmup_steps: 5
+  unfreeze_last_n_blocks: 4
+  keep_last_checkpoints: 0
+  seed: 42
+  output_dir: "checkpoints/p3_smoke"
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 4
+hand_crop:
+  rescale_factor: 1.5
+debug:
+  enabled: true
+  max_sequences: 3
+  single_frame: false
+wandb:
+  enabled: false
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "P3 smoke"
+  tags: []
+  notes: null

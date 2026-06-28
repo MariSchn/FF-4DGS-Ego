@@ -1,0 +1,69 @@
+# ==================================================================
+# H2O hand fine-tune WITH the high-res hand-crop branch (Phase 2).
+# Trains the hand head (+ last 8 backbone blocks) on H2O subject1 (train) /
+# subject4 (test), feeding native 192px hand crops into the HaMeR head via the
+# hires-hand encoder. Goal: validate that hires crops improve PA-MPJPE vs the
+# 224px baseline (43.6 mm, 21-joint, Procrustes).
+#
+# data_root is set at job time to the NODE-LOCAL hires pack ($TMPDIR/h2o_hires);
+# the checkpoint is saved to scratch. Warm-start kept (only hires_encoder.* fresh).
+# ==================================================================
+data:
+  data_root: "__SET_AT_JOB_TIME__"     # -> $TMPDIR/h2o_hires (node-local)
+  num_frames: 16
+  clip_stride: 8
+  val_split: 0.2
+  test_subject: "subject4"             # cross-subject: train subject1, test subject4
+  num_workers: 4
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/work/courses/3dv/team25/checkpoints/default/hand_head_final.pt"
+  freeze_backbone: true
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  hires_hand: true                     # <-- the Phase-2 switch
+  hires_hand_kwargs:
+    arch: "resnet18"
+    pretrained: true
+    crop_px: 192                        # must match the pack's --hand_crop_px 192
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: false
+  hand_to_gs_injection:
+    enabled: false
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+training:
+  lr: 1e-5
+  epochs: 10
+  max_steps: 1500                       # bound within the 8h job cap
+  lr_min: 1e-6
+  batch_size: 2
+  grad_accum_steps: 4
+  use_amp: true
+  log_every: 20
+  val_every: 150
+  val_max_batches: 40
+  grad_clip_norm: 5.0
+  unfreeze_last_n_blocks: 8
+  w_abs: 1.0
+  w_rr: 1.0
+  # Scratch is at per-user quota (inode-exhausted) -> os.makedirs there fails with
+  # "Disk quota exceeded". Save to $HOME (11 TB free). The trainer reads from the
+  # node-local pack; only this ~final checkpoint lands here (~0.7 GB).
+  output_dir: "/home/dmonopoli/ckpt_h2o_hand_hires"
+visualization:
+  mano_model_folder: "models/MANO"
+hand_crop:
+  rescale_factor: 1.5

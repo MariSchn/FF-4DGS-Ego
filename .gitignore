@@ -18,3 +18,16 @@ __pycache__
 checkpoints/
 P0001_*/
 hand_data/
+
+# session transcripts — may contain secrets (cluster pw), never commit
+*-this-session-is-being-continued-from-a-previous-c.txt
+# base64 transfer bundles
+*.b64
+# LaTeX build artifacts
+report/*.aux
+report/*.bbl
+report/*.blg
+report/*.brf
+report/*.out
+report/*.fls
+report/*.fdb_latexmk

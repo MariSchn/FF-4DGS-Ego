@@ -283,12 +283,12 @@ handpose GT `trans`; whichever makes the hand visible / lands in the scene cloud
 - **Existing checkpoints:** `/work/scratch/dmonopoli/checkpoints/h2o_hand/best_cmpjpe.pt` (4.7G, NEEDED),
   `.../hoi4d_depth/best_depth.pt` (4.9G), `models/NeoVerse/reconstructor.ckpt` (6G, just re-downloaded).
   No hires/unfreeze checkpoint exists.
-- **SSH/secrets:** password `Triathlon5!?` in `/tmp/.ethpw` (chmod 600); helpers
+- **SSH/secrets:** cluster password stored in `/tmp/.ethpw` (chmod 600) — value REDACTED (was committed in 2595eaf; rotate); helpers
   `expect /tmp/clssh.exp '<cmd>'`, push `expect /tmp/clscp.exp <local> <remote>`, pull
   `expect /tmp/clpull.exp <remote> <local>`. Restore pw:
-  `printf '%s' 'Triathlon5!?' > /tmp/.ethpw && chmod 600 /tmp/.ethpw`.
+  `printf '%s' '<CLUSTER_PASSWORD>' > /tmp/.ethpw && chmod 600 /tmp/.ethpw`.
   **Plain `ssh eth-cluster` from the Mac shell does NOT auth (no key/askpass) — use the expect helpers.**
-  H2O creds `893c1:2b3136a9` (stream, don't persist). H100/A100 DENIED by Cyrus.
+  H2O creds streamed from env (`$H2O_USER:$H2O_PASS`), REDACTED, don't persist. H100/A100 DENIED by Cyrus.
 - **Self-staging launcher pattern (works for >stage files into node-local /tmp):** base64 a self-contained
   bash script that `cp`s `$SRC/scripts` into `/tmp/run`, symlinks diffsynth/models/configs, runs the eval,
   prints results to stdout (which streams back over ssh). Used for the stride-4 run. The base64 blob bloats

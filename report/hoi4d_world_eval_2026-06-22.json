@@ -1,0 +1,134 @@
+{
+  "aggregate": {
+    "W_MPJPE": 177.76872962713242,
+    "WA_MPJPE_short": 20.53328976035118,
+    "WA_MPJPE_long": 37.17718552798033,
+    "W_MPJPE_global": 177.69095301628113,
+    "WA_MPJPE_short_global": 20.538487005978823,
+    "WA_MPJPE_long_global": 37.20733802765608,
+    "n_segments": 2
+  },
+  "per_segment": [
+    {
+      "seq": "ZY20210800001_H1_C12_N11_S169_s03_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": NaN,
+      "W_MPJPE_global": NaN,
+      "WA_MPJPE_short": 22.111373022198677,
+      "WA_MPJPE_short_global": 22.125430405139923,
+      "WA_MPJPE_long": 37.265900522470474,
+      "WA_MPJPE_long_global": 37.29248046875
+    },
+    {
+      "seq": "ZY20210800001_H1_C12_N26_S165_s01_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": NaN,
+      "W_MPJPE_global": NaN,
+      "WA_MPJPE_short": 20.26064321398735,
+      "WA_MPJPE_short_global": 20.25805041193962,
+      "WA_MPJPE_long": 35.1632721722126,
+      "WA_MPJPE_long_global": 35.17761081457138
+    },
+    {
+      "seq": "ZY20210800001_H1_C13_N11_S132_s03_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": NaN,
+      "W_MPJPE_global": NaN,
+      "WA_MPJPE_short": 18.162233754992485,
+      "WA_MPJPE_short_global": 18.166882917284966,
+      "WA_MPJPE_long": 41.46737605333328,
+      "WA_MPJPE_long_global": 41.45350307226181
+    },
+    {
+      "seq": "ZY20210800001_H1_C13_N12_S132_s03_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": NaN,
+      "W_MPJPE_global": NaN,
+      "WA_MPJPE_short": 15.646176412701607,
+      "WA_MPJPE_short_global": 15.661073848605156,
+      "WA_MPJPE_long": 49.21170324087143,
+      "WA_MPJPE_long_global": 49.29020255804062
+    },
+    {
+      "seq": "ZY20210800001_H1_C14_N15_S158_s02_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": NaN,
+      "W_MPJPE_global": NaN,
+      "WA_MPJPE_short": 21.993229165673256,
+      "WA_MPJPE_short_global": 22.010421380400658,
+      "WA_MPJPE_long": 37.66874223947525,
+      "WA_MPJPE_long_global": 37.67964616417885
+    },
+    {
+      "seq": "ZY20210800001_H1_C14_N17_S158_s02_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": NaN,
+      "W_MPJPE_global": NaN,
+      "WA_MPJPE_short": 20.040443167090416,
+      "WA_MPJPE_short_global": 20.055748522281647,
+      "WA_MPJPE_long": 35.070065408945084,
+      "WA_MPJPE_long_global": 35.09123623371124
+    },
+    {
+      "seq": "ZY20210800001_H1_C1_N19_S100_s02_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 139.41870629787445,
+      "W_MPJPE_global": 139.4154280424118,
+      "WA_MPJPE_short": 11.501802131533623,
+      "WA_MPJPE_short_global": 11.5083372220397,
+      "WA_MPJPE_long": 20.667558535933495,
+      "WA_MPJPE_long_global": 20.674245432019234
+    },
+    {
+      "seq": "ZY20210800001_H1_C2_N11_S212_s03_T2",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": NaN,
+      "W_MPJPE_global": NaN,
+      "WA_MPJPE_short": 30.486347153782845,
+      "WA_MPJPE_short_global": 30.497321859002113,
+      "WA_MPJPE_long": 93.58733147382736,
+      "WA_MPJPE_long_global": 93.54767948389053
+    },
+    {
+      "seq": "ZY20210800001_H1_C3_N01_S54_s05_T2",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": 216.11875295639038,
+      "W_MPJPE_global": 215.96647799015045,
+      "WA_MPJPE_short": 29.56477738916874,
+      "WA_MPJPE_short_global": 29.568636789917946,
+      "WA_MPJPE_long": 53.68681252002716,
+      "WA_MPJPE_long_global": 53.74043062329292
+    },
+    {
+      "seq": "ZY20210800001_H1_C5_N15_S57_s03_T1",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": NaN,
+      "W_MPJPE_global": NaN,
+      "WA_MPJPE_short": 13.673273846507072,
+      "WA_MPJPE_short_global": 13.67817260324955,
+      "WA_MPJPE_long": 24.86858330667019,
+      "WA_MPJPE_long_global": 24.876995012164116
+    },
+    {
+      "seq": "ZY20210800001_H1_C7_N11_S280_s03_T5",
+      "seg": 0,
+      "frames": 128,
+      "W_MPJPE": NaN,
+      "W_MPJPE_global": NaN,
+      "WA_MPJPE_short": 28.312912210822105,
+      "WA_MPJPE_short_global": 28.312474489212036,
+      "WA_MPJPE_long": 84.06836539506912,
+      "WA_MPJPE_long_global": 84.07732844352722
+    }
+  ]
+}
