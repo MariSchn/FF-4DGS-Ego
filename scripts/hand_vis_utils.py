@@ -169,6 +169,38 @@ class MANOModel:
         )
         return out.joints
 
+    def get_vertices_batched(self, params, is_right, device=None):
+        """Differentiable, batched MANO vertex computation.
+
+        Args:
+            params (torch.Tensor): [N, 32] = (t_xyz[3], q_wxyz[4], pose_pca[15], betas[10]).
+            is_right (bool): True for right hand, False for left.
+            device (torch.device, optional): device to run MANO on (defaults to params.device).
+
+        Returns:
+            torch.Tensor: [N, 778, 3] vertices with autograd connected to `params`.
+        """
+        device = torch.device(device) if device is not None else params.device
+        self._ensure_device(device)
+        params = params.to(device)
+
+        transl        = params[:, 0:3]
+        quat_wxyz     = params[:, 3:7]
+        hand_pose_pca = params[:, 7:22]
+        betas         = params[:, 22:32]
+
+        global_orient = quat_wxyz_to_axis_angle_torch(quat_wxyz)
+
+        layer = self.right if is_right else self.left
+        out = layer(
+            betas=betas,
+            global_orient=global_orient,
+            hand_pose=hand_pose_pca,
+            transl=transl,
+            return_verts=True,
+        )
+        return out.vertices
+
     def get_joints21_batched(self, params, is_right, device=None):
         """Like get_joints_batched but returns [N,21,3] = 16 MANO joints + 5 fingertips.
 

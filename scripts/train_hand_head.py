@@ -34,6 +34,7 @@ from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
 from scripts.hand_depth_anchor_loss import hand_depth_anchor_loss
 from scripts.object_depth_loss import object_depth_loss
 from scripts.scale_head_loss import scale_head_loss
+from scripts.hand_scene_registration_loss import hand_scene_registration_loss
 from scripts.hand_metrics import metric_chunks_from_batch, metrics_from_chunks
 from scripts.gs_metrics import (
     LPIPSScorer,
@@ -947,6 +948,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
         "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
         "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
         "scale_head": 0.0, "scale_residual_m": 0.0,
+        "hand_scene_registration": 0.0, "registration_residual_m": 0.0,
     }
     captured = {}
     gs_captured = {}
@@ -1095,6 +1097,17 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 )
                 scale_residual_m = _sh_info["scale_residual_m"]
 
+            # Hand-scene registration loss (dense mesh <-> scene coupling).
+            loss_hand_scene_reg = torch.zeros((), device=device)
+            reg_residual_m = 0.0
+            if (gs_depth_pred is not None and "cam_intrinsics" in vbatch):
+                pred_verts = compute_vertices_from_batch(pred_params, mano_model, device)
+                loss_hand_scene_reg, _reg_info = hand_scene_registration_loss(
+                    pred_verts, gs_depth_pred, has_hand, vbatch["cam_intrinsics"].to(device),
+                    pred_scale=pred_scale,
+                )
+                reg_residual_m = _reg_info["registration_residual_m"]
+
             loss = (
                 loss_weights["transl"]        * param_losses["transl"]
                 + loss_weights["global_orient"] * param_losses["global_orient"]
@@ -1108,6 +1121,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 + loss_weights.get("hand_depth_anchor", 0.0) * loss_hand_anchor
                 + loss_weights.get("obj_depth", 0.0) * loss_obj_depth
                 + loss_weights.get("scale_head", 0.0) * loss_scale_head
+                + loss_weights.get("hand_scene_registration", 0.0) * loss_hand_scene_reg
             )
 
             val_loss += loss.item()
@@ -1124,6 +1138,8 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             val_terms["obj_depth_residual_m"] += obj_depth_residual_m
             val_terms["scale_head"]   += loss_scale_head.item()
             val_terms["scale_residual_m"] += scale_residual_m
+            val_terms["hand_scene_registration"] += loss_hand_scene_reg.item()
+            val_terms["registration_residual_m"] += reg_residual_m
 
             # Hand-overlay capture needs a second, camera-space forward pass.
             # Only run it when this batch actually holds a target clip — avoids
@@ -1226,6 +1242,26 @@ def compute_joints_from_batch(params, mano_model, device):
     right = mano_model.get_joints_batched(flat[:, 1], is_right=True,  device=device)
     joints = torch.stack([left, right], dim=1)  # [N, 2, 16, 3]
     return joints.view(B, S, NUM_HANDS, joints.shape[-2], 3)
+
+
+def compute_vertices_from_batch(params, mano_model, device):
+    """Differentiable, batched conversion of 32-D MANO params to 3D vertices.
+
+    Args:
+        params: [B, S, 64] — two hands packed as (left[32], right[32]).
+        mano_model: MANOModel wrapper.
+
+    Returns:
+        [B, S, 2, 778, 3] vertex tensor with autograd linked back to `params`.
+    """
+    B, S, D = params.shape
+    assert D == NUM_HANDS * HAND_PARAM_DIM
+    N = B * S
+    flat = params.view(N, NUM_HANDS, HAND_PARAM_DIM)  # [N, 2, 32]
+    left  = mano_model.get_vertices_batched(flat[:, 0], is_right=False, device=device)  # [N, 778, 3]
+    right = mano_model.get_vertices_batched(flat[:, 1], is_right=True,  device=device)
+    verts = torch.stack([left, right], dim=1)  # [N, 2, 778, 3]
+    return verts.view(B, S, NUM_HANDS, verts.shape[-2], 3)
 
 
 def _apply_overrides(cfg, overrides):
@@ -1416,6 +1452,15 @@ def train():
     scale_margin = float(scale_cfg.get("margin", 0.05))
     scale_depth_min = float(scale_cfg.get("depth_min", 0.01))
     scale_warmup_steps = int(scale_cfg.get("warmup_steps", 0))
+
+    # Hand-scene registration loss (dense surface-level coupling config).
+    reg_cfg = cfg.get("hand_scene_registration", {})
+    w_reg = cfg["loss_weights"].get("hand_scene_registration", 0.0)
+    reg_margin = float(reg_cfg.get("margin", 0.03))
+    reg_depth_min = float(reg_cfg.get("depth_min", 0.01))
+    reg_conf_thresh = float(reg_cfg.get("conf_thresh", 0.0))
+    reg_direction = reg_cfg.get("direction", "bidirectional")
+    reg_warmup_steps = int(reg_cfg.get("warmup_steps", 0))
 
     ds_kwargs = dict(
         num_frames=num_frames, res=res, clip_stride=clip_stride,
@@ -1717,8 +1762,9 @@ def train():
             "kp3d": 0.0, "kp3d_abs": 0.0, "kp2d": 0.0,
             "gs_l1": 0.0, "gs_lpips": 0.0,
             "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
-        "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
-        "scale_head": 0.0, "scale_residual_m": 0.0,
+            "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
+            "scale_head": 0.0, "scale_residual_m": 0.0,
+            "hand_scene_registration": 0.0, "registration_residual_m": 0.0,
         }
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
@@ -1938,11 +1984,26 @@ def train():
                 )
                 scale_residual_m = _sh_info["scale_residual_m"]
 
+            # Hand-scene registration loss (dense surface-level metric coupling).
+            loss_hand_scene_reg = torch.zeros((), device=device)
+            reg_residual_m = 0.0
+            if (w_reg > 0.0 and gs_depth_pred is not None and "cam_intrinsics" in batch):
+                pred_verts = compute_vertices_from_batch(pred_params, mano_model, device)
+                loss_hand_scene_reg, _reg_info = hand_scene_registration_loss(
+                    pred_verts, gs_depth_pred, has_hand, batch["cam_intrinsics"].to(device),
+                    pred_scale=pred_scale,
+                    margin=reg_margin, depth_min=reg_depth_min,
+                    gs_depth_conf=preds.get("gs_depth_conf"), conf_thresh=reg_conf_thresh,
+                    direction=reg_direction,
+                )
+                reg_residual_m = _reg_info["registration_residual_m"]
+
             anchor_ramp = min(1.0, global_step / anchor_warmup_steps) if anchor_warmup_steps > 0 else 1.0
             abs_ramp = min(1.0, global_step / kp3d_abs_warmup_steps) if kp3d_abs_warmup_steps > 0 else 1.0
             obj_ramp = min(1.0, global_step / obj_warmup_steps) if obj_warmup_steps > 0 else 1.0
             scale_ramp = min(1.0, global_step / scale_warmup_steps) if scale_warmup_steps > 0 else 1.0
             root_anchor_ramp = min(1.0, global_step / root_anchor_warmup_steps) if root_anchor_warmup_steps > 0 else 1.0
+            reg_ramp = min(1.0, global_step / reg_warmup_steps) if reg_warmup_steps > 0 else 1.0
 
             w = cfg["loss_weights"]
             loss = (
@@ -1959,6 +2020,7 @@ def train():
                 + w.get("obj_depth", 0.0) * obj_ramp * loss_obj_depth
                 + w.get("scale_head", 0.0) * scale_ramp * loss_scale_head
                 + w.get("root_anchor", 0.0) * root_anchor_ramp * loss_root_anchor
+                + w.get("hand_scene_registration", 0.0) * reg_ramp * loss_hand_scene_reg
             )
 
             # Isolation mode: backward each weighted term alone on this batch,
@@ -2036,6 +2098,8 @@ def train():
             accum_terms["obj_depth_residual_m"] += obj_depth_residual_m
             accum_terms["scale_head"]   += loss_scale_head.item()
             accum_terms["scale_residual_m"] += scale_residual_m
+            accum_terms["hand_scene_registration"] += loss_hand_scene_reg.item()
+            accum_terms["registration_residual_m"] += reg_residual_m
 
             if (batch_idx + 1) % grad_accum_steps == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=grad_clip_norm)
@@ -2063,8 +2127,9 @@ def train():
                     "kp3d": 0.0, "kp3d_abs": 0.0, "kp2d": 0.0,
                     "gs_l1": 0.0, "gs_lpips": 0.0,
                     "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
-        "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
-        "scale_head": 0.0, "scale_residual_m": 0.0,
+                    "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
+                    "scale_head": 0.0, "scale_residual_m": 0.0,
+                    "hand_scene_registration": 0.0, "registration_residual_m": 0.0,
                 }
                 global_step += 1
                 if max_steps and global_step >= max_steps:
@@ -2084,6 +2149,8 @@ def train():
                                "train/loss_gs_lpips":      avg_terms["gs_lpips"],
                                "train/loss_hand_depth_anchor": avg_terms["hand_depth_anchor"],
                                "train/hand_depth_residual_m":  avg_terms["hand_depth_residual_m"],
+                               "train/loss_hand_scene_reg":     avg_terms["hand_scene_registration"],
+                               "train/hand_scene_reg_residual_m": avg_terms["registration_residual_m"],
                                "train/grad_norm":          grad_norm.item(),
                                "lr": scheduler.get_last_lr()[0]}, step=global_step)
 
@@ -2147,7 +2214,9 @@ def train():
                                     "val/loss_gs_l1":         val_terms["gs_l1"],
                                     "val/loss_gs_lpips":      val_terms["gs_lpips"],
                                     "val/loss_hand_depth_anchor": val_terms["hand_depth_anchor"],
-                                    "val/hand_depth_residual_m":  val_terms["hand_depth_residual_m"]}
+                                    "val/hand_depth_residual_m":  val_terms["hand_depth_residual_m"],
+                                    "val/loss_hand_scene_reg":     val_terms["hand_scene_registration"],
+                                    "val/hand_scene_reg_residual_m": val_terms["registration_residual_m"]}
                         for side_label in ("left", "right", "all"):
                             side_metrics = hand_metrics.get(side_label)
                             if side_metrics is None:
