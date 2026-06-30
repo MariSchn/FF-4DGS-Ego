@@ -3,7 +3,7 @@
 #SBATCH --account=3dv
 #SBATCH --partition=jobs
 #SBATCH --gpus=gb10:1
-#SBATCH --time=00:20:00
+#SBATCH --time=02:00:00
 #SBATCH --output=/home/dmonopoli/hires_evalB_%j.out
 #SBATCH --error=/home/dmonopoli/hires_evalB_%j.out
 # ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ echo "###   ckpt: $HIRES_CKPT"
 echo "############################################################"
 if [ -f "$HIRES_CKPT" ]; then
   python -m scripts.eval_cmpjpe --config "$HCFG" --ckpt "$HIRES_CKPT" \
-    --h2o "$PACK" --subject subject4 --joints21 --hires --limit 100
+    --h2o "$PACK" --subject subject4 --joints21 --hires --limit 400
   echo "=== EVAL HIRES rc=$? ==="
 else
   echo "=== ERROR: hires ckpt missing at $HIRES_CKPT ==="
@@ -56,7 +56,7 @@ echo "###   ckpt: $BASE_CKPT"
 echo "############################################################"
 if [ -f "$BASE_CKPT" ]; then
   python -m scripts.eval_cmpjpe --config "$BCFG" --ckpt "$BASE_CKPT" \
-    --h2o "$PACK" --subject subject4 --joints21 --limit 100
+    --h2o "$PACK" --subject subject4 --joints21 --limit 400
   echo "=== EVAL BASELINE rc=$? ==="
 else
   echo "=== ERROR: baseline ckpt missing at $BASE_CKPT ==="
