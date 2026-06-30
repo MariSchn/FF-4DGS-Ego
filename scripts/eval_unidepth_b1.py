@@ -75,7 +75,17 @@ def main() -> None:
                 if not bool(valid[s].any()):
                     continue
                 img255 = rgb[s].float().to(device)                 # [3, H, W] in [0,255]
-                pred = model.infer(img255, K)
+                H, W = img255.shape[-2:]
+                cx = float(K[0, 2])
+                cy = float(K[1, 2])
+                fx_scaled = float(K[0, 0]) * W / (2.0 * cx)
+                fy_scaled = float(K[1, 1]) * H / (2.0 * cy)
+                K_scaled = torch.tensor([
+                    [fx_scaled, 0.0, W / 2.0],
+                    [0.0, fy_scaled, H / 2.0],
+                    [0.0, 0.0, 1.0]
+                ], dtype=torch.float32, device=device)
+                pred = model.infer(img255, K_scaled)
                 depth = pred["depth"].squeeze().to("cpu").float()   # [H, W]
                 fm_s = sample_depth(depth, grid[s])                 # [2, J]
                 m = valid[s]
