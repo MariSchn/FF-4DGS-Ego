@@ -56,7 +56,7 @@ fi
 # train/val split holds out subject4 and trains on subject1+2+3.
 CFG="$WORK/exp_h2o_hand_hires_full.yaml"
 sed -e "s|__SET_AT_JOB_TIME__|$PACK|" \
-    -e "s|/home/dmonopoli/ckpt_h2o_hand_hires|/home/dmonopoli/ckpt_h2o_hand_hires_full|" \
+    -e "s|/home/dmonopoli/ckpt_h2o_hand_hires|/work/scratch/dmonopoli/checkpoints/h2o_hand_hires_full|" \
     configs/exp_h2o_hand_hires.yaml > "$CFG"
 echo "=== data_root  -> $(grep data_root $CFG) ==="
 echo "=== output_dir -> $(grep output_dir $CFG) ==="
@@ -67,7 +67,7 @@ python -m scripts.train_h2o_hand --config "$CFG"
 TRAIN_RC=$?
 echo "=== TRAIN done @ $(date)  rc=$TRAIN_RC ==="
 
-CKDIR=/home/dmonopoli/ckpt_h2o_hand_hires_full
+CKDIR=/work/scratch/dmonopoli/checkpoints/h2o_hand_hires_full
 BEST="$CKDIR/best_cmpjpe.pt"
 echo "=== saved checkpoints ===" ; ls -la "$CKDIR" 2>&1
 
