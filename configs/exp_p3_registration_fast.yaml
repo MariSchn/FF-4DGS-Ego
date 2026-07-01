@@ -67,17 +67,17 @@ metric_scale:
 training:
   lr: 2e-5
   min_lr: 1e-7
-  epochs: 1
+  epochs: 2                     # Train for 2 epochs on the subset (112 steps total)
   batch_size: 4
   grad_accum_steps: 8
   use_amp: true
   log_every: 25
   val_every: 50
   val_max_batches: 12
-  save_every: 1000              # Save checkpoint every 1000 steps
+  save_every: 50                # Save checkpoint every 50 steps
   grad_clip_norm: 5.0
   freeze_gs_head: true
-  keep_last_checkpoints: 3      # Keep last 3 checkpoints to conserve disk space
+  keep_last_checkpoints: 5      # Keep last 5 checkpoints to avoid space issues
   seed: 42
   output_dir: "/work/scratch/dmonopoli/checkpoints/p3_registration_fast"
 # ------------------------------------------------------------------
@@ -87,4 +87,9 @@ visualization:
 # ------------------------------------------------------------------
 hand_crop:
   rescale_factor: 1.5
+# ------------------------------------------------------------------
+debug:
+  enabled: true                 # <-- Enable subset training
+  max_sequences: 15             # <-- Load only 15 sequences (~1800 clips)
+  single_frame: false
 # ------------------------------------------------------------------
