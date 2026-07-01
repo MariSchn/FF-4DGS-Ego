@@ -1351,6 +1351,13 @@ def train():
         for p in gs_head_params + injection_params:
             p.requires_grad = False
         gs_head_params, injection_params = [], []
+
+    # Support freezing the hand head to use it as a stable metric depth anchor
+    freeze_hand = bool(training_cfg.get("freeze_hand", False))
+    if freeze_hand:
+        for p in hand_params:
+            p.requires_grad = False
+        hand_params = []
     # Partial unfreeze (Cyrus direction a): keep the backbone frozen but re-enable
     # grad on the LAST N frame+global transformer blocks, so the metric-depth
     # supervision can reshape the deep features without destabilising the whole
