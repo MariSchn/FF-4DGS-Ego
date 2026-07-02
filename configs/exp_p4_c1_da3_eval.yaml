@@ -41,6 +41,7 @@ model:
     hidden: 32
     conf_thresh: 0.1
     band_m: 3.0
+    refine_ref: true      # option 2: wrist depth comes from DA3 (learned scale), not a head correction
   hand_to_gs_injection:
     enabled: false
     use_hand_valid_mask: true

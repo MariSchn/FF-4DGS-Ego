@@ -13,10 +13,16 @@ import torch.nn as nn
 
 
 class RootDepthRefine(nn.Module):
-    def __init__(self, hidden: int = 32, conf_thresh: float = 0.1, band_m: float = 0.5):
+    def __init__(self, hidden: int = 32, conf_thresh: float = 0.1, band_m: float = 0.5,
+                 refine_ref: bool = False):
         super().__init__()
         self.conf_thresh = float(conf_thresh)
         self.band_m = float(band_m)
+        # refine_ref=False (default): correct the head's own wrist depth (add a residual).
+        # refine_ref=True: take the depth straight from the reference (DA3), correct its
+        # global scale with a learned factor, and use that as the wrist depth wherever the
+        # reference is valid. This does not depend on the head's weak absolute depth.
+        self.refine_ref = bool(refine_ref)
         # features: [wrist_z, d_scene, d_scene - wrist_z, conf]
         self.net = nn.Sequential(
             nn.Linear(4, hidden),
@@ -25,6 +31,11 @@ class RootDepthRefine(nn.Module):
         )
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
+        if self.refine_ref:
+            # scale = exp(log_scale) (starts at 1), shift starts at 0, so at init the
+            # refined depth equals raw DA3; training then learns DA3's ~0.89 correction.
+            self.log_scale = nn.Parameter(torch.zeros(()))
+            self.shift = nn.Parameter(torch.zeros(()))
 
     def forward(self, wrist_z, d_scene, conf, in_frame, contact=None):
         """All inputs [B, S, 2] (per hand). Returns (delta_z [B,S,2], gate bool [B,S,2]).
@@ -34,7 +45,15 @@ class RootDepthRefine(nn.Module):
         proxy gate is kept as the fallback for inputs without a contact signal."""
         disagree = d_scene - wrist_z
         feats = torch.stack([wrist_z, d_scene, disagree, conf], dim=-1)  # [B,S,2,4]
-        delta = self.net(feats).squeeze(-1)  # [B,S,2]
-        reliable = contact.bool() if contact is not None else (disagree.abs() < self.band_m)
-        gate = in_frame & (conf > self.conf_thresh) & reliable
-        return delta * gate.float(), gate
+        residual = self.net(feats).squeeze(-1)  # [B,S,2]
+        if self.refine_ref:
+            # Use DA3 as the depth directly wherever it is valid (not only where it agrees
+            # with the head), so the head's wrong depth gets overwritten, not preserved.
+            gate = in_frame & (conf > self.conf_thresh)
+            refined = torch.exp(self.log_scale) * d_scene + self.shift + residual
+            delta = (refined - wrist_z) * gate.float()
+        else:
+            reliable = contact.bool() if contact is not None else (disagree.abs() < self.band_m)
+            gate = in_frame & (conf > self.conf_thresh) & reliable
+            delta = residual * gate.float()
+        return delta, gate
