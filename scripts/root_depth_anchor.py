@@ -57,6 +57,12 @@ def apply_root_anchor(module, pred_joints, gs_depth, gs_depth_conf, cam_intr,
         in_frame = in_frame[..., 0]
         in_frame = in_frame & (d_scene > 0.01) & torch.isfinite(d_scene) & torch.isfinite(wrist_z)
 
+    # d_scene (esp. the DA3 ref cache) can be NaN where the wrist projects out of frame
+    # or DA3 skipped it. in_frame already excludes those, but a NaN in the MLP input
+    # poisons delta (NaN * gate = NaN, not 0) -> NaN pred_joints -> NaN kp losses at
+    # step 0. Sanitize so gated-out positions get a finite 0 delta.
+    d_scene = torch.nan_to_num(d_scene, nan=0.0, posinf=0.0, neginf=0.0)
+    conf = torch.nan_to_num(conf, nan=0.0, posinf=0.0, neginf=0.0)
     delta_z, gate = module(wrist_z, d_scene, conf, in_frame, contact=contact_mask)  # [B,S,2]
     corrected = pred_joints.clone()
     corrected[..., 2] = corrected[..., 2] + delta_z.unsqueeze(-1)  # rigid depth shift per hand
