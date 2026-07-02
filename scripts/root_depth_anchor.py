@@ -44,6 +44,11 @@ def apply_root_anchor(module, pred_joints, gs_depth, gs_depth_conf, cam_intr,
     wrist_z = z[..., 0]
     if ref_d_scene is not None:
         d_scene = ref_d_scene.to(wrist_z.device, wrist_z.dtype)   # [B,S,2] external metric depth at wrist
+        # Fixed global bias correction for the reference (DA3 on HOI4D reads ~0.892x
+        # true depth). Without this every variant pulled the hand ~70mm too close.
+        _rs = float(getattr(module, "ref_scale", 1.0))
+        if _rs != 1.0:
+            d_scene = d_scene * _rs
         conf = torch.ones_like(d_scene)
         in_frame = torch.isfinite(d_scene) & (d_scene > 0.01) & torch.isfinite(wrist_z)
     else:
@@ -64,8 +69,18 @@ def apply_root_anchor(module, pred_joints, gs_depth, gs_depth_conf, cam_intr,
     d_scene = torch.nan_to_num(d_scene, nan=0.0, posinf=0.0, neginf=0.0)
     conf = torch.nan_to_num(conf, nan=0.0, posinf=0.0, neginf=0.0)
     delta_z, gate = module(wrist_z, d_scene, conf, in_frame, contact=contact_mask)  # [B,S,2]
-    corrected = pred_joints.clone()
-    corrected[..., 2] = corrected[..., 2] + delta_z.unsqueeze(-1)  # rigid depth shift per hand
+    if getattr(module, "correction", "z") == "ray":
+        # A depth error on a correct 2D projection scales the position along the viewing
+        # ray, so move the whole hand rigidly by root*(dz/z): x,y,z shift together and the
+        # root stays on its ray. z-only shifts leave a lateral error of (r/Z)*dz that the
+        # re-anchor oracle (full 3D) never had.
+        root = pred_joints[:, :, :, WRIST_J, :]                        # [B,S,2,3]
+        safe = wrist_z.clamp(min=0.05)
+        ratio = torch.where(wrist_z > 0.05, delta_z / safe, torch.zeros_like(delta_z))
+        corrected = pred_joints + (root * ratio.unsqueeze(-1)).unsqueeze(-2)
+    else:
+        corrected = pred_joints.clone()
+        corrected[..., 2] = corrected[..., 2] + delta_z.unsqueeze(-1)  # z-only depth shift
     info = {"d_scene": d_scene, "wrist_z": wrist_z, "conf": conf, "gate": gate}
     return corrected, delta_z, info
 

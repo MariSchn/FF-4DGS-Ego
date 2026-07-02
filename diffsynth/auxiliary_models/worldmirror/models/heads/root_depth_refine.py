@@ -14,10 +14,18 @@ import torch.nn as nn
 
 class RootDepthRefine(nn.Module):
     def __init__(self, hidden: int = 32, conf_thresh: float = 0.1, band_m: float = 0.5,
-                 refine_ref: bool = False):
+                 refine_ref: bool = False, ref_scale: float = 1.0, correction: str = "z"):
         super().__init__()
         self.conf_thresh = float(conf_thresh)
         self.band_m = float(band_m)
+        # ref_scale: fixed global correction applied to the external reference depth
+        # BEFORE it is used (DA3METRIC on HOI4D reads ~0.892x true depth, so 1.121).
+        # The learned log_scale cannot converge to this in a short run; bake it in.
+        self.ref_scale = float(ref_scale)
+        # correction: "z" shifts only the z coordinate; "ray" moves the hand along the
+        # wrist's viewing ray (x,y,z together), which is what a depth error actually is
+        # when the 2D projection is right. Applied in apply_root_anchor.
+        self.correction = str(correction)
         # refine_ref=False (default): correct the head's own wrist depth (add a residual).
         # refine_ref=True: take the depth straight from the reference (DA3), correct its
         # global scale with a learned factor, and use that as the wrist depth wherever the
