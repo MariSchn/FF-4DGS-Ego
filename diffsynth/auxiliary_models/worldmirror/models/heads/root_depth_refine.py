@@ -46,14 +46,15 @@ class RootDepthRefine(nn.Module):
         disagree = d_scene - wrist_z
         feats = torch.stack([wrist_z, d_scene, disagree, conf], dim=-1)  # [B,S,2,4]
         residual = self.net(feats).squeeze(-1)  # [B,S,2]
+        # Reliability gate: trust DA3 only where it agrees with the head within band_m
+        # (or at true contact when given). Blindly trusting DA3 everywhere hurt on the
+        # sequence where DA3 itself was bad, so we gate on agreement.
+        reliable = contact.bool() if contact is not None else (disagree.abs() < self.band_m)
+        gate = in_frame & (conf > self.conf_thresh) & reliable
         if self.refine_ref:
-            # Use DA3 as the depth directly wherever it is valid (not only where it agrees
-            # with the head), so the head's wrong depth gets overwritten, not preserved.
-            gate = in_frame & (conf > self.conf_thresh)
+            # Where trusted, take the depth from DA3 (scale-corrected); elsewhere keep the head.
             refined = torch.exp(self.log_scale) * d_scene + self.shift + residual
             delta = (refined - wrist_z) * gate.float()
         else:
-            reliable = contact.bool() if contact is not None else (disagree.abs() < self.band_m)
-            gate = in_frame & (conf > self.conf_thresh) & reliable
             delta = residual * gate.float()
         return delta, gate
