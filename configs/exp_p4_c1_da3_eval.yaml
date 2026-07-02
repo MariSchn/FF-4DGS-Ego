@@ -1,0 +1,112 @@
+# ==================================================================
+# C1: DA3 -> RootDepthRefine (frozen metric model -> trainable refine, Cyrus).
+# ------------------------------------------------------------------
+# Delta vs exp_p4_contact_hoi4d.yaml: the root anchor's metric reference is no
+# longer the frozen gs_depth but DA3METRIC-LARGE's depth AT the wrist, precomputed
+# per frame into data.da3_wrist_cache_dir (build_da3_wrist_cache.py). da3_probe v2
+# showed DA3 at-wrist depth ~65mm raw / ~30-40mm after a global scale a refine head
+# learns away — the first external reference genuinely better than our head (~99mm
+# held-out). apply_root_anchor(ref_d_scene=DA3) replaces gs_depth, so GS is OFF
+# (faster; the A1 lesson) and the head's wrist depth is pulled toward DA3 instead.
+# Warm start = best_depth.pt (the same validated backbone+head as A1).
+# Train on the 6-seq split; the honest held-out C_abs A/B (anchor ON vs OFF) is run
+# by eval_hand_cam_anchor on the SEPARATE 2-seq val split.
+# ==================================================================
+data:
+  data_root: "/home/dmonopoli/hoi4d_c1_train"     # 6-seq train split (symlinks into hoi4d_pp)
+  da3_wrist_cache_dir: "/home/dmonopoli/da3_wrist_cache"   # C1: per-seq DA3 metric wrist depth
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.2                    # hold ~1 of 6 for best-ckpt selection (real held-out is separate)
+  num_workers: 4
+# ------------------------------------------------------------------
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/home/dmonopoli/rt_c1/latest.pt"
+  freeze_backbone: true
+  enable_scale_head: false
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: false             # DA3 (ref_d_scene) is the anchor reference now, not gs_depth -> GS off (fast)
+  enable_root_anchor: true
+  root_anchor_kwargs:
+    hidden: 32
+    conf_thresh: 0.1
+    band_m: 0.5
+  hand_to_gs_injection:
+    enabled: false
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+# ------------------------------------------------------------------
+loss_weights:
+  kp3d:          0.05
+  kp3d_abs:      0.3
+  kp2d:          0.05
+  global_orient: 0.01
+  hand_pose:     0.01
+  betas:         0.01
+  transl:        1.0
+  root_anchor:   1.0          # gated consistency: corrected wrist z -> DA3 metric depth
+  gs_l1:         0.0
+  gs_lpips:      0.0
+  hand_depth_anchor: 0.0
+# ------------------------------------------------------------------
+metric_scale:
+  enable: true
+  clamp: [0.1, 10.0]
+# ------------------------------------------------------------------
+training:
+  lr: 2e-5
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 4
+  grad_accum_steps: 8
+  use_amp: true
+  log_every: 10
+  val_every: 40
+  val_max_batches: 8
+  save_every: 1000000
+  grad_clip_norm: 5.0
+  kp3d_abs_warmup_steps: 8
+  root_anchor_warmup_steps: 8
+  root_anchor_lr: 1e-3           # zero-init anchor MLP needs its own high lr (HOT3D lesson)
+  use_contact_gate: false        # DA3 ref is dense (every frame); gate on the band, not GT contact
+  freeze_gs_head: true
+  keep_last_checkpoints: 0
+  seed: 42
+  output_dir: "/home/dmonopoli/rt_c1"     # scratch is write-locked; checkpoints to /home
+# ------------------------------------------------------------------
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 4
+# ------------------------------------------------------------------
+hand_crop:
+  rescale_factor: 1.5
+# ------------------------------------------------------------------
+debug:
+  enabled: false
+  max_sequences: 20
+  single_frame: false
+# ------------------------------------------------------------------
+wandb:
+  enabled: false
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "C1: DA3 -> RootDepthRefine (DA3 metric wrist ref)"
+  tags: []
+  notes: null
