@@ -172,7 +172,8 @@ def _intr_3x3(cam_intr, res, device):
 def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len, stride, wa_short,
                   max_segs=0, feed_intrinsics=False, smooth_windows=None, dump_list=None,
                   refine_pose=False, refine_iters=40, refine_lr=3e-3, refine_frame_stride=1,
-                  refine_sanity=False, robust_scale=False):
+                  refine_sanity=False, robust_scale=False,
+                  da3_wrist_cache_dir=None, contact_cache_dir=None, contact_gate="off"):
     """Eval all `segment_len` segments of one sequence; return list of per-segment metrics.
 
     ``feed_intrinsics``: condition the backbone on the *known* camera intrinsics (ray prior,
@@ -198,6 +199,18 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
     cam_intr = torch.load(os.path.join(hd, "cam_intrinsics.pt"), map_location="cpu").float().view(1, 3)
     bb = torch.load(os.path.join(hd, "hand_bboxes_v2_rf1.5_res224x224.pt"), map_location="cpu")
     gt_valid = bb["valid"].bool()                           # [N,2]
+    # C1 anchor references, keyed by seq basename, from /home (scratch is write-locked).
+    _sq = os.path.basename(seq_dir.rstrip("/"))
+    seq_da3 = None
+    if da3_wrist_cache_dir is not None:
+        _p = os.path.join(da3_wrist_cache_dir, f"{_sq}_da3_wrist.pt")
+        if os.path.exists(_p):
+            seq_da3 = torch.load(_p, map_location="cpu", weights_only=True).float()   # [N,2] m
+    seq_contact = None
+    if contact_gate == "oracle" and contact_cache_dir is not None:
+        _p = os.path.join(contact_cache_dir, f"{_sq}_contact.pt")
+        if os.path.exists(_p):
+            seq_contact = torch.load(_p, map_location="cpu", weights_only=True).bool()  # [N,2]
 
     overlap = clip_len - stride
     clips_per_seg = segment_len // stride
@@ -243,7 +256,19 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                       f"psnr ff={rinfo.get('psnr_ff_mean', float('nan')):.1f}"
                       f"->ref={rinfo.get('psnr_ref_mean', float('nan')):.1f} "
                       f"improved={rinfo.get('improved')}/{rinfo.get('n_frames')}", flush=True)
-            cc = predict_clip(preds, mano_model, device, cam_intr, model=model, anchor_log=anchor_log)
+            _cf = (base + c) * stride   # this clip's frame offset (dataset clip_stride == stride)
+            _ref = None
+            if seq_da3 is not None:
+                _sl = seq_da3[_cf:_cf + clip_len]
+                if _sl.shape[0] == clip_len:
+                    _ref = _sl.unsqueeze(0).to(device)                  # [1,S,2] DA3 metric wrist depth
+            _con = None
+            if seq_contact is not None:
+                _sl = seq_contact[_cf:_cf + clip_len]
+                if _sl.shape[0] == clip_len:
+                    _con = _sl.unsqueeze(0).to(device)                  # [1,S,2] contact gate
+            cc = predict_clip(preds, mano_model, device, cam_intr, model=model, anchor_log=anchor_log,
+                              ref_d_scene=_ref, contact_mask=_con)
             clip_cams.append(cc)
 
             # (b) GROUND-TRUTH SCALE check: the world placement scales the up-to-scale camera
@@ -491,6 +516,12 @@ def main():
     ap.add_argument("--refine_frame_stride", type=int, default=1, help="refine every Nth frame (speed)")
     ap.add_argument("--robust_scale", action="store_true",
                     help="MAD-reject z_hand/scene_depth outliers before the per-seq pooled scale median")
+    ap.add_argument("--da3_wrist_cache_dir", default=None,
+                    help="C1: per-seq DA3 metric wrist-depth caches (<seq>_da3_wrist.pt) as the anchor ref")
+    ap.add_argument("--contact_cache_dir", default=None,
+                    help="per-seq contact caches (<seq>_contact.pt) for --contact_gate oracle")
+    ap.add_argument("--contact_gate", choices=["off", "oracle"], default="off",
+                    help="oracle = gate the anchor by the cached contact mask (needs --contact_cache_dir)")
     ap.add_argument("--out", default="world_eval.json")
     args = ap.parse_args()
 
@@ -542,7 +573,10 @@ def main():
                                      smooth_windows=smooth_windows, dump_list=dump_list,
                                      refine_pose=args.refine_pose, refine_iters=args.refine_iters,
                                      refine_lr=args.refine_lr, refine_frame_stride=args.refine_frame_stride,
-                                     refine_sanity=args.refine_sanity, robust_scale=args.robust_scale)
+                                     refine_sanity=args.refine_sanity, robust_scale=args.robust_scale,
+                                     da3_wrist_cache_dir=args.da3_wrist_cache_dir,
+                                     contact_cache_dir=args.contact_cache_dir,
+                                     contact_gate=args.contact_gate)
         except Exception as e:
             print(f"[skip {os.path.basename(sq)}] {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
