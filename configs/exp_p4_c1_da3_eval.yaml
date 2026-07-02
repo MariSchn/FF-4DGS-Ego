@@ -23,7 +23,7 @@ data:
 # ------------------------------------------------------------------
 model:
   checkpoint: "models/NeoVerse/reconstructor.ckpt"
-  warm_start_hand_head: "/home/dmonopoli/rt_c1/latest.pt"
+  warm_start_hand_head: "/tmp/rt_c1/latest.pt"
   freeze_backbone: true
   enable_scale_head: false
   enable_hand: true
