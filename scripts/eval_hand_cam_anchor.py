@@ -33,7 +33,7 @@ def _has_cam_cache(seq_dir):
 
 
 def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_clips=0,
-                 contact_gate="proxy", da3_wrist_cache_dir=None):
+                 contact_gate="proxy", da3_wrist_cache_dir=None, contact_cache_dir=None):
     """Run all clips of one sequence, apply the anchor, return camera-frame metrics.
     contact_gate: 'oracle' gates the anchor by the cached GT contact mask (mechanism
     ceiling); 'proxy' uses the module's |disagree|<band_m gate; 'off' handled by the
@@ -62,7 +62,10 @@ def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_
     # oracle contact gate: per-frame, per-hand GT contact mask (scripts.build_contact_cache).
     contact_seq = None
     if contact_gate == "oracle":
-        cpath = os.path.join(hd, "contact_cache.pt")
+        if contact_cache_dir is not None:
+            cpath = os.path.join(contact_cache_dir, f"{os.path.basename(seq_dir)}_contact.pt")
+        else:
+            cpath = os.path.join(hd, "contact_cache.pt")
         contact_seq = torch.load(cpath, map_location="cpu").bool() if os.path.exists(cpath) else None
 
     n_clips = len(ds) if max_clips <= 0 else min(len(ds), max_clips)
@@ -132,6 +135,9 @@ def main():
     ap.add_argument("--da3_wrist_cache_dir", default=None,
                     help="C1: dir of per-seq DA3 metric wrist-depth caches (<seq>_da3_wrist.pt); "
                          "when set, the anchor uses DA3 depth as ref_d_scene instead of gs_depth.")
+    ap.add_argument("--contact_cache_dir", default=None,
+                    help="dir of per-seq contact caches (<seq>_contact.pt) for --contact_gate oracle, "
+                         "when the in-tree hand_data/contact_cache.pt path is read-only/quota-locked.")
     ap.add_argument("--seqs", default=None,
                     help="comma-separated seq basenames to restrict the eval to (e.g. the held-out "
                          "val split). Default: all seqs with a cam cache under --data_root.")
@@ -164,7 +170,8 @@ def main():
         try:
             r = eval_seq_cam(model, mano_model, device, sq, cfg, args.clip_len, args.stride,
                              args.max_clips, contact_gate=args.contact_gate,
-                             da3_wrist_cache_dir=args.da3_wrist_cache_dir)
+                             da3_wrist_cache_dir=args.da3_wrist_cache_dir,
+                             contact_cache_dir=args.contact_cache_dir)
             if r is None:
                 continue
             results.append(r)

@@ -100,7 +100,7 @@ class HOT3DHandDataset(Dataset):
     def __init__(self, seq_dirs, mano_model, num_frames=16, res=(224, 224), clip_stride=None,
                  use_hand_crop=False, rescale_factor=2.0,
                  objects_dir=None, render_obj_depth=False, obj_render_res=224,
-                 da3_wrist_cache_dir=None):
+                 da3_wrist_cache_dir=None, contact_cache_dir=None):
         self.num_frames = num_frames
         self.mano_model = mano_model
         self.res = res
@@ -110,6 +110,9 @@ class HOT3DHandDataset(Dataset):
         # Per-seq cache <dir>/<seq>_da3_wrist.pt = [N,2] meters (NaN where unavailable),
         # sliced per clip and fed to apply_root_anchor(ref_d_scene=) in place of gs_depth.
         self.da3_wrist_cache_dir = da3_wrist_cache_dir
+        # Contact gate cache, keyed by seq basename, from a separate dir (scratch
+        # hand_data is write-locked). Overrides the in-tree contact_cache.pt when set.
+        self.contact_cache_dir = contact_cache_dir
         # GT object-depth supervision (Cyrus direction a): render metric object
         # depth from the raw HOT3D meshes per clip frame, in the dataloader worker.
         self.objects_dir = objects_dir
@@ -246,9 +249,15 @@ class HOT3DHandDataset(Dataset):
             # scripts.build_contact_cache (GT wrist on the GT surface). Loaded
             # independently like cam_intrinsics; absent -> None -> the anchor falls
             # back to the |disagree|<band_m proxy (back-compat, no crash).
-            contact_cache_path = os.path.join(hand_data_root, "contact_cache.pt")
-            seq_contact = (torch.load(contact_cache_path, weights_only=True).bool()
-                           if os.path.exists(contact_cache_path) else None)
+            if self.contact_cache_dir is not None:
+                _cseq = os.path.basename(seq_path.rstrip("/"))
+                _cp = os.path.join(self.contact_cache_dir, f"{_cseq}_contact.pt")
+                seq_contact = (torch.load(_cp, weights_only=True).bool()
+                               if os.path.exists(_cp) else None)
+            else:
+                contact_cache_path = os.path.join(hand_data_root, "contact_cache.pt")
+                seq_contact = (torch.load(contact_cache_path, weights_only=True).bool()
+                               if os.path.exists(contact_cache_path) else None)
             # C1: DA3 metric wrist-depth reference, keyed by seq basename, from a
             # separate dir (built off-cluster; scratch is quota-locked for writes).
             seq_da3 = None
@@ -1492,6 +1501,7 @@ def train():
         objects_dir=objects_dir, render_obj_depth=render_obj_depth,
         obj_render_res=obj_render_res,
         da3_wrist_cache_dir=data_cfg.get("da3_wrist_cache_dir"),
+        contact_cache_dir=data_cfg.get("contact_cache_dir"),
     )
 
     if debug_cfg.get("single_frame", False):
