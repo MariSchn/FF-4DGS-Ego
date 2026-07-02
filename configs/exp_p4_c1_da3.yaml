@@ -40,7 +40,7 @@ model:
   root_anchor_kwargs:
     hidden: 32
     conf_thresh: 0.1
-    band_m: 0.5
+    band_m: 3.0
   hand_to_gs_injection:
     enabled: false
     use_hand_valid_mask: true
