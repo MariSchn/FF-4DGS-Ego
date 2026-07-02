@@ -1,0 +1,109 @@
+# ==================================================================
+# C2: partial-unfreeze the backbone to push HOI4D hand ABSOLUTE placement toward 40mm.
+# ------------------------------------------------------------------
+# The post-hoc anchor (DA3/contact) is dead: it can't crack absolute placement (wash
+# camera-frame, hurt world-space) because no feedforward reference is GT-accurate. The
+# remaining feedforward lever is the head's OWN absolute depth, and kp3d_abs is tapped
+# with a FROZEN backbone. So unfreeze the last 4 frame+global blocks and let them adapt
+# to the absolute-3D signal (kp3d_abs, boosted 0.05->0.5), with GS reconstruction (gs_l1
+# +lpips) as the regularizer that keeps the unfrozen backbone from drifting. HOI4D has no
+# object meshes so obj_depth is off; kp3d_abs on the hand is the metric target, gs the reg.
+# Warm best_depth.pt. Checkpoints -> /tmp (quota). Long run (~600 steps, ~3-4h).
+# ==================================================================
+data:
+  data_root: "/home/dmonopoli/hoi4d_c1_train"     # 8-seq train split (symlinks into hoi4d_pp)
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 8
+  val_split: 0.2
+  num_workers: 4
+# ------------------------------------------------------------------
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  warm_start_hand_head: "/work/scratch/dmonopoli/checkpoints/hoi4d_depth/best_depth.pt"
+  freeze_backbone: true          # partial unfreeze below; heads train regardless
+  enable_scale_head: false
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: true                # ON: gs reconstruction regularizes the unfrozen backbone
+  enable_root_anchor: false      # isolate the head+backbone (anchor is dead)
+  hand_to_gs_injection:
+    enabled: true
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+# ------------------------------------------------------------------
+loss_weights:
+  kp3d:          0.05
+  kp3d_abs:      0.5           # <-- the direct hand ABSOLUTE-depth target (the 40mm lever)
+  kp2d:          0.05
+  global_orient: 0.01
+  hand_pose:     0.01
+  betas:         0.01
+  transl:        1.0
+  gs_l1:         0.5           # reconstruction reg: keep the unfrozen backbone from drifting
+  gs_lpips:      0.5
+  hand_depth_anchor: 0.1       # gentle hand-scale coupling via gs_depth
+  obj_depth:     0.0           # HOI4D has no object meshes
+  root_anchor:   0.0
+# ------------------------------------------------------------------
+hand_depth_anchor:
+  margin: 0.02
+  warmup_steps: 200
+  depth_min: 0.01
+  conf_thresh: 0.0
+  direction: scene_follows_hand
+metric_scale:
+  enable: true
+  clamp: [0.1, 10.0]
+# ------------------------------------------------------------------
+training:
+  lr: 5e-6                     # low: protect the pretrained blocks we unfreeze
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 2                # backprop through unfrozen blocks (memory)
+  grad_accum_steps: 16         # effective batch ~32
+  use_amp: true
+  log_every: 25
+  val_every: 100
+  val_max_batches: 8
+  save_every: 1000000
+  grad_clip_norm: 5.0
+  kp3d_abs_warmup_steps: 50
+  unfreeze_last_n_blocks: 4    # last 4 frame + 4 global blocks
+  keep_last_checkpoints: 0
+  seed: 42
+  output_dir: "/tmp/rt_c2"
+# ------------------------------------------------------------------
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 4
+# ------------------------------------------------------------------
+hand_crop:
+  rescale_factor: 1.5
+# ------------------------------------------------------------------
+debug:
+  enabled: false
+  max_sequences: 20
+  single_frame: false
+# ------------------------------------------------------------------
+wandb:
+  enabled: false
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "C2: partial unfreeze for HOI4D hand absolute depth"
+  tags: []
+  notes: null
