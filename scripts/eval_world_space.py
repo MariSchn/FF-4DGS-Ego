@@ -99,7 +99,15 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
         project_joints_to_norm_pixels, sample_depth_at_joints)
 
     pred_joints = compute_joints_from_batch(preds["hand_joints"], mano_model, device)  # [1,S,H,J,3] cam (m)
-    c2w = preds["rendered_extrinsics"][0].float()           # [S,4,4] cam->world (clip-local, up-to-scale)
+    # cam->world (clip-local, up-to-scale). Only the world-space eval uses it; the
+    # camera-frame anchor eval ignores c2w, and with GS off the model never renders
+    # rendered_extrinsics — fall back to identity so cam-frame eval still runs.
+    _c2w_raw = preds.get("rendered_extrinsics")
+    if _c2w_raw is not None:
+        c2w = _c2w_raw[0].float()                           # [S,4,4]
+    else:
+        _S = pred_joints.shape[1]
+        c2w = torch.eye(4, device=pred_joints.device).unsqueeze(0).repeat(_S, 1, 1)
     gs_depth = preds.get("gs_depth")
 
     ratios = torch.empty(0)
