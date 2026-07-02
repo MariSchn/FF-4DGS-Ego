@@ -27,23 +27,35 @@ except Exception:  # dev machines lack diffsynth's heavy deps (modelscope); load
 WRIST_J = 0  # MANO joint 0 = wrist (pelvis_id used by the kp losses)
 
 
-def apply_root_anchor(module, pred_joints, gs_depth, gs_depth_conf, cam_intr, contact_mask=None):
+def apply_root_anchor(module, pred_joints, gs_depth, gs_depth_conf, cam_intr,
+                      contact_mask=None, ref_d_scene=None):
     """pred_joints [B,S,2,J,3] camera-frame (m). gs_depth [B,S,1,Hd,Wd] (detached
     inside). cam_intr [B,3]. contact_mask [B,S,2] bool optional: when given it
     REPLACES the module's |disagree|<band_m proxy gate (fire only at true contact,
-    where the scene depth is reliable). Returns (corrected_joints, delta_z, info)."""
+    where the scene depth is reliable). Returns (corrected_joints, delta_z, info).
+
+    ref_d_scene [B,S,2] optional: an EXTERNAL metric depth-at-wrist reference (e.g.
+    DA3METRIC-LARGE, precomputed per frame) that REPLACES the gs_depth sampling as the
+    anchor's target. This is the "frozen feedforward metric model -> trainable refine"
+    path (Cyrus): the head's wrist depth is pulled toward a strong external metric depth
+    rather than the frozen backbone's gs_depth. gs_depth may be None when ref is given."""
     wrist = pred_joints[:, :, :, WRIST_J:WRIST_J + 1, :]          # [B,S,2,1,3]
     grid_xy, z = project_joints_to_norm_pixels(wrist, cam_intr)   # [B,S,2,1,2], [B,S,2,1]
-    d_scene, in_frame = sample_depth_at_joints(gs_depth.detach(), grid_xy)  # [B,S,2,1]
-    if gs_depth_conf is not None:
-        conf, _ = sample_depth_at_joints(gs_depth_conf.detach(), grid_xy)
-    else:
-        conf = torch.ones_like(d_scene)
     wrist_z = z[..., 0]
-    d_scene = d_scene[..., 0]
-    conf = conf[..., 0]
-    in_frame = in_frame[..., 0]
-    in_frame = in_frame & (d_scene > 0.01) & torch.isfinite(d_scene) & torch.isfinite(wrist_z)
+    if ref_d_scene is not None:
+        d_scene = ref_d_scene.to(wrist_z.device, wrist_z.dtype)   # [B,S,2] external metric depth at wrist
+        conf = torch.ones_like(d_scene)
+        in_frame = torch.isfinite(d_scene) & (d_scene > 0.01) & torch.isfinite(wrist_z)
+    else:
+        d_scene, in_frame = sample_depth_at_joints(gs_depth.detach(), grid_xy)  # [B,S,2,1]
+        if gs_depth_conf is not None:
+            conf, _ = sample_depth_at_joints(gs_depth_conf.detach(), grid_xy)
+        else:
+            conf = torch.ones_like(d_scene)
+        d_scene = d_scene[..., 0]
+        conf = conf[..., 0]
+        in_frame = in_frame[..., 0]
+        in_frame = in_frame & (d_scene > 0.01) & torch.isfinite(d_scene) & torch.isfinite(wrist_z)
 
     delta_z, gate = module(wrist_z, d_scene, conf, in_frame, contact=contact_mask)  # [B,S,2]
     corrected = pred_joints.clone()

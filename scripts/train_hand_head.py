@@ -99,12 +99,17 @@ class HOT3DHandDataset(Dataset):
 
     def __init__(self, seq_dirs, mano_model, num_frames=16, res=(224, 224), clip_stride=None,
                  use_hand_crop=False, rescale_factor=2.0,
-                 objects_dir=None, render_obj_depth=False, obj_render_res=224):
+                 objects_dir=None, render_obj_depth=False, obj_render_res=224,
+                 da3_wrist_cache_dir=None):
         self.num_frames = num_frames
         self.mano_model = mano_model
         self.res = res
         self.use_hand_crop = use_hand_crop
         self.rescale_factor = rescale_factor
+        # C1 (DA3 -> RootDepthRefine): optional external metric wrist-depth reference.
+        # Per-seq cache <dir>/<seq>_da3_wrist.pt = [N,2] meters (NaN where unavailable),
+        # sliced per clip and fed to apply_root_anchor(ref_d_scene=) in place of gs_depth.
+        self.da3_wrist_cache_dir = da3_wrist_cache_dir
         # GT object-depth supervision (Cyrus direction a): render metric object
         # depth from the raw HOT3D meshes per clip frame, in the dataloader worker.
         self.objects_dir = objects_dir
@@ -244,6 +249,14 @@ class HOT3DHandDataset(Dataset):
             contact_cache_path = os.path.join(hand_data_root, "contact_cache.pt")
             seq_contact = (torch.load(contact_cache_path, weights_only=True).bool()
                            if os.path.exists(contact_cache_path) else None)
+            # C1: DA3 metric wrist-depth reference, keyed by seq basename, from a
+            # separate dir (built off-cluster; scratch is quota-locked for writes).
+            seq_da3 = None
+            if self.da3_wrist_cache_dir is not None:
+                _seq = os.path.basename(seq_path.rstrip("/"))
+                _da3p = os.path.join(self.da3_wrist_cache_dir, f"{_seq}_da3_wrist.pt")
+                if os.path.exists(_da3p):
+                    seq_da3 = torch.load(_da3p, weights_only=True).float()      # [N, 2] meters
 
             # Handle Bounding Boxes (rewrites gt_per_frame into camera frame on a hit).
             if self.use_hand_crop:
@@ -315,6 +328,8 @@ class HOT3DHandDataset(Dataset):
                     clip["cam_intrinsics"] = seq_cam_intrinsics                # [3]
                 if seq_contact is not None:
                     clip["contact"] = seq_contact[start : end].clone()         # [S, 2] bool
+                if seq_da3 is not None:
+                    clip["da3_wrist"] = seq_da3[start : end].clone()           # [S, 2] m (DA3 ref)
                 self.clips.append(clip)
         self.mano_model = None
 
@@ -406,6 +421,8 @@ class HOT3DHandDataset(Dataset):
             out["cam_intrinsics"] = clip["cam_intrinsics"]  # [3]
         if "contact" in clip:
             out["contact"] = clip["contact"]                # [S, 2] bool (Phase-2 anchor gate)
+        if "da3_wrist" in clip:
+            out["da3_wrist"] = clip["da3_wrist"]            # [S, 2] m (C1 DA3 metric ref)
 
         if self.render_obj_depth and "cam_extrinsics" in clip:
             od_maps, od_masks = self._render_clip_obj_depth(clip)
@@ -1474,6 +1491,7 @@ def train():
         use_hand_crop=use_hand_crop, rescale_factor=rescale_factor,
         objects_dir=objects_dir, render_obj_depth=render_obj_depth,
         obj_render_res=obj_render_res,
+        da3_wrist_cache_dir=data_cfg.get("da3_wrist_cache_dir"),
     )
 
     if debug_cfg.get("single_frame", False):
@@ -1850,16 +1868,23 @@ def train():
                         model._warned_anchor_no_intr = True
                 else:
                     _gs_depth_ra = preds.get("gs_depth")
-                    if _gs_depth_ra is not None:
+                    # C1: an external DA3 metric wrist-depth reference (batch["da3_wrist"])
+                    # REPLACES gs_depth as the anchor target, so the block must fire even
+                    # when GS is off (gs_depth is None). apply_root_anchor never touches
+                    # gs_depth when ref_d_scene is given (see its docstring).
+                    _ref_d_scene = (batch["da3_wrist"].to(device) if "da3_wrist" in batch else None)
+                    if _gs_depth_ra is not None or _ref_d_scene is not None:
                         from scripts.root_depth_anchor import apply_root_anchor
                         pred_joints, _ra_delta, _ra_info = apply_root_anchor(
                             model.root_depth_refine, pred_joints, _gs_depth_ra,
                             preds.get("gs_depth_conf"), batch["cam_intrinsics"].to(device),
                             contact_mask=(batch["contact"].to(device)
                                           if (use_contact_gate and "contact" in batch) else None),
+                            ref_d_scene=_ref_d_scene,
                         )
                         if not getattr(model, "_logged_anchor_fired", False):
-                            print("[anchor] block fired (cam_intrinsics + gs_depth present) — "
+                            _src = "DA3 ref_d_scene" if _ref_d_scene is not None else "gs_depth"
+                            print(f"[anchor] block fired (cam_intrinsics + {_src} present) — "
                                   "Δz MLP is receiving gradient")
                             model._logged_anchor_fired = True
                         _ra_inputs = (pred_joints[:, :, :, 0, 2], _ra_info["d_scene"], _ra_info["gate"])

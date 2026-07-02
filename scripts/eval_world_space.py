@@ -78,7 +78,8 @@ def _world_from_cam(pj, c2w, s):
     return world
 
 
-def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=None, contact_mask=None):
+def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=None, contact_mask=None,
+                 ref_d_scene=None):
     """Run the hand head for one clip and gather its metric-scale correspondences.
 
     Returns ``(pj_cam, c2w, s_clip, ratios)``: ``pj_cam`` [S,H,J,3] metric camera-frame joints
@@ -115,13 +116,16 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
     # solve (so the scene scale stays an independent property, no anchor->scale
     # feedback — the design's circularity guard) but before world placement, using
     # the same apply_root_anchor as training. Behind the enable flag; needs gs_depth.
+    # C1: when ref_d_scene (DA3 metric wrist depth) is given it REPLACES gs_depth as the
+    # anchor target, so the anchor applies even with GS off (gs_depth None).
     if (model is not None and getattr(model, "enable_root_anchor", False)
-            and gs_depth is not None and cam_intr is not None):
+            and cam_intr is not None and (gs_depth is not None or ref_d_scene is not None)):
         from scripts.root_depth_anchor import apply_root_anchor
         pred_joints, _dz, _info = apply_root_anchor(
             model.root_depth_refine, pred_joints, gs_depth,
             preds.get("gs_depth_conf"), cam_intr.to(device),
             contact_mask=contact_mask,
+            ref_d_scene=(ref_d_scene.to(device) if ref_d_scene is not None else None),
         )
         # Diagnostic: did the anchor fire (gate) and how big a correction (|dz|)?
         # A near-zero gate-rate means the scene-depth reference was never trusted

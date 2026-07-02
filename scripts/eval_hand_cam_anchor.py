@@ -33,7 +33,7 @@ def _has_cam_cache(seq_dir):
 
 
 def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_clips=0,
-                 contact_gate="proxy"):
+                 contact_gate="proxy", da3_wrist_cache_dir=None):
     """Run all clips of one sequence, apply the anchor, return camera-frame metrics.
     contact_gate: 'oracle' gates the anchor by the cached GT contact mask (mechanism
     ceiling); 'proxy' uses the module's |disagree|<band_m gate; 'off' handled by the
@@ -52,6 +52,13 @@ def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_
     cam_intr = torch.load(os.path.join(hd, "cam_intrinsics.pt"), map_location="cpu").float().view(1, 3)
     bb = torch.load(os.path.join(hd, f"hand_bboxes_v2_rf{rescale}_res{res}x{res}.pt"), map_location="cpu")
     gt_valid = bb["valid"].bool()                          # [N,2]
+    # C1: DA3 metric wrist-depth reference for this seq (external anchor target,
+    # replaces gs_depth). Keyed by seq basename, from the off-cluster cache dir.
+    seq_da3 = None
+    if da3_wrist_cache_dir is not None:
+        _da3p = os.path.join(da3_wrist_cache_dir, f"{os.path.basename(seq_dir)}_da3_wrist.pt")
+        if os.path.exists(_da3p):
+            seq_da3 = torch.load(_da3p, map_location="cpu", weights_only=True).float()  # [N,2] m
     # oracle contact gate: per-frame, per-hand GT contact mask (scripts.build_contact_cache).
     contact_seq = None
     if contact_gate == "oracle":
@@ -77,8 +84,14 @@ def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_
             sl = contact_seq[start:start + clip_len]
             if sl.shape[0] == clip_len:
                 contact_clip = sl.unsqueeze(0).to(device)   # [1, S, 2]
+        ref_clip = None
+        if seq_da3 is not None:
+            dl = seq_da3[start:start + clip_len]
+            if dl.shape[0] == clip_len:
+                ref_clip = dl.unsqueeze(0).to(device)       # [1, S, 2] DA3 metric wrist depth
         pj = predict_clip(preds, mano_model, device, cam_intr, model=model,
-                          anchor_log=anchor_log, contact_mask=contact_clip)[0]
+                          anchor_log=anchor_log, contact_mask=contact_clip,
+                          ref_d_scene=ref_clip)[0]
         for kk in range(pj.shape[0]):
             f = start + kk
             if f not in pcf and f < gt_cam.shape[0]:
@@ -116,6 +129,12 @@ def main():
     ap.add_argument("--contact_gate", choices=["proxy", "oracle", "off"], default="proxy",
                     help="oracle = gate the anchor by the cached GT contact mask (mechanism "
                          "ceiling); proxy = the deployable |disagree|<band_m gate; off = no anchor.")
+    ap.add_argument("--da3_wrist_cache_dir", default=None,
+                    help="C1: dir of per-seq DA3 metric wrist-depth caches (<seq>_da3_wrist.pt); "
+                         "when set, the anchor uses DA3 depth as ref_d_scene instead of gs_depth.")
+    ap.add_argument("--seqs", default=None,
+                    help="comma-separated seq basenames to restrict the eval to (e.g. the held-out "
+                         "val split). Default: all seqs with a cam cache under --data_root.")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
@@ -130,16 +149,22 @@ def main():
     all_seqs = sorted(os.path.join(args.data_root, d) for d in os.listdir(args.data_root)
                       if os.path.isdir(os.path.join(args.data_root, d)))
     seqs = [s for s in all_seqs if _has_cam_cache(s)]
+    if args.seqs:
+        want = {x.strip() for x in args.seqs.split(",") if x.strip()}
+        seqs = [s for s in seqs if os.path.basename(s) in want]
     if args.max_seqs > 0:
         seqs = seqs[args.seq_start:args.seq_start + args.max_seqs]
-    print(f"Found {len(seqs)} sequences with camera-frame caches under {args.data_root}", flush=True)
+    print(f"Found {len(seqs)} sequences with camera-frame caches under {args.data_root}"
+          + (f" (filtered to {sorted(os.path.basename(s) for s in seqs)})" if args.seqs else ""),
+          flush=True)
 
     anchor_on = bool(getattr(model, "enable_root_anchor", False))
     results = []
     for sq in seqs:
         try:
             r = eval_seq_cam(model, mano_model, device, sq, cfg, args.clip_len, args.stride,
-                             args.max_clips, contact_gate=args.contact_gate)
+                             args.max_clips, contact_gate=args.contact_gate,
+                             da3_wrist_cache_dir=args.da3_wrist_cache_dir)
             if r is None:
                 continue
             results.append(r)
