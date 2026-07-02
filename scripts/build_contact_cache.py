@@ -40,7 +40,12 @@ def main():
     ap.add_argument("--raw", required=True, help="raw HOI4D root (<seq>/raw_depth/)")
     ap.add_argument("--res", type=int, default=224)
     ap.add_argument("--thresh_m", type=float, default=0.05)
+    ap.add_argument("--out_dir", default=None,
+                    help="if set, write <out_dir>/<seq>_contact.pt here instead of the seq's "
+                         "hand_data/ (needed when the preprocessed root is a read-only/quota-locked mount)")
     args = ap.parse_args()
+    if args.out_dir:
+        os.makedirs(args.out_dir, exist_ok=True)
 
     seqs = [os.path.basename(d) for d in sorted(glob.glob(os.path.join(args.pp, "*")))
             if os.path.exists(os.path.join(d, "hand_data", "gt_joints_cache_cam_v2.pt"))]
@@ -56,8 +61,10 @@ def main():
             wrist = gtj[t:t + 1, :, 0, :].unsqueeze(0)                        # [1,1,2,3]
             d = _load_depth(deps[t], args.res).reshape(1, 1, 1, args.res, args.res)
             out[t] = wrist_contact_mask(wrist, d, ci, args.thresh_m)[0, 0]
-        torch.save(out, os.path.join(hd, "contact_cache.pt"))
-        print(f"[{sq}] contact frames RH: {int(out[:n, RH].sum())}/{n}", flush=True)
+        out_path = (os.path.join(args.out_dir, f"{sq}_contact.pt") if args.out_dir
+                    else os.path.join(hd, "contact_cache.pt"))
+        torch.save(out, out_path)
+        print(f"[{sq}] contact frames RH: {int(out[:n, RH].sum())}/{n} -> {out_path}", flush=True)
 
 
 if __name__ == "__main__":
