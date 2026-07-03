@@ -100,7 +100,8 @@ class HOT3DHandDataset(Dataset):
     def __init__(self, seq_dirs, mano_model, num_frames=16, res=(224, 224), clip_stride=None,
                  use_hand_crop=False, rescale_factor=2.0,
                  objects_dir=None, render_obj_depth=False, obj_render_res=224,
-                 da3_wrist_cache_dir=None, contact_cache_dir=None):
+                 da3_wrist_cache_dir=None, contact_cache_dir=None,
+                 feature_cache_dir=None, emit_cache_key=False):
         self.num_frames = num_frames
         self.mano_model = mano_model
         self.res = res
@@ -110,6 +111,13 @@ class HOT3DHandDataset(Dataset):
         # Per-seq cache <dir>/<seq>_da3_wrist.pt = [N,2] meters (NaN where unavailable),
         # sliced per clip and fed to apply_root_anchor(ref_d_scene=) in place of gs_depth.
         self.da3_wrist_cache_dir = da3_wrist_cache_dir
+        # Frozen-feature cache (scripts/build_feature_cache.py): per-clip deepest-layer
+        # backbone patch tokens ([S, P, C] bf16) keyed <seq>_<frame_offset>.pt. When set,
+        # __getitem__ attaches "cached_tokens" and train/val skip the backbone entirely
+        # via forward_hand_cached. NOTE: clip_stride must match the stride the cache was
+        # built with, or the key lookup fails (loudly, by design).
+        self.feature_cache_dir = feature_cache_dir
+        self.emit_cache_key = emit_cache_key or (feature_cache_dir is not None)
         # Contact gate cache, keyed by seq basename, from a separate dir (scratch
         # hand_data is write-locked). Overrides the in-tree contact_cache.pt when set.
         self.contact_cache_dir = contact_cache_dir
@@ -432,6 +440,15 @@ class HOT3DHandDataset(Dataset):
             out["contact"] = clip["contact"]                # [S, 2] bool (Phase-2 anchor gate)
         if "da3_wrist" in clip:
             out["da3_wrist"] = clip["da3_wrist"]            # [S, 2] m (C1 DA3 metric ref)
+
+        # Frozen-feature cache: attach the precomputed backbone tokens (and the key
+        # the builder uses to name them). Missing cache file = loud failure on
+        # purpose — a silent fallback to the live backbone would corrupt A/Bs.
+        if self.emit_cache_key:
+            out["cache_key"] = f"{os.path.basename(clip['seq_path'])}_{clip['frame_offset']}"
+        if self.feature_cache_dir is not None:
+            fc = os.path.join(self.feature_cache_dir, out["cache_key"] + ".pt")
+            out["cached_tokens"] = torch.load(fc, weights_only=True)  # [S, P, C] bf16
 
         if self.render_obj_depth and "cam_extrinsics" in clip:
             od_maps, od_masks = self._render_clip_obj_depth(clip)
@@ -883,6 +900,28 @@ def build_views(imgs, num_frames, device, hand_bboxes=None, hand_valid=None,
     return views
 
 
+def forward_hand_cached(model, cached_tokens, imgs, hand_bboxes=None, hand_valid=None):
+    """Head-only forward from precomputed deepest-layer backbone patch tokens.
+
+    `cached_tokens` [B, S, P, C] is visual_geometry_transformer(imgs)'s
+    token_list[-1][:, :, patch_start_idx:] (scripts/build_feature_cache.py), i.e.
+    exactly what HamerManoHead slices out itself — so we call it with
+    patch_start_idx=0 and skip the frozen backbone entirely (~10x faster step).
+    `imgs` is only read for its shape inside the head. Always runs under bf16
+    autocast to match the AMP training numerics.
+    """
+    tokens = cached_tokens.to(imgs.device)
+    kwargs = {}
+    if getattr(model, "use_hand_crop", False):
+        kwargs["hand_bboxes"] = hand_bboxes
+        kwargs["hand_valid"] = hand_valid
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        out = model.hand_head([tokens], images=imgs, patch_start_idx=0, **kwargs)
+    preds = {"hand_joints": out["params"], "hand_conf": out["conf"]}
+    return {k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v)
+            for k, v in preds.items()}
+
+
 # ------------------------------------------------------------------
 # Visualization helpers
 # ------------------------------------------------------------------
@@ -995,8 +1034,11 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             gt = vbatch["gt"].to(device)
             hb = vbatch["hand_bboxes"].to(device) if "hand_bboxes" in vbatch else None
             hv = vbatch["hand_valid"].to(device)  if "hand_valid"  in vbatch else None
-            views = build_views(imgs, num_frames, device, hb, hv)
-            preds = model(views, is_inference=False, use_motion=False)
+            if "cached_tokens" in vbatch:
+                preds = forward_hand_cached(model, vbatch["cached_tokens"], imgs, hb, hv)
+            else:
+                views = build_views(imgs, num_frames, device, hb, hv)
+                preds = model(views, is_inference=False, use_motion=False)
             pred_params = preds["hand_joints"]
 
             metric_chunks.append(metric_chunks_from_batch(
@@ -1502,6 +1544,7 @@ def train():
         obj_render_res=obj_render_res,
         da3_wrist_cache_dir=data_cfg.get("da3_wrist_cache_dir"),
         contact_cache_dir=data_cfg.get("contact_cache_dir"),
+        feature_cache_dir=data_cfg.get("feature_cache_dir"),
     )
 
     if debug_cfg.get("single_frame", False):
@@ -1847,7 +1890,10 @@ def train():
             # float outputs back to fp32 so the MANO joint solve, metric anchor,
             # and rasterizer all see fp32 (matching the no-AMP numerics).
             with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
-                preds = model(views_train, is_inference=False, use_motion=False)
+                if "cached_tokens" in batch:
+                    preds = forward_hand_cached(model, batch["cached_tokens"], imgs, hb, hv)
+                else:
+                    preds = model(views_train, is_inference=False, use_motion=False)
             if use_amp:
                 preds = {k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v)
                          for k, v in preds.items()}
