@@ -348,6 +348,20 @@ class HOT3DHandDataset(Dataset):
                 if seq_da3 is not None:
                     clip["da3_wrist"] = seq_da3[start : end].clone()           # [S, 2] m (DA3 ref)
                 self.clips.append(clip)
+
+        # Cached-training mode: keep only clips whose token file exists (the cache
+        # builder skips corrupt-video clips). A stride mismatch or wrong dir would
+        # drop everything — fail loudly on that instead of training on nothing.
+        if self.feature_cache_dir is not None:
+            n0 = len(self.clips)
+            self.clips = [c for c in self.clips if os.path.exists(os.path.join(
+                self.feature_cache_dir,
+                f"{os.path.basename(c['seq_path'])}_{c['frame_offset']}.pt"))]
+            print(f"[feature-cache] {len(self.clips)}/{n0} clips have cached tokens "
+                  f"({self.feature_cache_dir})")
+            if not self.clips:
+                raise RuntimeError("feature_cache_dir set but no clips matched — "
+                                   "wrong dir or clip_stride mismatch?")
         self.mano_model = None
 
     def _compute_seq_joints_from_params(self, gt_per_frame):

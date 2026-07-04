@@ -74,10 +74,36 @@ def main() -> None:
         emit_cache_key=True,
     )
     os.makedirs(args.out, exist_ok=True)
-    dl = DataLoader(ds, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=False)
+
+    # Corrupt-clip tolerance: decord's threaded decoder can hard-fail on damaged
+    # mp4 bitstreams (observed: "Error at MB" -> DECORDError kills the worker).
+    # Retry once, then skip the clip loudly instead of aborting a multi-hour build.
+    class _SafeDS(torch.utils.data.Dataset):
+        def __init__(self, inner): self.inner = inner
+        def __len__(self): return len(self.inner)
+        def __getitem__(self, i):
+            err = None
+            for _ in range(2):
+                try:
+                    return self.inner[i]
+                except Exception as e:  # noqa: BLE001 — worker must never die
+                    err = f"{type(e).__name__}: {str(e)[:100]}"
+            print(f"SKIP_CLIP idx={i} {err}", flush=True)
+            return None
+
+    from torch.utils.data import default_collate
+
+    def _collate_skip_none(batch):
+        batch = [b for b in batch if b is not None]
+        return default_collate(batch) if batch else None
+
+    dl = DataLoader(_SafeDS(ds), batch_size=args.batch_size, num_workers=args.num_workers,
+                    shuffle=False, collate_fn=_collate_skip_none)
 
     done = skip = 0
     for batch in dl:
+        if batch is None:
+            continue
         keys = batch["cache_key"]                       # list[str]
         paths = [os.path.join(args.out, k + ".pt") for k in keys]
         if all(os.path.exists(p) for p in paths):
