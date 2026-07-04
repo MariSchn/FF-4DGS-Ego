@@ -101,7 +101,7 @@ class HOT3DHandDataset(Dataset):
                  use_hand_crop=False, rescale_factor=2.0,
                  objects_dir=None, render_obj_depth=False, obj_render_res=224,
                  da3_wrist_cache_dir=None, contact_cache_dir=None,
-                 feature_cache_dir=None, emit_cache_key=False):
+                 feature_cache_dir=None, emit_cache_key=False, bbox_perturb=None):
         self.num_frames = num_frames
         self.mano_model = mano_model
         self.res = res
@@ -118,6 +118,8 @@ class HOT3DHandDataset(Dataset):
         # built with, or the key lookup fails (loudly, by design).
         self.feature_cache_dir = feature_cache_dir
         self.emit_cache_key = emit_cache_key or (feature_cache_dir is not None)
+        # Bbox-robustness ablation: None (GT boxes), "jitter[:amp]", or "fixed[:size]".
+        self.bbox_perturb = bbox_perturb
         # Contact gate cache, keyed by seq basename, from a separate dir (scratch
         # hand_data is write-locked). Overrides the in-tree contact_cache.pt when set.
         self.contact_cache_dir = contact_cache_dir
@@ -440,7 +442,27 @@ class HOT3DHandDataset(Dataset):
         }
 
         if self.use_hand_crop:
-            out["hand_bboxes"] = torch.stack(clip["hand_bboxes"])  # [S, 2, 4]
+            hb = torch.stack(clip["hand_bboxes"])                  # [S, 2, 4] normalized x1y1x2y2
+            # Bbox-robustness ablation: perturb the GT-derived boxes deterministically
+            # (seeded per clip). "jitter:<amp>" scales w/h by U(1±amp) and shifts the
+            # center by U(±amp)*size (detector-noise proxy); "fixed:<size>" keeps the GT
+            # center but forces a constant box size (removes the size-as-depth cue).
+            if self.bbox_perturb:
+                mode = self.bbox_perturb
+                seed = hash((os.path.basename(clip["seq_path"]), int(clip["frame_offset"]))) & 0x7FFFFFFF
+                g = torch.Generator().manual_seed(seed)
+                cx, cy = (hb[..., 0] + hb[..., 2]) / 2, (hb[..., 1] + hb[..., 3]) / 2
+                w, h = hb[..., 2] - hb[..., 0], hb[..., 3] - hb[..., 1]
+                if mode.startswith("jitter"):
+                    a = float(mode.split(":")[1]) if ":" in mode else 0.2
+                    u = lambda: (torch.rand(w.shape, generator=g) * 2 - 1) * a
+                    cx, cy = cx + u() * w, cy + u() * h
+                    w, h = w * (1 + u()), h * (1 + u())
+                elif mode.startswith("fixed"):
+                    s = float(mode.split(":")[1]) if ":" in mode else 0.30
+                    w = torch.full_like(w, s); h = torch.full_like(h, s)
+                hb = torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], -1)
+            out["hand_bboxes"] = hb                                # [S, 2, 4]
             out["hand_valid"]  = torch.stack(clip["hand_valid"])   # [S, 2]
 
         if "gt_joints_2d" in clip:
@@ -1559,6 +1581,7 @@ def train():
         da3_wrist_cache_dir=data_cfg.get("da3_wrist_cache_dir"),
         contact_cache_dir=data_cfg.get("contact_cache_dir"),
         feature_cache_dir=data_cfg.get("feature_cache_dir"),
+        bbox_perturb=data_cfg.get("bbox_perturb"),
     )
 
     if debug_cfg.get("single_frame", False):

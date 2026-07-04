@@ -116,10 +116,14 @@ class HamerManoHead(nn.Module):
         hires_hand=False,
         hires_hand_kwargs=None,
         root_refine=False,
+        use_global_context=True,
     ):
         super().__init__()
         self.use_crop = use_crop
         self.root_refine = bool(root_refine)
+        # Ablation: when False, the crop tokens never see the full-image (scene) tokens
+        # — isolates how much metric placement comes from scene context.
+        self.use_global_context = bool(use_global_context)
         self.crop_size = crop_size
         self.patch_size = patch_size
         self.hires_hand = bool(hires_hand)
@@ -262,14 +266,17 @@ class HamerManoHead(nn.Module):
                 crop_valid = hand_valid.reshape(N * 2, 1, 1).float()
                 crop_ctx = crop_ctx * crop_valid
 
-            # Project full-image tokens with the same norm/proj and replicate
-            # per hand so the crop tokens can cross-attend to global context.
-            global_ctx = self.context_proj(self.context_norm(tokens))  # [N, N_patches, dim]
-            global_ctx = global_ctx.repeat_interleave(2, dim=0)        # [N*2, N_patches, dim]
+            if self.use_global_context:
+                # Project full-image tokens with the same norm/proj and replicate
+                # per hand so the crop tokens can cross-attend to global context.
+                global_ctx = self.context_proj(self.context_norm(tokens))  # [N, N_patches, dim]
+                global_ctx = global_ctx.repeat_interleave(2, dim=0)        # [N*2, N_patches, dim]
 
-            # Crop tokens (Q) ← full-image tokens (K/V): inject global context
-            # into the local crop features.
-            context = self.crop_to_global(crop_ctx, context=global_ctx)  # [N*2, crop^2, dim]
+                # Crop tokens (Q) ← full-image tokens (K/V): inject global context
+                # into the local crop features.
+                context = self.crop_to_global(crop_ctx, context=global_ctx)  # [N*2, crop^2, dim]
+            else:
+                context = crop_ctx                                          # crop-only ablation
             enhanced_crop_tokens = context  # keep [N*2, crop^2, dim] view for downstream consumers
 
             # High-res hand-crop branch: encode the native-res per-hand crop and

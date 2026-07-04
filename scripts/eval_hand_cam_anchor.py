@@ -33,7 +33,8 @@ def _has_cam_cache(seq_dir):
 
 
 def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_clips=0,
-                 contact_gate="proxy", da3_wrist_cache_dir=None, contact_cache_dir=None):
+                 contact_gate="proxy", da3_wrist_cache_dir=None, contact_cache_dir=None,
+                 bbox_perturb=None):
     """Run all clips of one sequence, apply the anchor, return camera-frame metrics.
     contact_gate: 'oracle' gates the anchor by the cached GT contact mask (mechanism
     ceiling); 'proxy' uses the module's |disagree|<band_m gate; 'off' handled by the
@@ -44,7 +45,8 @@ def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_
     rescale = cfg.get("hand_crop", {}).get("rescale_factor", 1.5)
     res = int(cfg.get("data", {}).get("resolution", [224, 224])[0])
     ds = HOT3DHandDataset([seq_dir], mano_model, num_frames=clip_len, clip_stride=stride,
-                          use_hand_crop=mcfg.get("use_hand_crop", False), rescale_factor=rescale)
+                          use_hand_crop=mcfg.get("use_hand_crop", False), rescale_factor=rescale,
+                          bbox_perturb=bbox_perturb)
     if len(ds) == 0:
         return None
     hd = os.path.join(seq_dir, "hand_data")
@@ -129,6 +131,8 @@ def main():
     ap.add_argument("--stride", type=int, default=8)
     ap.add_argument("--max_clips", type=int, default=0)
     ap.add_argument("--out", default="/tmp/hoi4d_cam_eval.json")
+    ap.add_argument("--bbox_perturb", default=None,
+                    help="eval-time bbox ablation: jitter[:amp] or fixed[:size]")
     ap.add_argument("--contact_gate", choices=["proxy", "oracle", "off"], default="proxy",
                     help="oracle = gate the anchor by the cached GT contact mask (mechanism "
                          "ceiling); proxy = the deployable |disagree|<band_m gate; off = no anchor.")
@@ -171,7 +175,8 @@ def main():
             r = eval_seq_cam(model, mano_model, device, sq, cfg, args.clip_len, args.stride,
                              args.max_clips, contact_gate=args.contact_gate,
                              da3_wrist_cache_dir=args.da3_wrist_cache_dir,
-                             contact_cache_dir=args.contact_cache_dir)
+                             contact_cache_dir=args.contact_cache_dir,
+                             bbox_perturb=args.bbox_perturb)
             if r is None:
                 continue
             results.append(r)
