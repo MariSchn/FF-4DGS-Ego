@@ -46,16 +46,26 @@ def main() -> None:
     ap.add_argument("--validate", type=int, default=2,
                     help="after building, re-run N clips through the backbone in train() "
                          "mode (as the trainer runs it) and print max|diff| vs the cache")
+    ap.add_argument("--random_init", action="store_true",
+                    help="backbone-swap ablation arm: skip the checkpoint and cache tokens "
+                         "from a RANDOMLY initialized backbone (fixed seed 0). If these "
+                         "tokens train a head as well as the pretrained ones, the "
+                         "'reconstruction features encode metric depth' claim is dead.")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
     model_cfg, data_cfg = cfg["model"], cfg["data"]
     device = "cuda"
 
+    if args.random_init:
+        torch.manual_seed(0)
     model = WorldMirror(**{k: v for k, v in model_cfg.items() if k != "checkpoint"})
-    ckpt = torch.load(model_cfg["checkpoint"], map_location=device)
-    sd = ckpt.get("state_dict", ckpt.get("reconstructor", ckpt))
-    model.load_state_dict(sd, strict=False)
+    if args.random_init:
+        print("RANDOM_INIT backbone (seed 0) — no checkpoint loaded", flush=True)
+    else:
+        ckpt = torch.load(model_cfg["checkpoint"], map_location=device)
+        sd = ckpt.get("state_dict", ckpt.get("reconstructor", ckpt))
+        model.load_state_dict(sd, strict=False)
     model.to(device).eval()
 
     from scripts.hand_vis_utils import MANOModel

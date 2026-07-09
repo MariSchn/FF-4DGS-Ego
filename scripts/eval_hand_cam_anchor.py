@@ -205,7 +205,7 @@ def main():
         json.dump({"aggregate": agg, "per_seq": results}, f, indent=2)
     tag = "ANCHOR ON" if anchor_on else "anchor OFF"
     print(f"\nOURS HOI4D camera-frame ({tag}):  C-abs={agg['C_abs']:.1f}  "
-          f"C-MPJPE(root-rel)={agg['C_MPJPE']:.1f}  (Hand3R C-MPJPE 42.6)  "
+          f"C-MPJPE(root-rel)={agg['C_MPJPE']:.1f}  "
           f"(n={agg['n_seqs']} seqs) -> {args.out}")
     if anchor_on and agg.get("anchor_gate_rate") == agg.get("anchor_gate_rate"):
         print(f"  anchor: gate={agg['anchor_gate_rate'] * 100:.0f}%  "

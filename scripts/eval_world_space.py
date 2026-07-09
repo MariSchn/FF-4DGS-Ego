@@ -613,7 +613,7 @@ def main():
               f"per-seq-pooled={agg['W_MPJPE_spool']:.1f}  (Hand3R 125.8)")
         print(f"OURS WA(short/long)  per-clip={agg['WA_MPJPE_short']:.1f}/{agg['WA_MPJPE_long']:.1f}  "
               f"per-seq-pooled={agg['WA_MPJPE_short_spool']:.1f}/{agg['WA_MPJPE_long_spool']:.1f}")
-        print(f"OURS C-MPJPE (cam)   root-rel={agg['C_MPJPE']:.1f}  abs={agg['C_MPJPE_abs']:.1f}  (Hand3R 42.6)  "
+        print(f"OURS C-MPJPE (cam)   root-rel={agg['C_MPJPE']:.1f}  abs={agg['C_MPJPE_abs']:.1f}  "
               f"| mean s med/pool={agg['s_med']:.3f}/{agg['s_pool']:.3f} (clip-std {agg['s_clip_std']:.3f})  "
               f"(n={agg['n_segments']} segs) -> {args.out}")
         if smooth_windows:
