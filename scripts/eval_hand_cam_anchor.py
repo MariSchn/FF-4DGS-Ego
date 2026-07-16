@@ -34,7 +34,7 @@ def _has_cam_cache(seq_dir):
 
 def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_clips=0,
                  contact_gate="proxy", da3_wrist_cache_dir=None, contact_cache_dir=None,
-                 bbox_perturb=None):
+                 bbox_perturb=None, dino=None):
     """Run all clips of one sequence, apply the anchor, return camera-frame metrics.
     contact_gate: 'oracle' gates the anchor by the cached GT contact mask (mechanism
     ceiling); 'proxy' uses the module's |disagree|<band_m gate; 'off' handled by the
@@ -78,9 +78,21 @@ def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_
         imgs = batch["img"].unsqueeze(0).to(device)
         hb = batch["hand_bboxes"].unsqueeze(0).to(device) if "hand_bboxes" in batch else None
         hv = batch["hand_valid"].unsqueeze(0).to(device) if "hand_valid" in batch else None
-        views = build_views(imgs, clip_len, device, hb, hv)
-        with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            preds = model(views, is_inference=True, use_motion=False)
+        if dino is not None:
+            # Backbone-swap ablation (DINO arm): the head was trained on frozen
+            # DINOv2 patch tokens (build_feature_cache_dino), so the eval must feed
+            # it the same tokens — head-only forward, identical normalization.
+            from scripts.train_hand_head import forward_hand_cached
+            mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+            with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                feats = dino.forward_features((imgs[0] - mean) / std)
+                tokens = feats["x_norm_patchtokens"].unsqueeze(0)   # [1, S, P, 1024]
+            preds = forward_hand_cached(model, tokens, imgs, hb, hv)
+        else:
+            views = build_views(imgs, clip_len, device, hb, hv)
+            with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                preds = model(views, is_inference=True, use_motion=False)
         # predict_clip lifts joints and applies the anchor (when model.enable_root_anchor)
         # exactly as the world eval does; we use only its camera-frame joints here.
         start = j * stride
@@ -107,11 +119,14 @@ def eval_seq_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, max_
     pc_cam = torch.stack([pcf[f] for f in fr])             # [T,16,3]
     gc_cam = gt_cam[fr, RH]                                 # [T,16,3]
     vc = gt_valid[fr, RH].unsqueeze(-1).expand(-1, 16)     # [T,16]
+    werr = (pc_cam[:, 0] - gc_cam[:, 0]).norm(dim=-1)      # [T] wrist/root placement (m)
+    wsel = werr[vc[:, 0].bool() & torch.isfinite(werr)]
     row = {
         "seq": os.path.basename(seq_dir),
         "frames": len(fr),
         "C_MPJPE": float(c_mpjpe(pc_cam, gc_cam, valid=vc, root_relative=True)),
         "C_abs": float(c_mpjpe(pc_cam, gc_cam, valid=vc, root_relative=False)),
+        "wrist_abs": float(wsel.mean().item() * 1000.0) if wsel.numel() else float("nan"),
     }
     if anchor_log:
         n = len(anchor_log)
@@ -145,6 +160,13 @@ def main():
     ap.add_argument("--seqs", default=None,
                     help="comma-separated seq basenames to restrict the eval to (e.g. the held-out "
                          "val split). Default: all seqs with a cam cache under --data_root.")
+    ap.add_argument("--backbone", choices=["recon", "dino"], default="recon",
+                    help="dino = backbone-swap ablation arm: feed the head frozen DINOv2 patch "
+                         "tokens (head-only forward) instead of the reconstruction backbone. "
+                         "The random-init arm needs no flag: point the eval config's "
+                         "model.checkpoint at the state_dict saved by build_feature_cache "
+                         "--random_init --save_model.")
+    ap.add_argument("--dino_model", default="dinov2_vitl14")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
@@ -152,6 +174,11 @@ def main():
     model = build_model(cfg, device)
     if args.contact_gate == "off":
         model.enable_root_anchor = False        # control arm: no anchor applied
+    dino = None
+    if args.backbone == "dino":
+        dino = torch.hub.load("facebookresearch/dinov2", args.dino_model)
+        dino.to(device).eval()
+        print(f"Backbone-swap eval: frozen {args.dino_model} tokens -> head-only forward")
 
     from scripts.hand_vis_utils import MANOModel
     mano_model = MANOModel(cfg["visualization"]["mano_model_folder"])
@@ -176,7 +203,7 @@ def main():
                              args.max_clips, contact_gate=args.contact_gate,
                              da3_wrist_cache_dir=args.da3_wrist_cache_dir,
                              contact_cache_dir=args.contact_cache_dir,
-                             bbox_perturb=args.bbox_perturb)
+                             bbox_perturb=args.bbox_perturb, dino=dino)
             if r is None:
                 continue
             results.append(r)
@@ -198,7 +225,7 @@ def main():
         vals = [r[key] for r in results if key in r and r[key] == r[key]]
         return float(sum(vals) / len(vals)) if vals else float("nan")
 
-    agg = {k: _mean(k) for k in ("C_abs", "C_MPJPE", "anchor_gate_rate",
+    agg = {k: _mean(k) for k in ("C_abs", "C_MPJPE", "wrist_abs", "anchor_gate_rate",
                                  "anchor_dz_gated_mm", "anchor_disagree_mm")}
     agg["n_seqs"] = len(results)
     with open(args.out, "w") as f:
