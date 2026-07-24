@@ -54,12 +54,20 @@ def solve_similarity(src: torch.Tensor, dst: torch.Tensor,
 
 
 def solve_similarity_robust(src: torch.Tensor, dst: torch.Tensor, iters: int = 5,
-                            eps: float = 1e-9) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                            eps: float = 1e-9,
+                            weights: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Robust similarity via IRLS with Huber weights. Down-weights outlier correspondences
     (e.g. a few badly mispredicted joints in a seam), so a handful of bad joints cannot rotate
     the whole clip. Falls back to plain Umeyama on the first pass, then reweights ``iters`` times.
+
+    ``weights`` is an optional ``[N]`` non-negative PRIOR weight per correspondence (e.g. to
+    up-weight camera-centre correspondences relative to joints, as the chunk linker does). It
+    seeds the first (pre-Huber) solve and multiplies the Huber weights every iteration, so it
+    composes with the outlier reweighting rather than replacing it. ``weights=None`` recovers the
+    plain uniform IRLS, so existing callers are unaffected.
     """
-    s, r, t = solve_similarity(src, dst)
+    base = weights.to(src.device).clamp_min(0) if weights is not None else None
+    s, r, t = solve_similarity(src, dst, weights=base)
     for _ in range(iters):
         resid = (apply_similarity(src, s, r, t) - dst).norm(dim=-1)   # [N] metres
         med = resid.median()
@@ -68,6 +76,8 @@ def solve_similarity_robust(src: torch.Tensor, dst: torch.Tensor, iters: int = 5
         w = torch.ones_like(resid)
         big = resid > delta
         w[big] = delta / resid[big].clamp_min(eps)
+        if base is not None:
+            w = w * base
         s, r, t = solve_similarity(src, dst, weights=w)
     return s, r, t
 
@@ -162,6 +172,161 @@ def chain_trajectories_global(clip_worlds: list[torch.Tensor], overlap: int,
             off = i * step
             transforms[i] = solver(clip_worlds[i].reshape(-1, 3), g[off:off + lc].reshape(-1, 3))
     return _consensus(transforms)
+
+
+def chain_trajectories_linked(clip_worlds: list[torch.Tensor], overlap: int,
+                              clip_centers: list[torch.Tensor] | None = None,
+                              iters: int = 8, robust: bool = True,
+                              center_weight: float = 4.0, crossfade: bool = True,
+                              per_clip_scale: bool = True) -> torch.Tensor:
+    """MonST3R-style chunk linker: the global consensus bundle-adjust of ``chain_trajectories_global``
+    plus two closed-form upgrades that specifically target inter-chunk drift when a long (e.g. 128f)
+    sequence is stitched from short (16/32f) clips. This is the ICLR long-window chainer.
+
+    1. CAMERA-CENTRE correspondences. Hand joints in a single frame form a small (~10 cm) cluster, so
+       aligning overlapping clips by joints alone leaves each clip's rotation weakly constrained.
+       When ``clip_centers[i]`` (``[Lc, 3]`` = the clip-local camera centre per frame, i.e.
+       ``c2w[:, :3, 3] * s`` - exactly the translation ``_world_from_cam`` uses) is supplied, each
+       frame's camera centre joins that clip's Umeyama correspondence set with weight
+       ``center_weight`` relative to a per-joint weight of 1. The camera sits ~0.3-0.7 m from the
+       hand, so it is a long lever arm that pins clip rotation. IMPORTANT: this helps ONLY when the
+       centres are reliable relative to the joints; if the predicted camera poses
+       (``rendered_extrinsics``) are noisier than the joints, up-weighting the centres can INCREASE
+       drift, so treat centres as an ablation (compare against ``clip_centers=None``), not an
+       unconditional win. ``clip_centers=None`` gives a joints-only global solve (still cross-faded),
+       the safe default.
+    2. CROSS-FADE (feathered) fusion. ``chain_trajectories_global`` averages overlapping clips with
+       equal weight, so a clip's least-reliable frames (its temporal extremes, where the attention
+       window has the least bilateral context) count as much as its well-supported interior and can
+       leave a visible seam. Here each clip's contribution to a global frame is feathered by a window
+       that ramps up over its first ``overlap`` frames and down over its last ``overlap`` frames - a
+       flat-top trapezoid when ``overlap <= lc/2``, and a triangular peak when the two ramps meet or
+       overlap for ``overlap > lc/2`` (both are valid strictly-positive weightings; only the plateau
+       shrinks), floored at ``FEATHER_MIN`` so a singly-covered frame stays well defined and never
+       divides by zero, giving a smooth C0 blend across seams. ``crossfade=False`` recovers the
+       uniform average.
+
+    Everything else matches ``chain_trajectories_global`` EXACTLY, so ``clip_centers=None,
+    crossfade=False`` is a bit-for-bit alias of it (asserted in the self-test): clip 0's transform is
+    pinned to identity (global gauge), later transforms are initialised by greedy chaining and refined
+    by block-coordinate descent (consensus -> re-fit each whole clip to the consensus, ``iters``
+    times, robust Umeyama when ``robust``). Trajectory smoothing is deliberately NOT baked in; if
+    residual drift remains, run the existing ``smooth_root_trajectory`` on the returned trajectory (it
+    needs the hand/joint layout this generic point chainer does not carry). Returns the consensus
+    global joint trajectory ``[T_total, J, 3]``.
+    """
+    assert len(clip_worlds) >= 1 and overlap >= 1
+    n = len(clip_worlds)
+    if n == 1:
+        return clip_worlds[0].clone()
+    lc, j = clip_worlds[0].shape[0], clip_worlds[0].shape[1]
+    step = lc - overlap
+    assert step >= 1, "overlap must be < clip length"
+    t_total = (n - 1) * step + lc
+    dtype = clip_worlds[0].dtype
+    device = clip_worlds[0].device
+    use_centers = clip_centers is not None
+    if use_centers:
+        assert len(clip_centers) == n, "clip_centers must have one entry per clip"
+        for i in range(n):
+            assert clip_centers[i].shape[0] == clip_worlds[i].shape[0], \
+                "clip_centers[i] must have the same frame count as clip_worlds[i]"
+
+    FEATHER_MIN = 0.05
+    solver = solve_similarity_robust if robust else solve_similarity
+
+    def _rigidify(src, dst, w, s, r, t):
+        """Pin a solved similarity to rigid SE(3) when ``per_clip_scale=False``: keep the
+        (scale-invariant) rotation, re-solve the translation under s=1 from the weighted means.
+        Rationale: after the per-sequence scene scale is applied, the per-clip Umeyama SCALE is
+        fitted on a degenerate ~10 cm hand-joint cluster, so it mostly fits noise and re-injects
+        clip-to-clip scale jitter that the pooled scale just removed. Freezing s=1 tests that."""
+        if per_clip_scale:
+            return s, r, t
+        ww = (torch.ones(src.shape[0], dtype=torch.float64, device=src.device)
+              if w is None else w.to(torch.float64).clamp_min(0))
+        ww = ww / ww.sum().clamp_min(1e-12)
+        mu_s = (ww[:, None] * src.to(torch.float64)).sum(0)
+        mu_d = (ww[:, None] * dst.to(torch.float64)).sum(0)
+        t_new = (mu_d - r.to(torch.float64) @ mu_s).to(r.dtype)
+        return torch.ones((), dtype=r.dtype, device=r.device), r, t_new
+
+    # per-correspondence prior weights for the Umeyama solve: 1 per joint, center_weight per centre.
+    w_solve = None
+    if use_centers:
+        w_solve = torch.cat([
+            torch.ones(lc * j, dtype=torch.float32, device=device),
+            torch.full((lc,), float(center_weight), dtype=torch.float32, device=device),
+        ])
+
+    def _src(i: int) -> torch.Tensor:
+        pts = clip_worlds[i].reshape(-1, 3)
+        if use_centers:
+            pts = torch.cat([pts, clip_centers[i].reshape(-1, 3)], dim=0)
+        return pts
+
+    def _fit(i: int, gj: torch.Tensor, gc: torch.Tensor | None):
+        """Solve clip i's similarity onto the global joint (+centre) consensus over its frames."""
+        off = i * step
+        dst = gj[off:off + lc].reshape(-1, 3)
+        if use_centers:
+            dst = torch.cat([dst, gc[off:off + lc].reshape(-1, 3)], dim=0)
+        src = _src(i)
+        if robust:
+            s, r, t = solve_similarity_robust(src, dst, weights=w_solve)
+        else:
+            s, r, t = solve_similarity(src, dst, weights=w_solve)
+        return _rigidify(src, dst, w_solve, s, r, t)
+
+    def _feather(i: int) -> torch.Tensor:
+        """Trapezoidal feather weight [lc] for clip i (ramps into each neighbour), floored > 0."""
+        f = torch.ones(lc, dtype=torch.float64, device=device)
+        o = min(overlap, lc)
+        if crossfade and o >= 2:
+            ramp = torch.linspace(0.0, 1.0, o, dtype=torch.float64, device=device)
+            if i > 0:                                   # ramp up into the previous clip's tail
+                f[:o] = torch.minimum(f[:o], ramp)
+            if i < n - 1:                               # ramp down into the next clip's head
+                f[-o:] = torch.minimum(f[-o:], ramp.flip(0))
+        return f.clamp_min(FEATHER_MIN)
+
+    def _consensus(tfs: list) -> tuple[torch.Tensor, torch.Tensor | None]:
+        accj = torch.zeros(t_total, j, 3, dtype=torch.float64, device=device)
+        cntj = torch.zeros(t_total, 1, 1, dtype=torch.float64, device=device)
+        accc = torch.zeros(t_total, 3, dtype=torch.float64, device=device) if use_centers else None
+        cntc = torch.zeros(t_total, 1, dtype=torch.float64, device=device) if use_centers else None
+        for i in range(n):
+            s, r, tt = tfs[i]
+            off = i * step
+            fw = _feather(i)                                        # [lc] float64, all-ones if no crossfade
+            accj[off:off + lc] += fw.view(lc, 1, 1) * apply_similarity(clip_worlds[i], s, r, tt).to(torch.float64)
+            cntj[off:off + lc] += fw.view(lc, 1, 1)
+            if use_centers:
+                accc[off:off + lc] += fw.view(lc, 1) * apply_similarity(clip_centers[i], s, r, tt).to(torch.float64)
+                cntc[off:off + lc] += fw.view(lc, 1)
+        gj = (accj / cntj.clamp_min(1e-12)).to(dtype)
+        gc = (accc / cntc.clamp_min(1e-12)).to(dtype) if use_centers else None
+        return gj, gc
+
+    eye = torch.eye(3, dtype=dtype, device=device)
+    zero = torch.zeros(3, dtype=dtype, device=device)
+    one = torch.ones((), dtype=dtype, device=device)
+    transforms = [(one, eye, zero)]                                # clip 0 pinned to identity (gauge)
+
+    # init the later transforms by joints-only greedy chaining (centres refine it in the BCD loop).
+    greedy = chain_trajectories_by_overlap(clip_worlds, overlap)
+    for i in range(1, n):
+        off = i * step
+        src0 = clip_worlds[i].reshape(-1, 3)
+        dst0 = greedy[off:off + lc].reshape(-1, 3)
+        s0, r0, t0 = solver(src0, dst0)
+        transforms.append(_rigidify(src0, dst0, None, s0, r0, t0))
+
+    for _ in range(iters):
+        gj, gc = _consensus(transforms)
+        for i in range(1, n):                                      # clip 0 stays identity
+            transforms[i] = _fit(i, gj, gc)
+    return _consensus(transforms)[0]
 
 
 # --------------------------------------------------------------------------- metrics
@@ -495,6 +660,124 @@ def _selftest() -> None:
     assert w_velg < 0.3 * w_bias, f"GT-velocity ceiling must collapse drift ({w_velg:.1f} vs {w_bias:.1f})"
     w_rean = w_mpjpe(reanchor_to_gt(biased, gt6, valid6, 16), gt6, valid6)
     assert w_rean < 0.5 * w_bias, f"periodic re-anchor must cut drift ({w_rean:.1f} vs {w_bias:.1f})"
+
+    # 8) chunk LINKER (chain_trajectories_linked), the ICLR 32f/50%-overlap chainer:
+    #    (a) it is a bit-for-bit alias of the global chainer when both upgrades are OFF (regression
+    #    guard); (b) it recovers a noiseless split exactly with centres + cross-fade ON; (c) clean
+    #    camera centres reduce drift vs joints-only global under joint noise; (d) at the default
+    #    centre weight it never degrades vs global.
+    clip_len8, overlap8 = 32, 16
+    starts8 = list(range(0, t_total - overlap8, clip_len8 - overlap8))
+    torch.manual_seed(3)
+    # Camera-centre leverage regime (what the upgrade targets): a nearly-STATIONARY, tightly-clustered
+    # hand (weak rotational constraint from joints alone) filmed by a MOVING camera ~0.5 m away (a long
+    # lever arm). base8 = a slow wrist wander + a fixed ~3 cm articulation cluster.
+    wrist8 = 0.003 * torch.cumsum(torch.randn(t_total, 3), dim=0)   # near-stationary wrist (~3 mm steps)
+    artic8 = torch.randn(16, 3) * 0.03                             # fixed ~3 cm hand cluster
+    base8 = wrist8.unsqueeze(1) + artic8.unsqueeze(0)              # [T,16,3] tight, nearly-static hand
+    cam_track = (torch.tensor([0.0, 0.0, 0.5])                     # camera ~0.5 m from the wrist
+                 + 0.03 * torch.cumsum(torch.randn(t_total, 3), dim=0))   # camera MOVES (baseline)
+
+    def _build_link(noise_j: float, noise_c: float, seed: int):
+        """Split GT joints + camera track into 32f/50%-overlap clips, push each clip through a random
+        Sim(3) (same transform to joints AND centres so they stay commensurate), add optional per-clip
+        noise. Returns (clip_joint_list, clip_center_list)."""
+        gen = torch.Generator().manual_seed(seed)
+        cj, cc = [], []
+        for st in starts8:
+            segj, segc = base8[st:st + clip_len8], cam_track[st:st + clip_len8]
+            if segj.shape[0] < overlap8 + 1:
+                continue
+            ang = torch.randn(1, generator=gen).item()
+            rr = torch.tensor([[torch.cos(torch.tensor(ang)), -torch.sin(torch.tensor(ang)), 0.0],
+                               [torch.sin(torch.tensor(ang)), torch.cos(torch.tensor(ang)), 0.0],
+                               [0.0, 0.0, 1.0]])
+            s_ = torch.tensor(0.8 + abs(ang))
+            t_ = torch.randn(3, generator=gen)
+            lj = apply_similarity(segj.reshape(-1, 3), s_, rr, t_).reshape(segj.shape)
+            lcen = apply_similarity(segc, s_, rr, t_)
+            if noise_j:
+                lj = lj + noise_j * torch.randn(lj.shape, generator=gen)
+            if noise_c:
+                lcen = lcen + noise_c * torch.randn(lcen.shape, generator=gen)
+            cj.append(lj)
+            cc.append(lcen)
+        return cj, cc
+
+    def _drift8(traj: torch.Tensor) -> float:
+        ncc = min(traj.shape[0], t_total)
+        s, r, t = solve_similarity(traj[:ncc].reshape(-1, 3), base8[:ncc].reshape(-1, 3))
+        return w_mpjpe(apply_similarity(traj[:ncc], s, r, t), base8[:ncc])
+
+    # (a) exact equivalence to the global chainer when centres off + crossfade off.
+    cj0, _ = _build_link(0.0, 0.0, 10)
+    link_off = chain_trajectories_linked(cj0, overlap8, clip_centers=None, crossfade=False)
+    glob_ref = chain_trajectories_global(cj0, overlap8, iters=8, robust=True)
+    assert link_off.shape[0] == (len(cj0) - 1) * (clip_len8 - overlap8) + clip_len8
+    assert torch.allclose(link_off, glob_ref, atol=1e-5), \
+        f"linker(centres off, crossfade off) must equal the global chainer " \
+        f"(max diff {(link_off - glob_ref).abs().max():.2e})"
+
+    # (b) noiseless recovery with the full linker (centres + cross-fade).
+    cj_n, cc_n = _build_link(0.0, 0.0, 11)
+    linked_clean = chain_trajectories_linked(cj_n, overlap8, clip_centers=cc_n, crossfade=True)
+    nc8 = min(linked_clean.shape[0], t_total)
+    err_link = wa_mpjpe(linked_clean[:nc8], base8[:nc8], window=nc8)
+    assert err_link < 1.0, f"linker noiseless recovery drift too high: {err_link:.3f} mm"
+
+    # (c) clean camera centres reduce drift vs joints-only global under 2 cm joint noise.
+    cj_no, cc_cl = _build_link(0.02, 0.0, 12)
+    d_global = _drift8(chain_trajectories_global(cj_no, overlap8, iters=8, robust=True))
+    d_link_c = _drift8(chain_trajectories_linked(cj_no, overlap8, clip_centers=cc_cl,
+                                                 center_weight=32.0, crossfade=True))
+    assert d_link_c < d_global, \
+        f"camera centres should reduce drift (linked {d_link_c:.1f} vs global {d_global:.1f} mm)"
+
+    # (d) at the default centre weight the linker does not degrade vs global.
+    d_link_def = _drift8(chain_trajectories_linked(cj_no, overlap8, clip_centers=cc_cl, crossfade=True))
+    assert d_link_def <= d_global + 2.0, \
+        f"default linker should not degrade vs global (linked {d_link_def:.1f} vs {d_global:.1f} mm)"
+
+    # (e) overlap > 50% of clip length (triangular-feather region; NOT hit by the 50%-overlap
+    #     defaults, so the rest of the self-test never exercises it): crossfade=False stays a
+    #     bit-exact alias of the global chainer, and crossfade=True is finite and well-shaped.
+    lc_hi, ov_hi = 32, 24                              # stride 8 -> 75% overlap
+    gh = torch.Generator().manual_seed(20)
+    cj_hi = []
+    for s0 in range(0, t_total - ov_hi, lc_hi - ov_hi):
+        seg = base8[s0:s0 + lc_hi]
+        if seg.shape[0] < lc_hi:
+            continue
+        a = torch.randn(1, generator=gh).item()
+        rrh = torch.tensor([[torch.cos(torch.tensor(a)), -torch.sin(torch.tensor(a)), 0.0],
+                            [torch.sin(torch.tensor(a)), torch.cos(torch.tensor(a)), 0.0],
+                            [0.0, 0.0, 1.0]])
+        cj_hi.append(apply_similarity(seg.reshape(-1, 3), torch.tensor(0.9 + abs(a)), rrh,
+                                      torch.randn(3, generator=gh)).reshape(seg.shape))
+    link_hi_off = chain_trajectories_linked(cj_hi, ov_hi, clip_centers=None, crossfade=False)
+    glob_hi = chain_trajectories_global(cj_hi, ov_hi, iters=8, robust=True)
+    assert torch.allclose(link_hi_off, glob_hi, atol=1e-5), "equiv must hold at overlap>50% too"
+    link_hi_cf = chain_trajectories_linked(cj_hi, ov_hi, clip_centers=None, crossfade=True)
+    assert link_hi_cf.shape == glob_hi.shape and torch.isfinite(link_hi_cf).all(), \
+        "crossfade must stay finite/well-shaped at overlap>50%"
+
+    # (f) NOISY-CENTRE caveat (the REALISTIC regime: camera centres come from the model's own
+    #     rendered_extrinsics, which can be noisier than the joints). The SAFE variant - cross-fade
+    #     only, NO centres - must not degrade vs global; up-weighting NOISY centres CAN increase
+    #     drift, so centres are an ablation, not an unconditional win. Assert the safe variant; only
+    #     REPORT the with-centres number (it is worse here, by construction of this stress case).
+    cj_cn, cc_noisy = _build_link(0.0, 0.20, 14)       # clean joints, 20 cm noisy centres
+    d_glob_cn = _drift8(chain_trajectories_global(cj_cn, overlap8, iters=8, robust=True))
+    d_cf_cn = _drift8(chain_trajectories_linked(cj_cn, overlap8, clip_centers=None, crossfade=True))
+    d_wc_cn = _drift8(chain_trajectories_linked(cj_cn, overlap8, clip_centers=cc_noisy, crossfade=True))
+    assert d_cf_cn <= d_glob_cn + 1e-3, \
+        f"cross-fade-only (no centres) must not degrade vs global ({d_cf_cn:.3f} vs {d_glob_cn:.3f} mm)"
+
+    print(f"world_space_metrics linker self-test: OK (equiv-to-global bit-exact incl. overlap>50%; "
+          f"noiseless drift {err_link:.4f} mm; joint-noise: global={d_global:.1f} -> +centres(cw32)="
+          f"{d_link_c:.1f} +centres(default)={d_link_def:.1f} mm; NOISY-centre caveat: global="
+          f"{d_glob_cn:.2f} cross-fade-only={d_cf_cn:.2f} +noisy-centres={d_wc_cn:.2f} mm - centres "
+          f"are an ablation, not an unconditional win)")
 
     print("world_space_metrics self-test: OK "
           f"(similarity round-trip, WA~0 for GT-similarity, noiseless chaining drift {err:.4f} mm; "

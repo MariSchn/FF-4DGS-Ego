@@ -23,7 +23,7 @@ import yaml
 from decord import VideoReader
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision.transforms import functional as TVF
 from tqdm import tqdm
 
@@ -154,62 +154,77 @@ class HOT3DHandDataset(Dataset):
             )
             joint_cache_path = os.path.join(hand_data_root, joint_cache_name)
 
-            if not os.path.exists(video_path) or not os.path.exists(jsonl_path):
-                print(f"Skipping {seq_path} because it doesn't have a video or jsonl file")
+            # Video is REQUIRED. The jsonl (raw MANO trajectory) is OPTIONAL when the derived
+            # .pt caches exist: on the use_hand_crop cache hit below, gt_per_frame is overwritten
+            # from the bbox cache's "gt" and the GT joints load from the joint cache, so the jsonl
+            # is only used to (re)derive those from scratch. Sequences preprocessed straight into
+            # .pt caches with no jsonl retained (e.g. the HOI4D 157 store) stay evaluable; the
+            # jsonl is required only when the joint cache is absent (cache-miss path needs it).
+            if not os.path.exists(video_path):
+                print(f"Skipping {seq_path} because it has no video file")
                 continue
-            
-            # if seq_path[0:5] in ["P0004", "P0005", "P0006", "P0008", "P0016", "P0020"]:
-            #     print(f"Skipping {seq_path} as it doesn't have MANO data")
-            #     continue
-
-            # Load all JSONL entries keyed by timestamp
-            hand_entries = {}  # timestamp_ns -> hand_poses dict
-            with open(jsonl_path) as f:
-                for line in f:
-                    entry = json.loads(line)
-                    hand_entries[entry["timestamp_ns"]] = entry["hand_poses"]
-            hand_ts_sorted = sorted(hand_entries.keys())
-
-            if len(hand_ts_sorted) < 2:
+            has_jsonl = os.path.exists(jsonl_path)
+            if not has_jsonl and not os.path.exists(joint_cache_path):
+                print(f"Skipping {seq_path}: no jsonl and no joint cache to fall back on")
                 continue
 
             n_video = len(VideoReader(video_path))
             if n_video < num_frames:
                 continue
 
-            # Map each video frame to the closest JSONL entry via linear interpolation
-            ts_start, ts_end = hand_ts_sorted[0], hand_ts_sorted[-1]
+            if has_jsonl:
+                # Load all JSONL entries keyed by timestamp
+                hand_entries = {}  # timestamp_ns -> hand_poses dict
+                with open(jsonl_path) as f:
+                    for line in f:
+                        entry = json.loads(line)
+                        hand_entries[entry["timestamp_ns"]] = entry["hand_poses"]
+                hand_ts_sorted = sorted(hand_entries.keys())
 
-            def _closest_ts(frame_i):
-                frac = frame_i / max(n_video - 1, 1)
-                query = int(ts_start + frac * (ts_end - ts_start))
-                idx = bisect.bisect_left(hand_ts_sorted, query)
-                if idx == 0:
-                    return hand_ts_sorted[0]
-                if idx >= len(hand_ts_sorted):
-                    return hand_ts_sorted[-1]
-                before, after = hand_ts_sorted[idx - 1], hand_ts_sorted[idx]
-                return before if (query - before) <= (after - query) else after
+                if len(hand_ts_sorted) < 2:
+                    continue
 
-            def _hand_to_vec(hand_poses):
-                vecs = []
-                for hand_id in ["0", "1"]:
-                    hand = hand_poses.get(hand_id, {})
-                    if hand:
-                        vecs.append(torch.cat([
-                            torch.tensor(hand["wrist_xform"]["t_xyz"],  dtype=torch.float32),
-                            torch.tensor(hand["wrist_xform"]["q_wxyz"], dtype=torch.float32),
-                            torch.tensor(hand["pose"],                  dtype=torch.float32),
-                            torch.tensor(hand["betas"],                 dtype=torch.float32),
-                        ]))
-                    else:
-                        vecs.append(torch.zeros(HAND_PARAM_DIM))
-                return torch.cat(vecs)
+                # Map each video frame to the closest JSONL entry via linear interpolation
+                ts_start, ts_end = hand_ts_sorted[0], hand_ts_sorted[-1]
 
-            gt_per_frame = []
-            for frame_i in range(n_video):
-                ts = _closest_ts(frame_i)
-                gt_per_frame.append(_hand_to_vec(hand_entries[ts]))
+                def _closest_ts(frame_i):
+                    frac = frame_i / max(n_video - 1, 1)
+                    query = int(ts_start + frac * (ts_end - ts_start))
+                    idx = bisect.bisect_left(hand_ts_sorted, query)
+                    if idx == 0:
+                        return hand_ts_sorted[0]
+                    if idx >= len(hand_ts_sorted):
+                        return hand_ts_sorted[-1]
+                    before, after = hand_ts_sorted[idx - 1], hand_ts_sorted[idx]
+                    return before if (query - before) <= (after - query) else after
+
+                def _hand_to_vec(hand_poses):
+                    vecs = []
+                    for hand_id in ["0", "1"]:
+                        hand = hand_poses.get(hand_id, {})
+                        if hand:
+                            vecs.append(torch.cat([
+                                torch.tensor(hand["wrist_xform"]["t_xyz"],  dtype=torch.float32),
+                                torch.tensor(hand["wrist_xform"]["q_wxyz"], dtype=torch.float32),
+                                torch.tensor(hand["pose"],                  dtype=torch.float32),
+                                torch.tensor(hand["betas"],                 dtype=torch.float32),
+                            ]))
+                        else:
+                            vecs.append(torch.zeros(HAND_PARAM_DIM))
+                    return torch.cat(vecs)
+
+                gt_per_frame = []
+                for frame_i in range(n_video):
+                    ts = _closest_ts(frame_i)
+                    gt_per_frame.append(_hand_to_vec(hand_entries[ts]))
+            else:
+                # No jsonl: the .pt caches supply everything the eval scores. gt_per_frame is a
+                # placeholder that is OVERWRITTEN from the bbox cache's "gt" on the use_hand_crop
+                # cache hit below (line ~"gt_per_frame[:] = list(cached['gt'])"); hand_ts_sorted is
+                # a dummy (only referenced by the cache-MISS branches, which cannot run here since
+                # the joint cache is guaranteed present by the guard above).
+                hand_ts_sorted = list(range(n_video))
+                gt_per_frame = [torch.zeros(HAND_PARAM_DIM * NUM_HANDS) for _ in range(n_video)]
 
             # Handle 2D GT joints + camera data. If we have to compute this
             # from scratch, we need world-frame joints (project_vertices applies
@@ -896,14 +911,66 @@ class HOT3DHandDataset(Dataset):
         return True
 
 
+class MixedHandDataset(Dataset):
+    """Concatenation of per-root HOT3DHandDataset parts for MIXED multi-dataset training.
+
+    Exposes a concatenated .clips list so every downstream .clips consumer (vis setup,
+    GS clip selection) keeps working unchanged; __getitem__ delegates to the owning part,
+    so per-part behavior (feature caches, bbox perturb, ...) is preserved.
+    """
+
+    def __init__(self, parts, names, weights=None):
+        assert parts and len(parts) == len(names), "parts/names mismatch"
+        self.parts = parts
+        self.names = names
+        # weights: relative sampling mass PER ROOT (None -> natural clip-proportional mix).
+        self.weights = weights
+        self.clips = [c for p in parts for c in p.clips]
+        self._owner, self._local = [], []
+        for pi, p in enumerate(parts):
+            self._owner.extend([pi] * len(p))
+            self._local.extend(range(len(p)))
+
+    def __len__(self):
+        return len(self._owner)
+
+    def __getitem__(self, idx):
+        return self.parts[self._owner[idx]][self._local[idx]]
+
+    def sample_weights(self):
+        """Per-item sampler weights: each root's mass spread uniformly over its clips,
+        so the expected batch composition follows self.weights regardless of root size."""
+        w = torch.zeros(len(self))
+        start = 0
+        for p, pw in zip(self.parts, self.weights):
+            n = len(p)
+            if n:
+                w[start:start + n] = float(pw) / n
+            start += n
+        return w
+
+    def summary(self):
+        return " | ".join(
+            f"{n}: {len(p)} clips" + (f" (w={w})" if self.weights else "")
+            for n, p, w in zip(self.names, self.parts,
+                               self.weights or [None] * len(self.parts)))
+
+
 def discover_sequences(data_root):
     seqs = []
     for name in sorted(os.listdir(data_root)):
         path = os.path.join(data_root, name)
         if not os.path.isdir(path):
             continue
-        if (os.path.exists(os.path.join(path, "video_main_rgb.mp4")) and
-                os.path.exists(os.path.join(path, "hand_data/mano_hand_pose_trajectory.jsonl"))):
+        # jsonl OR the derived joint caches: preprocessed-to-.pt stores (HOI4D 157,
+        # the ARCTIC/OakInk2 converters) retain no jsonl; the dataset class handles
+        # that via the bbox cache's "gt" (see the no-jsonl branch in __init__).
+        has_jsonl = os.path.exists(
+            os.path.join(path, "hand_data/mano_hand_pose_trajectory.jsonl"))
+        has_caches = (
+            os.path.exists(os.path.join(path, "hand_data/gt_joints_cache_cam_v2.pt")) or
+            os.path.exists(os.path.join(path, "hand_data/gt_joints_cache_world.pt")))
+        if os.path.exists(os.path.join(path, "video_main_rgb.mp4")) and (has_jsonl or has_caches):
             seqs.append(path)
     return seqs
 
@@ -1506,15 +1573,35 @@ def train():
     )
 
     # --- Data ---
-    all_seqs = discover_sequences(data_cfg["data_root"])
-    if not all_seqs:
-        raise RuntimeError(f"No sequences found in {data_cfg['data_root']}")
-    print(f"Found {len(all_seqs)} sequences")
+    # Multi-dataset mixing: data.data_roots = list of roots (path strings or dicts
+    # {root, name, weight, max_sequences, val_split, feature_cache_dir}). A single
+    # data.data_root config behaves exactly as before. weight = relative sampling
+    # mass per root (any weight set -> WeightedRandomSampler; none set -> natural
+    # clip-proportional mixing via plain shuffle over the concatenation).
+    root_specs = data_cfg.get("data_roots")
+    if root_specs:
+        norm_specs = []
+        for i, spec in enumerate(root_specs):
+            if isinstance(spec, str):
+                spec = {"root": spec}
+            spec = dict(spec)
+            spec.setdefault("name", os.path.basename(spec["root"].rstrip("/")) or f"root{i}")
+            norm_specs.append(spec)
+    else:
+        norm_specs = [{"root": data_cfg["data_root"], "name": "main"}]
 
-    if debug_cfg.get("enabled", False):
-        max_seqs = debug_cfg.get("max_sequences", 5)
-        all_seqs = all_seqs[:max_seqs]
-        print(f"[DEBUG] Limited to {len(all_seqs)} sequences")
+    seqs_by_root = []
+    for spec in norm_specs:
+        seqs = discover_sequences(spec["root"])
+        if not seqs:
+            raise RuntimeError(f"No sequences found in {spec['root']}")
+        if debug_cfg.get("enabled", False):
+            seqs = seqs[: debug_cfg.get("max_sequences", 5)]
+            print(f"[DEBUG] {spec['name']}: limited to {len(seqs)} sequences")
+        if spec.get("max_sequences"):
+            seqs = seqs[: int(spec["max_sequences"])]
+        seqs_by_root.append(seqs)
+        print(f"[data] {spec['name']}: {len(seqs)} sequences ({spec['root']})")
 
     num_frames       = data_cfg["num_frames"]
     res              = tuple(data_cfg["resolution"])
@@ -1585,29 +1672,57 @@ def train():
     )
 
     if debug_cfg.get("single_frame", False):
-        # Overfit on a single clip from the middle of the first sequence
-        single_set = HOT3DHandDataset(all_seqs[:1], mano_model, **ds_kwargs)
+        # Overfit on a single clip from the middle of the first sequence (first root)
+        single_set = HOT3DHandDataset(seqs_by_root[0][:1], mano_model, **ds_kwargs)
         mid = len(single_set.clips) // 2
         single_set.clips = [single_set.clips[mid]]
         train_set = val_set = single_set
-        print(f"[DEBUG] Single-frame overfit: seq={os.path.basename(all_seqs[0])}, clip offset={single_set.clips[0]['frame_offset']}")
+        print(f"[DEBUG] Single-frame overfit: seq={os.path.basename(seqs_by_root[0][0])}, clip offset={single_set.clips[0]['frame_offset']}")
     else:
         random.seed(training_cfg.get("seed", 42))
-        random.shuffle(all_seqs)
-        n_val = int(len(all_seqs) * float(data_cfg.get("val_split", 0.1)))
-        # Hold out at least one sequence whenever we have more than one, so a
-        # small val_split (e.g. 0.01) on a handful of sequences still produces
-        # validation media + a best checkpoint instead of silently disabling both.
-        if n_val == 0 and len(all_seqs) > 1:
-            n_val = 1
-        if n_val == 0:
-            print("[WARN] No validation sequences — validation disabled, no best checkpoint will be saved")
-        val_seqs, train_seqs = all_seqs[:n_val], all_seqs[n_val:]
-        train_set = HOT3DHandDataset(train_seqs, mano_model, **ds_kwargs)
-        val_set = HOT3DHandDataset(val_seqs, mano_model, **ds_kwargs) if val_seqs else None
+        train_parts, val_parts, part_names = [], [], []
+        for spec, root_seqs in zip(norm_specs, seqs_by_root):
+            seqs = list(root_seqs)
+            random.shuffle(seqs)
+            n_val = int(len(seqs) * float(spec.get("val_split", data_cfg.get("val_split", 0.1))))
+            # Hold out at least one sequence whenever we have more than one, so a
+            # small val_split (e.g. 0.01) on a handful of sequences still produces
+            # validation media + a best checkpoint instead of silently disabling both.
+            if n_val == 0 and len(seqs) > 1:
+                n_val = 1
+            val_seqs, train_seqs = seqs[:n_val], seqs[n_val:]
+            kwargs = dict(ds_kwargs)
+            if "feature_cache_dir" in spec:
+                kwargs["feature_cache_dir"] = spec["feature_cache_dir"]
+            train_parts.append(HOT3DHandDataset(train_seqs, mano_model, **kwargs))
+            val_parts.append(HOT3DHandDataset(val_seqs, mano_model, **kwargs) if val_seqs else None)
+            part_names.append(spec["name"])
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True, drop_last=True)
+        if len(train_parts) == 1:
+            train_set, val_set = train_parts[0], val_parts[0]
+        else:
+            weighted = any("weight" in s for s in norm_specs)
+            weights = [float(s.get("weight", 1.0)) for s in norm_specs] if weighted else None
+            train_set = MixedHandDataset(train_parts, part_names, weights)
+            vp = [(p, n) for p, n in zip(val_parts, part_names)
+                  if p is not None and len(p.clips) > 0]
+            val_set = MixedHandDataset([p for p, _ in vp], [n for _, n in vp]) if vp else None
+            print(f"[mix] train {train_set.summary()}")
+            if val_set is not None:
+                print(f"[mix] val   {val_set.summary()}")
+        if val_set is not None and len(val_set.clips) == 0:
+            val_set = None
+        if val_set is None:
+            print("[WARN] No validation sequences — validation disabled, no best checkpoint will be saved")
+
+    if isinstance(train_set, MixedHandDataset) and train_set.weights is not None:
+        sampler = WeightedRandomSampler(train_set.sample_weights(),
+                                        num_samples=len(train_set), replacement=True)
+        train_loader = DataLoader(train_set, batch_size=batch_size, sampler=sampler,
+                                  num_workers=num_workers, pin_memory=True, drop_last=True)
+    else:
+        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
+                                  num_workers=num_workers, pin_memory=True, drop_last=True)
 
     if val_set is not None and len(val_set.clips) > 0:
         val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False,

@@ -24,6 +24,7 @@ from scripts.world_space_metrics import (
     c_mpjpe,
     chain_trajectories_by_overlap,
     chain_trajectories_global,
+    chain_trajectories_linked,
     reanchor_to_gt,
     replace_root_with_gt_motion,
     smooth_root_trajectory,
@@ -79,7 +80,7 @@ def _world_from_cam(pj, c2w, s):
 
 
 def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=None, contact_mask=None,
-                 ref_d_scene=None):
+                 ref_d_scene=None, depth_out=None):
     """Run the hand head for one clip and gather its metric-scale correspondences.
 
     Returns ``(pj_cam, c2w, s_clip, ratios)``: ``pj_cam`` [S,H,J,3] metric camera-frame joints
@@ -109,6 +110,17 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
         _S = pred_joints.shape[1]
         c2w = torch.eye(4, device=pred_joints.device).unsqueeze(0).repeat(_S, 1, 1)
     gs_depth = preds.get("gs_depth")
+    # Dump support: a nearest-subsampled 32x32 per-frame scene depth (fp16). Nearest (not avg)
+    # keeps real depth samples so offline scene-point backprojection has no flying-pixel blend.
+    if depth_out is not None:
+        d32 = None
+        if gs_depth is not None:
+            d = gs_depth[0].float()
+            while d.dim() > 3:
+                d = d.squeeze(1)
+            d32 = torch.nn.functional.interpolate(
+                d.unsqueeze(1), size=(32, 32), mode="nearest-exact").squeeze(1).half().cpu()
+        depth_out.append(d32)
 
     ratios = torch.empty(0)
     s = 1.0
@@ -221,6 +233,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
     for seg in range(n_seg):
         base = seg * clips_per_seg
         clip_cams = []   # [(pj_cam [S,H,J,3], c2w [S,4,4], s_perclip), ...]
+        clip_depths = [] if dump_list is not None else None  # per-clip 32x32 gs_depth (dump only)
         s_pairs = []     # (s_gt, s_hand) per clip: GT camera-trajectory scale vs our hand scale (b)
         anchor_log = []  # per-clip {gate_rate, dz_gated_m, dz_max_m} when the root anchor is active
         for c in range(clips_per_seg):
@@ -268,7 +281,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                 if _sl.shape[0] == clip_len:
                     _con = _sl.unsqueeze(0).to(device)                  # [1,S,2] contact gate
             cc = predict_clip(preds, mano_model, device, cam_intr, model=model, anchor_log=anchor_log,
-                              ref_d_scene=_ref, contact_mask=_con)
+                              ref_d_scene=_ref, contact_mask=_con, depth_out=clip_depths)
             clip_cams.append(cc)
 
             # (b) GROUND-TRUTH SCALE check: the world placement scales the up-to-scale camera
@@ -309,6 +322,11 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         def _global(cw):
             return _metrics(chain_trajectories_global(cw, overlap=overlap, iters=8, robust=True))
 
+        def _linked(cw, centers):
+            # ICLR chunk linker: global BA + camera-centre correspondences + cross-fade seam fusion.
+            return _metrics(chain_trajectories_linked(cw, overlap=overlap, clip_centers=centers,
+                                                      iters=8, robust=True))
+
         # Three scene scales, each applied ONLY to the camera translation (the hand is already
         # metric). per-clip = the per-frame heuristic (one closed-form solve per clip; high
         # variance -> the chained absolute trajectory drifts -> large W-MPJPE). per-seq MEDIAN =
@@ -341,6 +359,22 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         g_md = _greedy(worlds_md)
         chain_pl = chain_trajectories_by_overlap(worlds_pl, overlap=overlap)  # pooled greedy traj
         g_pl = _metrics(chain_pl)
+        # ICLR chunk linker on the pooled-scale worlds. The camera centre for clip k under the pooled
+        # scale is c2w[k, :3, 3] * s_pool (exactly the translation _world_from_cam applies), so joints
+        # and centres share the clip-local world frame. Reported as the "_link" suffix -> a direct
+        # greedy(_spool)-vs-linker(_link) comparison at the same scene scale.
+        centers_pl = [c2w[:, :3, 3] * s_pool for (_, c2w, _, _) in clip_cams]
+        gl_link = _linked(worlds_pl, centers_pl)      # linker WITH camera centres (needs reliable cam poses)
+        gl_linkcf = _linked(worlds_pl, None)          # cross-fade only, NO centres (the safe variant)
+        # RIGID linker variants (per_clip_scale=False): after the pooled scene scale, per-clip
+        # Umeyama SCALE is solved on a degenerate ~10 cm joint cluster and mostly re-injects the
+        # clip-to-clip scale jitter that pooling removed. Freezing s=1 isolates that effect.
+        gl_linkr = _metrics(chain_trajectories_linked(
+            worlds_pl, overlap=overlap, clip_centers=centers_pl, iters=8, robust=True,
+            per_clip_scale=False))
+        gl_linkrcf = _metrics(chain_trajectories_linked(
+            worlds_pl, overlap=overlap, clip_centers=None, iters=8, robust=True,
+            per_clip_scale=False))
 
         # Smoothing diagnostic: re-place the chained pooled root track through a temporal low-pass
         # (per-frame articulation held fixed) and re-score. W drops => high-freq drift a temporal
@@ -369,6 +403,17 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                 "seq": os.path.basename(seq_dir), "seg": seg, "wa_short": wa_short,
                 "pred_world": chain_pl[:tt].cpu(), "gt_world": gtw[:tt].cpu(),
                 "valid": val[:tt].cpu(),
+                # Raw per-clip state so LINKER/scale variants iterate OFFLINE (no GPU rerun):
+                # cam-frame joints + up-to-scale c2w re-derive clip worlds under ANY scale
+                # (`_world_from_cam`); depth32+cam_intr backproject MonST3R-style scene points.
+                "clip_pj_cam": [c[0].cpu() for c in clip_cams],
+                "clip_c2w": [c[1].cpu() for c in clip_cams],
+                "clip_scales": [float(c[2]) for c in clip_cams],
+                "clip_ratios": [c[3].cpu() for c in clip_cams],
+                "clip_depth32": clip_depths,
+                "cam_intr": (cam_intr.detach().float().cpu() if cam_intr is not None else None),
+                "s_pool": float(s_pool), "s_med": float(s_med),
+                "overlap": int(overlap), "stride": int(stride), "base": int(base),
             })
 
         # Camera-frame C-MPJPE (right hand, RH=1) — scale-free, chaining-free: scores the hand head
@@ -412,6 +457,10 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             row[k + "_global"] = gl_pc[k]
             row[k + "_smed"] = g_md[k]             # per-seq median scale
             row[k + "_spool"] = g_pl[k]            # per-seq pooled scale (principled, sequence-level)
+            row[k + "_link"] = gl_link[k]          # pooled scale, linker WITH camera centres
+            row[k + "_linkcf"] = gl_linkcf[k]      # pooled scale, linker cross-fade only (no centres, safe)
+            row[k + "_linkr"] = gl_linkr[k]        # RIGID linker (s=1 per clip) WITH centres
+            row[k + "_linkrcf"] = gl_linkrcf[k]    # RIGID linker, no centres
         row.update(sm_rows)
         row.update(scale_gt)
         anchor_str = ""
@@ -432,7 +481,8 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             sm_str = " | Wsm " + " ".join(
                 f"w{w}={sm_rows[f'W_MPJPE_sm{w}']:.1f}" for w in smooth_windows)
         print(f"[{os.path.basename(seq_dir)} seg{seg}] "
-              f"W perclip={g_pc['W_MPJPE']:.1f} smed={g_md['W_MPJPE']:.1f} spool={g_pl['W_MPJPE']:.1f} | "
+              f"W perclip={g_pc['W_MPJPE']:.1f} smed={g_md['W_MPJPE']:.1f} spool={g_pl['W_MPJPE']:.1f} "
+              f"link(cf/wc)={gl_linkcf['W_MPJPE']:.1f}/{gl_link['W_MPJPE']:.1f} | "
               f"WA(s/l)={g_pc['WA_MPJPE_short']:.1f}/{g_pc['WA_MPJPE_long']:.1f} | "
               f"C(rr/abs)={c_rr:.1f}/{c_ab:.1f} | s med/pool={s_med:.3f}/{s_pool:.3f} ±{s_std:.3f} "
               f"({g_pc['frames']}f){sm_str}{anchor_str}", flush=True)
@@ -594,7 +644,7 @@ def main():
         keys = ("W_MPJPE", "WA_MPJPE_short", "WA_MPJPE_long")
         agg = {}
         for k in keys:
-            for suf in ("", "_global", "_smed", "_spool"):
+            for suf in ("", "_global", "_smed", "_spool", "_link", "_linkcf", "_linkr", "_linkrcf"):
                 agg[k + suf] = _mean(k + suf)
         for k in ("C_MPJPE", "C_MPJPE_abs", "s_med", "s_pool", "s_clip_std"):
             agg[k] = _mean(k)
@@ -610,9 +660,15 @@ def main():
         with open(args.out, "w") as f:
             json.dump({"aggregate": agg, "per_segment": results}, f, indent=2)
         print(f"\nOURS W-MPJPE  per-clip={agg['W_MPJPE']:.1f}  per-seq-median={agg['W_MPJPE_smed']:.1f}  "
-              f"per-seq-pooled={agg['W_MPJPE_spool']:.1f}  (Hand3R 125.8)")
+              f"per-seq-pooled={agg['W_MPJPE_spool']:.1f}")
         print(f"OURS WA(short/long)  per-clip={agg['WA_MPJPE_short']:.1f}/{agg['WA_MPJPE_long']:.1f}  "
               f"per-seq-pooled={agg['WA_MPJPE_short_spool']:.1f}/{agg['WA_MPJPE_long_spool']:.1f}")
+        print(f"OURS CHUNK LINKER (pooled scale, W-MPJPE)  greedy={agg['W_MPJPE_spool']:.1f}  "
+              f"cross-fade-only={agg['W_MPJPE_linkcf']:.1f}  +camera-centres={agg['W_MPJPE_link']:.1f}\n"
+              f"  WA(short/long)  cf-only={agg['WA_MPJPE_short_linkcf']:.1f}/{agg['WA_MPJPE_long_linkcf']:.1f}  "
+              f"+centres={agg['WA_MPJPE_short_link']:.1f}/{agg['WA_MPJPE_long_link']:.1f}\n"
+              f"  -> cross-fade-only is the SAFE linker (never worse than greedy in tests); camera "
+              f"centres help ONLY if the predicted cam poses are reliable - compare, do not assume.")
         print(f"OURS C-MPJPE (cam)   root-rel={agg['C_MPJPE']:.1f}  abs={agg['C_MPJPE_abs']:.1f}  "
               f"| mean s med/pool={agg['s_med']:.3f}/{agg['s_pool']:.3f} (clip-std {agg['s_clip_std']:.3f})  "
               f"(n={agg['n_segments']} segs) -> {args.out}")
