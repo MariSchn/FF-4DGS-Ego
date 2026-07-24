@@ -46,7 +46,11 @@ def apply_root_anchor(module, pred_joints, gs_depth, gs_depth_conf, cam_intr,
         d_scene = ref_d_scene.to(wrist_z.device, wrist_z.dtype)   # [B,S,2] external metric depth at wrist
         # Fixed global bias correction for the reference (DA3 on HOI4D reads ~0.892x
         # true depth). Without this every variant pulled the hand ~70mm too close.
-        _rs = float(getattr(module, "ref_scale", 1.0))
+        # ANCHOR_REF_SCALE (env) overrides the module constant so the TRAIN-split
+        # refit value (scripts/fit_ref_scale.py, D2-4) can be applied without code
+        # or config edits; unset -> module.ref_scale -> 1.0 as before.
+        _rs = float(os.environ.get("ANCHOR_REF_SCALE",
+                                   getattr(module, "ref_scale", 1.0)))
         if _rs != 1.0:
             d_scene = d_scene * _rs
         conf = torch.ones_like(d_scene)

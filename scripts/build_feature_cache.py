@@ -51,6 +51,10 @@ def main() -> None:
                          "from a RANDOMLY initialized backbone (fixed seed 0). If these "
                          "tokens train a head as well as the pretrained ones, the "
                          "'reconstruction features encode metric depth' claim is dead.")
+    ap.add_argument("--save_model", default=None,
+                    help="save the constructed model's state_dict here (random-init arm: the "
+                         "eval points model.checkpoint at this file so the eval-time backbone "
+                         "is bit-identical to the cache-time backbone)")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
@@ -67,6 +71,9 @@ def main() -> None:
         sd = ckpt.get("state_dict", ckpt.get("reconstructor", ckpt))
         model.load_state_dict(sd, strict=False)
     model.to(device).eval()
+    if args.save_model:
+        torch.save(model.state_dict(), args.save_model)
+        print(f"MODEL_SAVED {args.save_model}", flush=True)
 
     from scripts.hand_vis_utils import MANOModel
     mano = MANOModel(cfg["visualization"]["mano_model_folder"])

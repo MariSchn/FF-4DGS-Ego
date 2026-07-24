@@ -42,6 +42,7 @@ def main() -> None:
     ap.add_argument("--data_root", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--clip_stride", type=int, default=16)
+    ap.add_argument("--batch_size", type=int, default=2)
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--max_seqs", type=int, default=None)
     ap.add_argument("--dino_model", default="dinov2_vitl14")
@@ -72,26 +73,56 @@ def main() -> None:
     os.makedirs(args.out, exist_ok=True)
     mean, std = IMAGENET_MEAN.to(device), IMAGENET_STD.to(device)
 
+    # Same corrupt-clip tolerance + batched DataLoader as build_feature_cache.py:
+    # decord can hard-fail on damaged mp4 bitstreams; retry once, then skip loudly.
+    from torch.utils.data import DataLoader, default_collate
+
+    class _SafeDS(torch.utils.data.Dataset):
+        def __init__(self, inner): self.inner = inner
+        def __len__(self): return len(self.inner)
+        def __getitem__(self, i):
+            err = None
+            for _ in range(2):
+                try:
+                    return self.inner[i]
+                except Exception as e:  # noqa: BLE001 — worker must never die
+                    err = f"{type(e).__name__}: {str(e)[:100]}"
+            print(f"SKIP_CLIP idx={i} {err}", flush=True)
+            return None
+
+    def _collate_skip_none(batch):
+        batch = [b for b in batch if b is not None]
+        return default_collate(batch) if batch else None
+
+    dl = DataLoader(_SafeDS(ds), batch_size=args.batch_size, num_workers=args.num_workers,
+                    shuffle=False, collate_fn=_collate_skip_none)
+
     n_saved, n_skipped = 0, 0
-    for i in range(len(ds)):
-        item = ds[i]
-        if item is None:
+    shape = (0, 0, 0)
+    for batch in dl:
+        if batch is None:
             continue
-        p = os.path.join(args.out, item["cache_key"] + ".pt")
-        if os.path.exists(p):
-            n_skipped += 1
+        keys = batch["cache_key"]                           # list[str]
+        paths = [os.path.join(args.out, k + ".pt") for k in keys]
+        if all(os.path.exists(p) for p in paths):
+            n_skipped += len(keys)
             continue
-        imgs = item["img"].to(device)                       # [S, 3, H, W] in [0,1]
+        imgs = batch["img"].to(device)                      # [B, S, 3, H, W] in [0,1]
+        B, S = imgs.shape[:2]
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            feats = model.forward_features((imgs - mean) / std)
-            tokens = feats["x_norm_patchtokens"]            # [S, P, C]
-        torch.save(tokens.to(torch.bfloat16).cpu().clone(), p)
-        n_saved += 1
-        if n_saved % 200 == 0:
-            print(f"  {n_saved} clips cached ({n_skipped} pre-existing)", flush=True)
-    s, p_, c = tokens.shape if n_saved else (0, 0, 0)
+            feats = model.forward_features(
+                ((imgs - mean.unsqueeze(0)) / std.unsqueeze(0)).flatten(0, 1))
+            tokens = feats["x_norm_patchtokens"]            # [B*S, P, C]
+        tokens = tokens.reshape(B, S, *tokens.shape[1:]).to(torch.bfloat16).cpu()
+        shape = tuple(tokens.shape[1:])
+        for b, p in enumerate(paths):
+            if not os.path.exists(p):
+                torch.save(tokens[b].clone(), p)
+                n_saved += 1
+        if (n_saved + n_skipped) % 200 < args.batch_size:
+            print(f"  cache progress: done={n_saved} skip={n_skipped}", flush=True)
     print(f"DINO_CACHE_DONE saved={n_saved} skipped={n_skipped} "
-          f"shape=[{s},{p_},{c}] model={args.dino_model} -> {args.out}", flush=True)
+          f"shape={list(shape)} model={args.dino_model} -> {args.out}", flush=True)
 
 
 if __name__ == "__main__":

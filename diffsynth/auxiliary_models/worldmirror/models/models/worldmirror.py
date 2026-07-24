@@ -230,14 +230,18 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
         # hand tracking head
         if self.enable_hand:
             if self.hand_head_type == "hamer":
+                # Backbone-swap ablation: hamer_head_kwargs may carry its own
+                # context_dim (e.g. 1024 for DINOv2-L tokens). Pop it from a copy
+                # so it doesn't collide with the explicit kwarg below.
+                _hh_kwargs = dict(self.hamer_head_kwargs)
                 self.hand_head = HamerManoHead(
-                    context_dim=2 * dim,
+                    context_dim=_hh_kwargs.pop("context_dim", 2 * dim),
                     use_crop=self.use_hand_crop,
                     crop_size=self.hand_crop_size,
                     patch_size=patch_size,
                     hires_hand=self.hires_hand,
                     hires_hand_kwargs=self.hires_hand_kwargs,
-                    **self.hamer_head_kwargs,
+                    **_hh_kwargs,
                 )
             elif self.hand_head_type == "dpt":
                 self.hand_head = DPTHead(

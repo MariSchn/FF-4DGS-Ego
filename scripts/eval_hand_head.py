@@ -184,7 +184,9 @@ def print_summary(label, metrics):
         print(f"  {label}: <no valid hands>")
         return
     print(f"  {label}: "
-          f"MPJPE={metrics['MPJPE']:.2f}mm  PA={metrics['PA_MPJPE']:.2f}mm  "
+          f"MPJPE={metrics['MPJPE']:.2f}mm(abs)  PA={metrics['PA_MPJPE']:.2f}mm  "
+          f"RR={metrics.get('RR_MPJPE', float('nan')):.2f}mm  "
+          f"WRIST={metrics.get('WRIST_mm', float('nan')):.2f}mm  "
           f"MPVPE={metrics['MPVPE']:.2f}mm  PA={metrics['PA_MPVPE']:.2f}mm  "
           f"AUC_J={metrics['AUC_J']:.3f}  AUC_V={metrics['AUC_V']:.3f}")
 
@@ -306,7 +308,8 @@ def main():
     print(f"[eval] Sweeping {len(ckpts)} checkpoints in {ckpt_dir}")
 
     fieldnames = ["ckpt", "step", "num_valid_hands",
-                  "MPJPE", "PA_MPJPE", "MPVPE", "PA_MPVPE", "AUC_J", "AUC_V"]
+                  "MPJPE", "PA_MPJPE", "RR_MPJPE", "WRIST_mm",
+                  "MPVPE", "PA_MPVPE", "AUC_J", "AUC_V"]
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -321,7 +324,8 @@ def main():
             row = {"ckpt": ckpt_path.name, "step": step,
                    "num_valid_hands": result["num_valid_hands"]}
             all_m = result["all"] or {}
-            for k in ("MPJPE", "PA_MPJPE", "MPVPE", "PA_MPVPE", "AUC_J", "AUC_V"):
+            for k in ("MPJPE", "PA_MPJPE", "RR_MPJPE", "WRIST_mm",
+                      "MPVPE", "PA_MPVPE", "AUC_J", "AUC_V"):
                 row[k] = f"{all_m[k]:.4f}" if all_m.get(k) is not None else ""
             writer.writerow(row)
             f.flush()

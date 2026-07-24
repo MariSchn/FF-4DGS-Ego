@@ -36,9 +36,14 @@ from scripts.h2o_dataset import H2ODepthDataset
 from scripts.train_hand_head import build_views, compute_joints_from_batch
 
 # H2O 21-joint order -> MANO 21-joint order (taeinkwon/h2o + ap229997/hands loader).
+# Output positions 0-15 are already the smplx-16 kinematic order (wrist, index x3,
+# middle x3, pinky x3, ring x3, thumb x3); positions 16-20 are the 5 fingertips
+# (thumb, index, middle, ring, pinky). H2O native layout is wrist, thumb x4,
+# index x4, middle x4, ring x4, pinky x4 (tips interleaved).
+# BUG FIX 2026-07-18: the old remap composed this with a selector written for the
+# H2O-native tips-interleaved layout, yielding scrambled 16-joint GT (e.g. thumb
+# slots held fingertips) — confirmed by anatomical bone lengths on converted H2O.
 H2O_TO_MANO = [0, 5, 6, 7, 9, 10, 11, 17, 18, 19, 13, 14, 15, 1, 2, 3, 4, 8, 12, 16, 20]
-# MANO 21 -> our 16 kinematic joints (drop the 5 fingertips 4,8,12,16,20).
-MANO21_TO_16 = [0, 1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15, 17, 18, 19]
 PACK_RES = 224
 H2O_FULL_W, H2O_FULL_H = 1280, 720
 
@@ -48,7 +53,7 @@ def h2o_gt_joints16(j128: torch.Tensor):
     left_valid, right_valid = j128[..., 0], j128[..., 64]
     left = j128[..., 1:64].reshape(*j128.shape[:-1], 21, 3)
     right = j128[..., 65:128].reshape(*j128.shape[:-1], 21, 3)
-    idx = [H2O_TO_MANO[k] for k in MANO21_TO_16]
+    idx = H2O_TO_MANO[:16]
     # H2O hand_pose joints are already in METRES (wrist ~0.5 m), NOT mm — verified
     # by debug_h2o_joints (project lands 21/21 on the hand). Do NOT divide by 1000.
     left16 = left[..., idx, :]
@@ -58,18 +63,17 @@ def h2o_gt_joints16(j128: torch.Tensor):
     return joints, valid
 
 
-# GT fingertip H2O-indices for the manopth-21 tip positions (4,8,12,16,20), i.e. the
-# 5 fingertips appended AFTER the 16 base joints. Order MUST match the pred tip order
-# (thumb,index,middle,ring,pinky from MANOModel.get_joints21_batched) — verified by
-# projecting both onto the RGB (--viz) before trusting the 21-joint number.
-GT_TIP_IDX = [H2O_TO_MANO[k] for k in (4, 8, 12, 16, 20)]   # -> [9, 18, 15, 4, 20]
+# GT fingertip H2O-indices, appended AFTER the 16 base joints. Order MUST match the
+# pred tip order (thumb,index,middle,ring,pinky from MANOModel.get_joints21_batched).
+# These are H2O_TO_MANO positions 16-20 = H2O native tip indices [4, 8, 12, 16, 20].
+GT_TIP_IDX = H2O_TO_MANO[16:]
 
 
 def h2o_gt_joints21(j128: torch.Tensor):
     """[...,128] H2O hand_pose -> (joints[...,2,21,3] m, valid[...,2]). 16 base + 5 tips."""
     left = j128[..., 1:64].reshape(*j128.shape[:-1], 21, 3)
     right = j128[..., 65:128].reshape(*j128.shape[:-1], 21, 3)
-    idx = [H2O_TO_MANO[k] for k in MANO21_TO_16] + GT_TIP_IDX     # 21 H2O indices
+    idx = H2O_TO_MANO[:16] + GT_TIP_IDX                           # 21 H2O indices
     joints = torch.stack([left[..., idx, :], right[..., idx, :]], dim=-3)
     valid = torch.stack([j128[..., 0], j128[..., 64]], dim=-1)
     return joints, valid
