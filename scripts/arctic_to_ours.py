@@ -199,7 +199,10 @@ def convert_seq(seq, d, mano, img_root, out_root, device, imgnames=None, max_fra
         jw16, jc16 = _to_smplx16(jw), _to_smplx16(jc)                        # [N,16,3]
         wld[:, hi] = jw16
         cam[:, hi] = jc16
-        valid[:, hi] = np.isfinite(jc16).all((1, 2))
+        # A frame is valid for this hand only if every joint is finite AND in front of the ego
+        # camera (z > 1cm). Behind-camera joints (z<=0) have no image evidence and blow up the 2D
+        # projection, so they must not be supervised or counted as visible.
+        valid[:, hi] = np.isfinite(jc16).all((1, 2)) & (jc16[:, :, 2] > 1e-2).all(1)
 
         # 2D cache: project the smplx-16 cam joints (single focal, preprocess_hoi4d form)
         u16, v16 = project_single_focal(cam[:, hi], f, cx, cy)
