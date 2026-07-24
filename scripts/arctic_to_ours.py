@@ -41,9 +41,22 @@ import cv2
 import numpy as np
 import torch
 
-from scripts.preprocessing.preprocess_hoi4d import (
-    _aa_to_R, _R_to_quat_wxyz, pose45_to_pca15,
-)
+
+def pose45_to_pca15(pose45: np.ndarray, mano_ns, is_right: bool) -> np.ndarray:
+    """Project a 45-dim full (no-PCA, flat-hand-mean) MANO pose onto our 15 PCA coeffs, using the
+    smplx layer's registered `hand_components`/`hand_mean` (singular; the plural names return None).
+    Lossy 45->15 projection; only fills gt64's supervision-unused pose15 slot. Self-contained copy of
+    scripts.preprocessing.preprocess_hoi4d.pose45_to_pca15 (kept here so the converter has no
+    cross-module dependency). Falls back to truncation if components are unavailable."""
+    layer = mano_ns.right if is_right else mano_ns.left
+    comps = getattr(layer, "hand_components", None)
+    mean = getattr(layer, "hand_mean", None)
+    if comps is None:
+        return np.asarray(pose45)[..., :15]
+    comps = comps.detach().cpu().numpy() if torch.is_tensor(comps) else np.asarray(comps)
+    mean = (mean.detach().cpu().numpy() if torch.is_tensor(mean)
+            else (np.zeros(45) if mean is None else np.asarray(mean)))
+    return (np.asarray(pose45) - mean) @ np.linalg.pinv(comps)[:, :15]
 
 # ARCTIC uses the original MANO 21-joint order; take the 16 smplx-kinematic joints (drop 5 tips),
 # same subset the rest of our pipeline uses (see scripts/eval_cmpjpe.py, run_wilor_h2o.py).
