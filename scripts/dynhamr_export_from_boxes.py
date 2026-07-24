@@ -49,6 +49,17 @@ def rotmat_to_aa(R: np.ndarray) -> np.ndarray:
     return aa.astype(np.float32)
 
 
+def _to_aa(x, njoints: int) -> np.ndarray:
+    """[njoints,3] axis-angle from EITHER axis-angle (size njoints*3) or rotmat (size njoints*9).
+    wilor_mini exposes global_orient/hand_pose as axis-angle; older HaMeR-style outputs are rotmats."""
+    a = np.asarray(x, np.float64).reshape(-1)
+    if a.size == njoints * 9:
+        return rotmat_to_aa(a.reshape(njoints, 3, 3)).astype(np.float64)
+    if a.size == njoints * 3:
+        return a.reshape(njoints, 3)
+    raise ValueError(f"unexpected pose size {a.size} for {njoints} joints (not aa or rotmat)")
+
+
 class WiLoRFull:
     """wilor-mini wrapper returning the full MANO params + weak-persp cam needed for Dyn-HaMR init."""
 
@@ -82,9 +93,9 @@ class WiLoRFull:
         return {
             "kp3d": np.asarray(wp["pred_keypoints_3d"])[0],   # [21,3] root-rel (m)
             "pred_cam": np.asarray(wp["pred_cam"])[0],        # [s,tx,ty]
-            "global_orient": np.asarray(mp["global_orient"]).reshape(-1, 3, 3),  # [1,3,3]
-            "hand_pose": np.asarray(mp["hand_pose"]).reshape(-1, 3, 3),          # [15,3,3]
-            "betas": betas,                                                      # [10]
+            "global_orient": _to_aa(mp["global_orient"], 1),  # [1,3] axis-angle
+            "hand_pose": _to_aa(mp["hand_pose"], 15),         # [15,3] axis-angle
+            "betas": betas,                                   # [10]
         }
 
 
@@ -145,9 +156,9 @@ def export_seq(seq_dir, seq, runner, box_dir, out_root, tid):
 
         # _mano.json (axis-angle MANO init + metric cam translation)
         mano_json = {
-            "betas": r["betas"][:10].astype(np.float64).tolist(),
-            "body_pose": rotmat_to_aa(r["hand_pose"]).astype(np.float64).tolist(),        # [15,3]
-            "global_orient": rotmat_to_aa(r["global_orient"])[0].astype(np.float64).tolist(),  # [3]
+            "betas": np.asarray(r["betas"])[:10].astype(np.float64).tolist(),
+            "body_pose": np.asarray(r["hand_pose"]).astype(np.float64).tolist(),          # [15,3] aa
+            "global_orient": np.asarray(r["global_orient"])[0].astype(np.float64).tolist(),  # [3] aa
             "cam_trans": cam_t.astype(np.float64).tolist(),
             "is_right": is_right,
         }
