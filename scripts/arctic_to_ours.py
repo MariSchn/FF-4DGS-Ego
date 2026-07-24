@@ -67,6 +67,14 @@ NUM_JOINTS = 16
 HAND_PARAM_DIM = 32          # per hand: [transl 3, quat_wxyz 4, pose15 (PCA) 15, betas 10]
 
 
+def _to_smplx16(j: np.ndarray) -> np.ndarray:
+    """Reduce a MANO joint array to our smplx-16 kinematic order [N,16,3]. smplx MANO's native
+    `.joints` output is ALREADY the 16 kinematic joints in smplx order (wrist, index x3, middle x3,
+    pinky x3, ring x3, thumb x3) - matches OP2SMPLX16's target - so it is used directly. A 21-joint
+    (OpenPose-with-tips) array is reduced via MANO21_TO_16 (drops the 5 fingertips)."""
+    return j[:, MANO21_TO_16] if j.shape[1] >= 21 else j[:, :NUM_JOINTS]
+
+
 def build_mano(mano_dir: str, device: str):
     """Two smplx MANO layers (left, right), full-pose (use_pca=False). flat_hand_mean=False matches
     ARCTIC's fit (validated by --validate); flip to True if the validation RMSE is large."""
@@ -186,11 +194,12 @@ def convert_seq(seq, d, mano, img_root, out_root, device, imgnames=None, max_fra
         trans, shape = p[f"trans_{hk}"][:N], p[f"shape_{hk}"][:N]
         side = "left" if hk == "l" else "right"
         is_right = hk == "r"
-        jw = fk_world_joints(mano[side], rot, pose, trans, shape, device)   # [N,21,3] world
-        jc = apply_se3(world2ego[:N], jw)                                    # [N,21,3] ego cam
-        wld[:, hi] = jw[:, MANO21_TO_16]
-        cam[:, hi] = jc[:, MANO21_TO_16]
-        valid[:, hi] = np.isfinite(jc[:, MANO21_TO_16]).all((1, 2))
+        jw = fk_world_joints(mano[side], rot, pose, trans, shape, device)   # [N,J,3] world
+        jc = apply_se3(world2ego[:N], jw)                                    # [N,J,3] ego cam
+        jw16, jc16 = _to_smplx16(jw), _to_smplx16(jc)                        # [N,16,3]
+        wld[:, hi] = jw16
+        cam[:, hi] = jc16
+        valid[:, hi] = np.isfinite(jc16).all((1, 2))
 
         # 2D cache: project the smplx-16 cam joints (single focal, preprocess_hoi4d form)
         u16, v16 = project_single_focal(cam[:, hi], f, cx, cy)
