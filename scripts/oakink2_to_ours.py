@@ -25,15 +25,20 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import pickle
+import types
 
 import cv2
 import numpy as np
 import torch
 
-from scripts.arctic_to_ours import (MANO21_TO_16, apply_se3, build_mano,
-                                    fk_world_joints, joints_to_bbox)
+from scripts.arctic_to_ours import (HAND_PARAM_DIM, NUM_HANDS, NUM_JOINTS,
+                                     apply_se3, build_mano,
+                                     camera_frame_wrist_params, fk_world_joints,
+                                     joints_to_bbox, pose45_to_pca15,
+                                     project_single_focal, _to_smplx16)
 
 EGO_SERIAL_DEFAULT = "104422070969"
 
@@ -81,34 +86,65 @@ def convert_seq(seq, anno, mano, image_root, out_root, device, ego_serial, max_f
         print(f"SEQ_SKIP {seq}: no ego extrinsics for serial {ego}", flush=True)
         return None
 
-    cam = np.full((N, 2, 16, 3), np.nan, np.float32)
-    wld = np.full((N, 2, 16, 3), np.nan, np.float32)
+    mano_ns = types.SimpleNamespace(right=mano["right"], left=mano["left"])
+    cam = np.full((N, 2, NUM_JOINTS, 3), np.nan, np.float32)
+    wld = np.full((N, 2, NUM_JOINTS, 3), np.nan, np.float32)
+    j2d = np.zeros((N, 2, NUM_JOINTS, 3), np.float32)                 # (u,v,conf) px
+    gt64 = np.zeros((N, 2 * HAND_PARAM_DIM), np.float32)              # camera-frame params
     valid = np.zeros((N, 2), bool)
     world2ego = np.tile(np.eye(4, dtype=np.float32), (N, 1, 1))
+    # ego intrinsics are needed for the 2D projection; resolve here (first available K)
+    K_ego = None
+    for fid in frames:
+        if fid in K_by:
+            K_ego = np.asarray(K_by[fid], np.float32); break
+    f_pre = float(K_ego[0, 0]) if K_ego is not None else 0.0
+    cx_pre = float(K_ego[0, 2]) if K_ego is not None else 0.0
+    cy_pre = float(K_ego[1, 2]) if K_ego is not None else 0.0
     rawm = anno["raw_mano"]
+    # fill world2ego for every frame first (used by camera_frame_wrist_params)
+    for t, fid in enumerate(frames):
+        e = E_by.get(fid)
+        if e is not None:
+            world2ego[t] = np.asarray(e, np.float32)
     for hi, hk in [(0, "lh"), (1, "rh")]:
-        # gather per-frame params for this hand
         pc, tsl, betas, ok = [], [], [], []
         for t, fid in enumerate(frames):
             fm = rawm.get(fid, {})
-            e = E_by.get(fid)
-            if e is not None:
-                world2ego[t] = np.asarray(e, np.float32)
-            if f"{hk}__pose_coeffs" in fm and e is not None:
+            if f"{hk}__pose_coeffs" in fm and E_by.get(fid) is not None:
                 pc.append(np.asarray(fm[f"{hk}__pose_coeffs"]).reshape(16, 4))
                 tsl.append(np.asarray(fm[f"{hk}__tsl"]).reshape(3))
                 betas.append(np.asarray(fm[f"{hk}__betas"]).reshape(10))
                 ok.append(t)
         if not ok:
             continue
+        is_right = hk == "rh"
         rot, pose, tr, sh = mano_params_from_quat(np.stack(pc), np.stack(tsl), np.stack(betas))
-        side = "left" if hk == "lh" else "right"
-        jw = fk_world_joints(mano[side], rot, pose, tr, sh, device)      # [n,21,3] world
+        side = "right" if is_right else "left"
+        jw = fk_world_joints(mano[side], rot, pose, tr, sh, device)      # [n,J,3] world
+        w2e_ok = world2ego[ok].astype(np.float64)                        # [n,4,4]
+        jc = apply_se3(w2e_ok.astype(np.float32), jw)                    # [n,J,3] ego cam
+        jw16, jc16 = _to_smplx16(jw), _to_smplx16(jc)                    # [n,16,3]
+        # camera-frame wrist params (same identity as ARCTIC): transl_cam = R_we@trans_w + t_we
+        transl_cam, quat_cam = camera_frame_wrist_params(
+            np.asarray(rot, np.float64), np.asarray(tr, np.float64), w2e_ok, mano_ns, is_right)
+        pose15 = pose45_to_pca15(np.asarray(pose, np.float64), mano_ns, is_right)  # [n,15]
+        off = hi * HAND_PARAM_DIM
         for k, t in enumerate(ok):
-            jc = apply_se3(world2ego[t:t + 1], jw[k:k + 1])[0]           # [21,3] ego cam
-            cam[t, hi] = jc[MANO21_TO_16]
-            wld[t, hi] = jw[k][MANO21_TO_16]
-            valid[t, hi] = np.isfinite(jc[MANO21_TO_16]).all()
+            fin = np.isfinite(jc16[k]).all()
+            infront = bool((jc16[k, :, 2] > 1e-2).all())
+            cam[t, hi] = jc16[k]
+            wld[t, hi] = jw16[k]
+            valid[t, hi] = fin and infront
+            if not (fin and infront):
+                continue
+            if K_ego is not None:
+                u, v = project_single_focal(jc16[k][None], f_pre, cx_pre, cy_pre)
+                j2d[t, hi, :, 0] = u[0]; j2d[t, hi, :, 1] = v[0]; j2d[t, hi, :, 2] = 1.0
+            gt64[t, off:off + 3] = transl_cam[k]
+            gt64[t, off + 3:off + 7] = quat_cam[k]
+            gt64[t, off + 7:off + 22] = pose15[k].astype(np.float32)
+            gt64[t, off + 22:off + 32] = sh[k, :10]
 
     # ego frames -> video
     seq_id = seq.replace("/", "_")
@@ -130,15 +166,11 @@ def convert_seq(seq, anno, mano, image_root, out_root, device, ego_serial, max_f
     if vw is not None:
         vw.release()
 
-    # intrinsics from ego K (first available frame)
-    Kego = None
-    for fid in frames:
-        if fid in K_by:
-            Kego = np.asarray(K_by[fid], np.float32); break
-    if Kego is None:
+    # intrinsics resolved earlier (K_ego / f_pre); require them
+    if K_ego is None:
         print(f"SEQ_SKIP {seq}: no ego intrinsics", flush=True)
         return None
-    f, cx, cy = float(Kego[0, 0]), float(Kego[0, 2]), float(Kego[1, 2])
+    f, cx, cy = f_pre, cx_pre, cy_pre
     if W is None:
         W, H = int(round(cx * 2)), int(round(cy * 2))
 
@@ -148,12 +180,32 @@ def convert_seq(seq, anno, mano, image_root, out_root, device, ego_serial, max_f
             if valid[t, hi]:
                 boxes[t, hi] = joints_to_bbox(cam[t, hi], f, cx, cy, W, H)
 
+    # jsonl (full contract): mirrors gt64; hand ids "0"=left, "1"=right (_hand_to_vec order)
+    jl = []
+    for t in range(N):
+        hp = {}
+        for hi in range(2):
+            if not valid[t, hi]:
+                continue
+            off = hi * HAND_PARAM_DIM
+            v = gt64[t, off:off + HAND_PARAM_DIM]
+            hp[str(hi)] = {"wrist_xform": {"t_xyz": [float(x) for x in v[:3]],
+                                           "q_wxyz": [float(x) for x in v[3:7]]},
+                           "pose": [float(x) for x in v[7:22]],
+                           "betas": [float(x) for x in v[22:32]]}
+        jl.append({"timestamp_ns": t, "hand_poses": hp})
+
     hd = os.path.join(out_seq, "hand_data")
-    torch.save(torch.tensor([f, W / 2.0, H / 2.0]), os.path.join(hd, "cam_intrinsics.pt"))
+    torch.save(torch.tensor([f, cx, cy]), os.path.join(hd, "cam_intrinsics.pt"))
     torch.save(torch.from_numpy(world2ego), os.path.join(hd, "cam_extrinsics_cache.pt"))
     torch.save(torch.from_numpy(cam), os.path.join(hd, "gt_joints_cache_cam_v2.pt"))
     torch.save(torch.from_numpy(wld), os.path.join(hd, "gt_joints_cache_world.pt"))
-    torch.save({"bboxes": torch.from_numpy(boxes), "valid": torch.from_numpy(valid)},
+    torch.save(torch.from_numpy(j2d), os.path.join(hd, "gt_joints_2d_cache.pt"))
+    with open(os.path.join(hd, "mano_hand_pose_trajectory.jsonl"), "w") as fjl:
+        for e in jl:
+            fjl.write(json.dumps(e) + "\n")
+    torch.save({"bboxes": torch.from_numpy(boxes), "valid": torch.from_numpy(valid),
+                "gt": torch.from_numpy(gt64)},
                os.path.join(hd, "hand_bboxes_v2_rf1.5_res224x224.pt"))
     return {"seq": seq_id, "N": N, "res": (W, H), "ego": ego, "valid_rate": float(valid.mean())}
 
