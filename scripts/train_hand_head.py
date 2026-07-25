@@ -72,6 +72,27 @@ HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
 NUM_HANDS = 2
 
 
+def mixed_collate(batch):
+    """Collate that tolerates heterogeneous OPTIONAL keys across mixed datasets. Different data
+    roots emit different optional per-clip keys (gt_joints_2d, cam_extrinsics, contact, da3_wrist)
+    depending on which caches they have; the default collate KeyErrors when a batch mixes clips
+    with and without a key. We batch only the keys present in EVERY sample of the batch (required
+    keys img/gt/gt_joints/... are always present; the dropped optional keys feed losses that are
+    gated off for the roots that lack them). Module-level so it pickles for num_workers>0."""
+    from torch.utils.data._utils.collate import default_collate
+    common = set(batch[0].keys())
+    for b in batch[1:]:
+        common &= set(b.keys())
+    dropped = set().union(*[set(b.keys()) for b in batch]) - common
+    if dropped:
+        seen = getattr(mixed_collate, "_warned", set())
+        new = dropped - seen
+        if new:
+            print(f"[mixed_collate] non-universal keys dropped this batch: {sorted(new)}")
+            mixed_collate._warned = seen | new
+    return default_collate([{k: b[k] for k in common} for b in batch])
+
+
 # ------------------------------------------------------------------
 # Bounding-box utilities
 # ------------------------------------------------------------------
@@ -1719,14 +1740,17 @@ def train():
         sampler = WeightedRandomSampler(train_set.sample_weights(),
                                         num_samples=len(train_set), replacement=True)
         train_loader = DataLoader(train_set, batch_size=batch_size, sampler=sampler,
-                                  num_workers=num_workers, pin_memory=True, drop_last=True)
+                                  num_workers=num_workers, pin_memory=True, drop_last=True,
+                                  collate_fn=mixed_collate)
     else:
         train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
-                                  num_workers=num_workers, pin_memory=True, drop_last=True)
+                                  num_workers=num_workers, pin_memory=True, drop_last=True,
+                                  collate_fn=mixed_collate)
 
     if val_set is not None and len(val_set.clips) > 0:
         val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False,
-                                num_workers=num_workers, pin_memory=True, drop_last=False)
+                                num_workers=num_workers, pin_memory=True, drop_last=False,
+                                collate_fn=mixed_collate)
         print(f"Train clips: {len(train_set)} | Val clips: {len(val_set)}")
     else:
         val_set = None
