@@ -46,6 +46,7 @@ HaMeR$_{\text{ft}}$ + SLAM$^{g}$ & offline + SLAM & 37.4 & 36.8 & 53.6 & 2.47$^{
 \multicolumn{6}{@{}l}{\textit{Weak-perspective (no metric depth) -- only WA-MPJPE is metric-meaningful, our detbox v3}} \\
 WiLoR + SLAM$^{a}$ & offline + SLAM & \na & 33.4 & \na & 2.47$^{f}$ \\
 HaPTIC + SLAM$^{c}$ & offline + SLAM & \na & 35.7 & \na & 2.47$^{f}$ \\
+Dyn-HaMR$^{h}$ & offline optim. & \na & 48.3 & \na & 2.47$^{f}$ \\
 \midrule
 \multicolumn{6}{@{}l}{\textit{Online / feedforward}} \\
 Hand3R (reported)$^{d}$ & online & 42.6 & 38.0 & 86.9 & \na \\
@@ -99,6 +100,15 @@ recipe (mt = metric-tuned translation head; ft = our stronger fine-tune), per-fr
 with the same DROID-SLAM trajectory. These show our recipe transfers to a HaMeR backbone (fine-tuned
 HaMeR$_{\text{ft}}$+SLAM reaches C-MPJPE 37.4, on par with our feedforward 36.2) - but they remain
 \emph{offline} (need whole-video SLAM), whereas ours is a single online pass. Composed SE(3) residual 0.003\,mm.
+$^{h}$ Dyn-HaMR input-matched: its per-frame hand estimator seeded from our detbox v3 (WiLoR init) and
+its DROID-SLAM stage replaced by our SLAM cameras, so the same boxes + trajectory feed it as every other
+row; PHALP tracking and DROID are bypassed. Dyn-HaMR is an \emph{optimization} method (per-sequence
+test-time fitting with a motion prior); on ego HOI4D it is unstable -- the optimizer drives many
+sequences to a degenerate world-scale / hand-shape (inflated MANO betas, occasional negative scale),
+so its \emph{absolute} C-MPJPE and global W-MPJPE blow up (972 / 139\,mm) and are omitted as
+unreliable; only the alignment-invariant WA-MPJPE (48.3) is meaningful. This is not Dyn-HaMR's native
+regime (it is built for its own PHALP + DROID pipeline). Current subset: 27 sequences (25 converged;
+extending to 157). Runs on the same offline SLAM trajectory (FPS 2.47$^{f}$).
 \end{minipage}
 \end{minipage}
 \end{document}
