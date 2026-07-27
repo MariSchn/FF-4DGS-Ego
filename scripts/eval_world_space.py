@@ -23,8 +23,10 @@ from scripts.world_space_metrics import (
     apply_similarity,
     c_mpjpe,
     chain_trajectories_by_overlap,
+    chain_trajectories_dense,
     chain_trajectories_global,
     chain_trajectories_linked,
+    gravity_align_c2w,
     reanchor_to_gt,
     replace_root_with_gt_motion,
     smooth_root_trajectory,
@@ -171,6 +173,55 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
     return pred_joints[0].float().cpu(), c2w.cpu(), s, ratios
 
 
+def _dense_scene_points(preds, cam_intr, pj_cam, s_clip, grid=24, hand_radius_m=0.15):
+    """G1 dense-link: unproject the clip's gs_depth into per-frame static-scene points (scene
+    units, camera frame), masking out hand pixels by 3D proximity to the predicted hand joints.
+
+    Inverts the EXACT projection ``project_joints_to_norm_pixels`` uses to sample this depth map
+    (hand_depth_sampling.py: col=f*x/z+cx, row=f*y/z+cy, u=(W-1)-row, v=col, normalized by
+    W=1408) so the unprojection is self-consistent with the scale/anchor pipeline. Hand masking
+    is done by 3D distance (scene points scaled to metric via the clip scale) rather than 2D
+    boxes - rotation-convention-free and it removes the held object's contact region too.
+    Returns ``(pts [S,P,3] scene-units cam-frame CPU, valid [S,P] bool CPU)`` or ``None``.
+    """
+    gs_depth = preds.get("gs_depth")
+    if gs_depth is None or cam_intr is None:
+        return None
+    W_NORM = 1408.0                                  # hand_depth_sampling.IMAGE_WIDTH
+    # gs_depth is [B,S,1,Hd,Wd] (channel-first) or [B,S,Hd,Wd,1] (channel-last), per
+    # hand_depth_sampling.py. Drop the batch, then the singleton channel from EITHER position ->
+    # [S,Hd,Wd]. (A `while d.dim()>3: d=d.squeeze(1)` spins forever on the channel-last layout,
+    # since squeeze(1) is a no-op when dim 1 is not size 1 - that was the clip-1 hang.)
+    d = gs_depth[0].float()                          # [S,1,Hd,Wd] or [S,Hd,Wd,1] or [S,Hd,Wd]
+    if d.dim() == 4 and d.shape[1] == 1:
+        d = d[:, 0]                                  # channel-first -> [S,Hd,Wd]
+    elif d.dim() == 4 and d.shape[-1] == 1:
+        d = d[..., 0]                                # channel-last  -> [S,Hd,Wd]
+    if d.dim() != 3:
+        raise ValueError(f"_dense_scene_points: expected gs_depth[0] -> [S,Hd,Wd], got {tuple(d.shape)}")
+    dg = torch.nn.functional.interpolate(
+        d.unsqueeze(1), size=(grid, grid), mode="nearest-exact").squeeze(1)   # [S,G,G]
+    S = dg.shape[0]
+    dev = dg.device
+    f, cx, cy = [float(x) for x in cam_intr.view(-1)[:3]]
+    iy, ix = torch.meshgrid(torch.arange(grid, device=dev), torch.arange(grid, device=dev),
+                            indexing="ij")
+    u01 = (ix.float() + 0.5) / grid                  # depth-map x axis = "u"
+    v01 = (iy.float() + 0.5) / grid                  # depth-map y axis = "v"
+    row = (W_NORM - 1.0) - u01 * W_NORM              # invert u=(W-1)-row
+    col = v01 * W_NORM                               # invert v=col
+    z = dg.reshape(S, -1)                            # [S,P] scene-unit depth
+    x = (col.reshape(1, -1) - cx) * z / f
+    y = (row.reshape(1, -1) - cy) * z / f
+    pts = torch.stack([x, y, z], dim=-1)             # [S,P,3] scene units, cam frame
+    valid = torch.isfinite(z) & (z > 0.05)
+    # 3D hand mask: scene point (scaled to metric) within hand_radius_m of ANY predicted joint.
+    j = torch.nan_to_num(pj_cam.reshape(S, -1, 3), nan=1e6).to(dev)          # [S,HJ,3] metric
+    dist = torch.cdist(pts * float(s_clip), j)                               # [S,P,HJ]
+    valid &= dist.min(dim=-1).values > hand_radius_m
+    return pts.cpu(), valid.cpu()
+
+
 def _intr_3x3(cam_intr, res, device):
     """Build a [3,3] pinhole K at the model's square `res` from cached (f, cx, cy). The cache is at
     the original pinhole resolution; principal point cx~W/2 lets us rescale to `res`."""
@@ -185,7 +236,9 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                   max_segs=0, feed_intrinsics=False, smooth_windows=None, dump_list=None,
                   refine_pose=False, refine_iters=40, refine_lr=3e-3, refine_frame_stride=1,
                   refine_sanity=False, robust_scale=False,
-                  da3_wrist_cache_dir=None, contact_cache_dir=None, contact_gate="off"):
+                  da3_wrist_cache_dir=None, contact_cache_dir=None, contact_gate="off",
+                  oracle_depth=False, dense_link=False,
+                  gravity_oracle=False, gravity_axis=(0.0, 1.0, 0.0), dump_cam_dir=None):
     """Eval all `segment_len` segments of one sequence; return list of per-segment metrics.
 
     ``feed_intrinsics``: condition the backbone on the *known* camera intrinsics (ray prior,
@@ -227,12 +280,26 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
     overlap = clip_len - stride
     clips_per_seg = segment_len // stride
     out = []
+    # --dump_cam_preds: accumulate our per-frame cam-space hands ([N,2,16,3]) to compose with a
+    # SLAM trajectory downstream ("ours + SLAM" lever 2). Same predict path as the world eval.
+    cam_buf = torch.full_like(gt_cam, float("nan")) if dump_cam_dir else None
+    val_buf = torch.zeros(gt_cam.shape[:2], dtype=torch.bool) if dump_cam_dir else None
+    # ...and the chained WORLD track for the same frames, so the dump satisfies the full
+    # eval_worldspace_baseline contract {cam_joints, world_joints, valid}. That lets our own
+    # (online, self-chained) row be scored by the SAME scorer as the +SLAM / HaWoR rows instead
+    # of by eval_world_space's own segmenter - the two enumerate segments differently (this file
+    # drops the partial tail, the baseline scorer keeps it), which would otherwise make the rows
+    # non-comparable. Frames outside a scored segment stay NaN and the scorer masks them out.
+    world_buf = torch.full_like(gt_cam, float("nan")) if dump_cam_dir else None
     n_seg = len(ds) // clips_per_seg
     if max_segs > 0:
         n_seg = min(n_seg, max_segs)
     for seg in range(n_seg):
         base = seg * clips_per_seg
         clip_cams = []   # [(pj_cam [S,H,J,3], c2w [S,4,4], s_perclip), ...]
+        clip_oracle = [] if oracle_depth else None  # per-clip GT-depth-anchored pj_cam (ceiling diag)
+        clip_dense = [] if dense_link else None     # per-clip (scene pts, valid) for the G1 dense chain
+        clip_grav = [] if gravity_oracle else None  # per-clip GT c2w for the gravity-view oracle
         clip_depths = [] if dump_list is not None else None  # per-clip 32x32 gs_depth (dump only)
         s_pairs = []     # (s_gt, s_hand) per clip: GT camera-trajectory scale vs our hand scale (b)
         anchor_log = []  # per-clip {gate_rate, dz_gated_m, dz_max_m} when the root anchor is active
@@ -284,12 +351,42 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                               ref_d_scene=_ref, contact_mask=_con, depth_out=clip_depths)
             clip_cams.append(cc)
 
+            if dump_cam_dir is not None:
+                pj = cc[0].detach().cpu().float()                      # [S,H,16,3] cam-frame joints
+                e = min(_cf + pj.shape[0], cam_buf.shape[0])
+                cam_buf[_cf:e] = pj[:e - _cf]
+                val_buf[_cf:e] = torch.isfinite(pj[:e - _cf]).all(dim=-1).all(dim=-1)
+
+            # G1 dense-link: unproject this clip's gs_depth into hand-masked static-scene points.
+            if dense_link:
+                clip_dense.append(_dense_scene_points(preds, cam_intr, cc[0], cc[2]))
+
+            # ORACLE DEPTH CEILING: replace each frame's predicted wrist DEPTH with the GT
+            # camera-frame wrist depth by scaling the whole hand along the camera ray (cam-frame
+            # rays pass through the origin, so a uniform scale by gt_z/pred_z moves the wrist to
+            # gt_z while leaving the 2D projection unchanged). This is the "perfect per-frame
+            # metric depth anchor" ceiling - what an ideal DA3/MonST3R depth model would buy -
+            # isolating the hand-depth term of W from camera-trajectory/scale drift. Where GT is
+            # missing or a depth is non-positive, keep the prediction (ratio 1).
+            if oracle_depth:
+                pjo = cc[0].clone()                               # [S,H,J,3] cam-frame (CPU)
+                gcl = gt_cam[_cf:_cf + clip_len]                  # [S,H,J,3] GT cam-frame
+                if gcl.shape[0] == pjo.shape[0]:
+                    pz = pjo[:, :, 0, 2]                          # [S,H] pred wrist z (MANO joint 0)
+                    gz = gcl[:, :, 0, 2]                          # [S,H] gt wrist z
+                    ok = (pz > 0.05) & torch.isfinite(gz) & (gz > 0.05)
+                    ratio = torch.where(ok, gz / pz.clamp(min=0.05), torch.ones_like(pz))
+                    pjo = pjo * ratio[:, :, None, None]
+                clip_oracle.append(pjo)
+
             # (b) GROUND-TRUTH SCALE check: the world placement scales the up-to-scale camera
             # translation by our hand-derived s. The *true* metric scale is the similarity that maps
             # the predicted (up-to-scale) camera centers onto the GT metric camera centers. Comparing
             # the two says whether our hand scale is right in absolute terms (ratio==1) or biased/noisy.
             if "cam_extrinsics" in batch:
                 c2w_gt = torch.inverse(batch["cam_extrinsics"].float())     # [S,4,4] metric cam->world
+                if gravity_oracle:
+                    clip_grav.append(c2w_gt)                                # aligned with clip_cams order
                 pc = cc[1][:, :3, 3]                                        # pred centers (up-to-scale)
                 gc = c2w_gt[:, :3, 3]                                       # gt centers (metric)
                 if pc.shape[0] >= 3 and float((pc - pc.mean(0)).norm(dim=-1).max()) > 1e-4:
@@ -351,6 +448,14 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         else:
             s_pool = float(all_ratios.median().clamp(0.1, 10.0)) if all_ratios.numel() else s_med
 
+        if not all_ratios.numel():
+            # No (z_hand / scene_depth) correspondences at all -> predict_clip fell back to s=1.0
+            # for every clip, so the up-to-scale camera translation is never converted to metric
+            # and every world/W metric is inflated. Almost always a config error (enable_gs=False
+            # => no gs_depth). Shout: this used to pass silently as a plausible-looking W.
+            print(f"  !! SCALE DEGENERATE (s=1.0, no gs_depth correspondences) - world/W metrics "
+                  f"are NOT metric. Set model.enable_gs=True in the eval config.", flush=True)
+
         worlds_pc = [_world_from_cam(pj, c2w, s) for (pj, c2w, s, _) in clip_cams]       # per-clip
         worlds_md = [_world_from_cam(pj, c2w, s_med) for (pj, c2w, _, _) in clip_cams]   # per-seq median
         worlds_pl = [_world_from_cam(pj, c2w, s_pool) for (pj, c2w, _, _) in clip_cams]  # per-seq pooled
@@ -359,6 +464,12 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         g_md = _greedy(worlds_md)
         chain_pl = chain_trajectories_by_overlap(worlds_pl, overlap=overlap)  # pooled greedy traj
         g_pl = _metrics(chain_pl)
+        if world_buf is not None:
+            # chain_pl is [t, 2*16, 3] in the segment's world frame; write it back at absolute
+            # frame indices so the dump lines up with cam_buf (both start at seg_start).
+            tt = min(chain_pl.shape[0], t_avail, world_buf.shape[0] - seg_start)
+            if tt > 0:
+                world_buf[seg_start:seg_start + tt] = chain_pl[:tt].reshape(tt, 2, 16, 3).cpu()
         # ICLR chunk linker on the pooled-scale worlds. The camera centre for clip k under the pooled
         # scale is c2w[k, :3, 3] * s_pool (exactly the translation _world_from_cam applies), so joints
         # and centres share the clip-local world frame. Reported as the "_link" suffix -> a direct
@@ -397,6 +508,62 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             replace_root_with_gt_motion(pc, gc, vc2), gc, vc2, wa_short)
         sm_rows["W_MPJPE_re16"] = w_mpjpe(reanchor_to_gt(pc, gc, vc2, 16), gc, vc2)
         sm_rows["W_MPJPE_re32"] = w_mpjpe(reanchor_to_gt(pc, gc, vc2, 32), gc, vc2)
+
+        # ORACLE DEPTH ceiling: lift the GT-wrist-depth-anchored per-clip hands under the SAME
+        # pooled scene scale + chaining as the real trajectory, and score. W_depthOracle << W_spool
+        # => per-frame hand absolute depth is the dominant W lever (a dense metric depth anchor
+        # like DA3 has real headroom); W_depthOracle ~= W_spool => the bottleneck is the camera
+        # trajectory / scene scale, not hand depth (depth anchoring won't move W).
+        if oracle_depth and clip_oracle:
+            worlds_or = [_world_from_cam(po, c2w, s_pool)
+                         for po, (_, c2w, _, _) in zip(clip_oracle, clip_cams)]
+            m_or = _metrics(chain_trajectories_by_overlap(worlds_or, overlap=overlap))
+            sm_rows["W_MPJPE_depthOracle"] = m_or["W_MPJPE"]
+            sm_rows["WA_MPJPE_short_depthOracle"] = m_or["WA_MPJPE_short"]
+
+        # GVHMR gravity-view ORACLE: snap predicted camera tilt/roll to true gravity (keep predicted
+        # yaw + translation) and re-chain -> gravOracle. fix_yaw=True replaces the full rotation with
+        # GT -> rotOracle (camera-rotation ceiling). If gravOracle collapses toward re16, the long-
+        # window W drift is tilt/roll (a gravity-view head would fix it); if only rotOracle collapses,
+        # the residual is yaw; if neither, it is translation/scale. Uses GT extrinsics for gravity only.
+        if gravity_oracle and clip_grav and len(clip_grav) == len(clip_cams):
+            grav = torch.tensor(gravity_axis, dtype=torch.float32)
+            worlds_gv = [_world_from_cam(pj, gravity_align_c2w(c2w, c2wg, grav, mode="tilt"), s_pool)
+                         for (pj, c2w, _, _), c2wg in zip(clip_cams, clip_grav)]
+            m_gv = _metrics(chain_trajectories_by_overlap(worlds_gv, overlap=overlap))
+            sm_rows["W_MPJPE_gravOracle"] = m_gv["W_MPJPE"]
+            worlds_ro = [_world_from_cam(pj, gravity_align_c2w(c2w, c2wg, grav, mode="rot"), s_pool)
+                         for (pj, c2w, _, _), c2wg in zip(clip_cams, clip_grav)]
+            m_ro = _metrics(chain_trajectories_by_overlap(worlds_ro, overlap=overlap))
+            sm_rows["W_MPJPE_rotOracle"] = m_ro["W_MPJPE"]
+            print(f"  [gravity seg{seg}] gravOracle={m_gv['W_MPJPE']:.1f} rotOracle={m_ro['W_MPJPE']:.1f}"
+                  f" (global {gl_pc['W_MPJPE']:.1f}, re16 {sm_rows.get('W_MPJPE_re16', float('nan')):.1f})",
+                  flush=True)
+
+        # G1 DENSE CHAIN (MonST3R gate): re-chain the SAME pooled-scale clip worlds, but solve
+        # every link from dense hand-masked static-scene correspondences (shared overlap frames,
+        # same pixel grid) instead of the hand-joint cluster. W_dchainr << W_spool => dense scene
+        # evidence fixes per-link rotation drift -> build the full windowed-graph optimization;
+        # ~= W_spool => our per-clip dense geometry is drift-inconsistent too (not the lever).
+        if dense_link and clip_dense and all(cd is not None for cd in clip_dense):
+            dense_pl, dense_val = [], []
+            for (dp, dv), (_, c2w, _, _) in zip(clip_dense, clip_cams):
+                dense_pl.append(_world_from_cam((dp * s_pool).unsqueeze(1), c2w, s_pool))
+                dense_val.append(dv)
+            tr_r, diag_r = chain_trajectories_dense(worlds_pl, dense_pl, dense_val, overlap,
+                                                    per_clip_scale=False, robust=True)
+            m_r = _metrics(tr_r)
+            tr_s, _ = chain_trajectories_dense(worlds_pl, dense_pl, dense_val, overlap,
+                                               per_clip_scale=True, robust=True)
+            m_s = _metrics(tr_s)
+            sm_rows["W_MPJPE_dchainr"] = m_r["W_MPJPE"]
+            sm_rows["W_MPJPE_dchain"] = m_s["W_MPJPE"]
+            _res = sorted(x for x in diag_r["resid_mm"] if x == x)
+            _nc = sorted(diag_r["n_corr"])
+            print(f"  [dense seg{seg}] W dchainr={m_r['W_MPJPE']:.1f} dchain={m_s['W_MPJPE']:.1f} "
+                  f"corr_med={_nc[len(_nc) // 2] if _nc else 0} "
+                  f"resid_med={(_res[len(_res) // 2] if _res else float('nan')):.0f}mm "
+                  f"fallback={diag_r['fallback']}", flush=True)
         if dump_list is not None:
             tt = min(chain_pl.shape[0], t_avail)
             dump_list.append({
@@ -486,6 +653,13 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
               f"WA(s/l)={g_pc['WA_MPJPE_short']:.1f}/{g_pc['WA_MPJPE_long']:.1f} | "
               f"C(rr/abs)={c_rr:.1f}/{c_ab:.1f} | s med/pool={s_med:.3f}/{s_pool:.3f} ±{s_std:.3f} "
               f"({g_pc['frames']}f){sm_str}{anchor_str}", flush=True)
+    if dump_cam_dir is not None:
+        os.makedirs(dump_cam_dir, exist_ok=True)
+        torch.save({"cam_joints": cam_buf, "world_joints": world_buf, "valid": val_buf},
+                   os.path.join(dump_cam_dir, f"{_sq}.pt"))
+        n_w = int(torch.isfinite(world_buf).all(-1).all(-1).sum())
+        print(f"[{_sq}] dumped cam preds {tuple(cam_buf.shape)} valid={int(val_buf.sum())} "
+              f"world_frames={n_w} -> {dump_cam_dir}", flush=True)
     return out
 
 
@@ -572,6 +746,20 @@ def main():
                     help="per-seq contact caches (<seq>_contact.pt) for --contact_gate oracle")
     ap.add_argument("--contact_gate", choices=["off", "oracle"], default="off",
                     help="oracle = gate the anchor by the cached contact mask (needs --contact_cache_dir)")
+    ap.add_argument("--oracle_depth", action="store_true",
+                    help="add the W_MPJPE_depthOracle ceiling: replace pred wrist depth with GT wrist "
+                         "depth (perfect metric depth anchor) to isolate the hand-depth term of W")
+    ap.add_argument("--dense_link", action="store_true",
+                    help="G1 MonST3R gate: chain clips via dense hand-masked static-scene "
+                         "correspondences (gs_depth unprojection) -> W_MPJPE_dchain/dchainr")
+    ap.add_argument("--gravity_oracle", action="store_true",
+                    help="GVHMR-style gravity-view oracle: correct predicted camera tilt/roll to true "
+                         "gravity (W_MPJPE_gravOracle) + full-rotation ceiling (W_MPJPE_rotOracle)")
+    ap.add_argument("--gravity_axis", default="0,1,0",
+                    help="world gravity direction, comma-separated (HOI4D world is Y-up -> 0,1,0)")
+    ap.add_argument("--dump_cam_preds", default="",
+                    help="if set, dump per-seq per-frame cam-space hands {cam_joints[N,2,16,3],valid} "
+                         "to this dir (for the 'ours + SLAM' world composition, lever 2)")
     ap.add_argument("--out", default="world_eval.json")
     args = ap.parse_args()
 
@@ -584,6 +772,15 @@ def main():
     from scripts.hand_vis_utils import MANOModel
     mano_model = MANOModel(cfg["visualization"]["mano_model_folder"])
     model = build_model(cfg, device)
+    if not args.refine_pose:
+        # This eval only consumes preds["gs_depth"] (from gs_head, produced BEFORE the splat
+        # render): it drives the per-clip metric scale, the dense-link correspondences and the
+        # depth anchor. Only --refine_pose needs the rendered splats. So skip the
+        # gsplat/torch_scatter rasterization, which hangs on nodes without a compiled fast
+        # rasterizer (the CPU fallback spins one core indefinitely).
+        # NOTE: keep enable_gs=True in the config - with GS off there is no gs_depth at all and
+        # the per-clip scale silently degrades to s=1.0, inflating every world/W metric.
+        model.gs_anchor_only = True
 
     def _has_caches(seq_dir):
         hd = os.path.join(seq_dir, "hand_data")
@@ -626,7 +823,11 @@ def main():
                                      refine_sanity=args.refine_sanity, robust_scale=args.robust_scale,
                                      da3_wrist_cache_dir=args.da3_wrist_cache_dir,
                                      contact_cache_dir=args.contact_cache_dir,
-                                     contact_gate=args.contact_gate)
+                                     contact_gate=args.contact_gate,
+                                     oracle_depth=args.oracle_depth, dense_link=args.dense_link,
+                                     gravity_oracle=args.gravity_oracle,
+                                     gravity_axis=tuple(float(x) for x in args.gravity_axis.split(",")),
+                                     dump_cam_dir=(args.dump_cam_preds or None))
         except Exception as e:
             print(f"[skip {os.path.basename(sq)}] {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
@@ -652,7 +853,9 @@ def main():
             for w in smooth_windows:
                 agg[f"W_MPJPE_sm{w}"] = _mean(f"W_MPJPE_sm{w}")
                 agg[f"WA_MPJPE_long_sm{w}"] = _mean(f"WA_MPJPE_long_sm{w}")
-        for k in ("W_MPJPE_velGT", "W_MPJPE_re16", "W_MPJPE_re32"):
+        for k in ("W_MPJPE_velGT", "W_MPJPE_re16", "W_MPJPE_re32",
+                  "W_MPJPE_depthOracle", "WA_MPJPE_short_depthOracle",
+                  "W_MPJPE_dchain", "W_MPJPE_dchainr"):
             agg[k] = _mean(k)
         for k in ("s_gt_med", "s_hand_med", "scale_ratio_med", "scale_ratio_std", "abs_scale_err_med"):
             agg[k] = _mean(k)
@@ -682,6 +885,20 @@ def main():
               f"reanchor32={agg['W_MPJPE_re32']:.1f}\n"
               f"  -> GT-velocity LOW => perfect relative motion collapses W, a trajectory head has "
               f"large headroom (BUILD); GT-velocity HIGH => motion is not the lever (don't).")
+        if agg.get("W_MPJPE_depthOracle") == agg.get("W_MPJPE_depthOracle"):  # not nan
+            print(f"OURS DEPTH-ANCHOR CEILING (pooled W {agg['W_MPJPE_spool']:.1f}):  "
+                  f"GT-wrist-depth W={agg['W_MPJPE_depthOracle']:.1f}  "
+                  f"WA_short={agg['WA_MPJPE_short_depthOracle']:.1f}\n"
+                  f"  -> W_depthOracle << W_spool => per-frame hand ABSOLUTE DEPTH is the dominant W "
+                  f"lever (dense metric depth / DA3 has real headroom); ~= W_spool => camera "
+                  f"trajectory / scene scale is the bottleneck, not hand depth.")
+        if agg.get("W_MPJPE_dchainr") == agg.get("W_MPJPE_dchainr"):  # not nan
+            print(f"OURS DENSE-CHAIN GATE (pooled W {agg['W_MPJPE_spool']:.1f}):  "
+                  f"rigid dense-link W={agg['W_MPJPE_dchainr']:.1f}  "
+                  f"sim dense-link W={agg['W_MPJPE_dchain']:.1f}\n"
+                  f"  -> dchainr << W_spool => dense static-scene seams fix per-link rotation drift "
+                  f"(BUILD the MonST3R-style windowed-graph optimization); ~= W_spool => the "
+                  f"per-clip dense geometry is drift-inconsistent too (test-time alignment dead).")
         if agg.get("s_gt_med") == agg.get("s_gt_med"):  # not nan
             print(f"OURS SCALE vs GT (b) [true scale = sim(pred cam centers -> GT metric centers)]:  "
                   f"s_hand={agg['s_hand_med']:.3f}  s_gt={agg['s_gt_med']:.3f}  "

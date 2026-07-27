@@ -60,13 +60,20 @@ def load_gt(seq_dir: str):
     return gt_world, gt_cam, gt_valid
 
 
-def eval_sequence(seq_dir: str, pred_path: str, segment_len: int, wa_short: int):
+def eval_sequence(seq_dir: str, pred_path: str, segment_len: int, wa_short: int,
+                  drop_partial_tail: bool = False):
     """Score one sequence; return (per-segment metric dicts, per-sequence C metrics).
 
     C-MPJPE is computed once over the WHOLE sequence so aggregation is per-sequence,
     matching eval_hand_cam_anchor.py — segments exist only for the world-gauge metrics,
     which need windowed alignment. Averaging C over segments instead would weight long
-    sequences by their segment count and make the table incomparable to ours."""
+    sequences by their segment count and make the table incomparable to ours.
+
+    drop_partial_tail keeps only whole segment_len windows. eval_world_space (our own online
+    row) enumerates floor(n_clips / clips_per_seg) segments and never predicts the ragged tail,
+    while this scorer would otherwise score a final partial window for the +SLAM rows. Setting
+    the flag on EVERY row makes the segment sets identical, so a table comparison differs only
+    in the predictor, not in how many windows each row was scored on."""
     gt = load_gt(seq_dir)
     if gt is None:
         return [], None
@@ -77,6 +84,10 @@ def eval_sequence(seq_dir: str, pred_path: str, segment_len: int, wa_short: int)
     pvalid = pred["valid"].bool()              # [N,2]
 
     n = min(pcam.shape[0], gt_world.shape[0])
+    if drop_partial_tail:
+        n = (n // segment_len) * segment_len
+        if n == 0:
+            return [], None
     # (frame, hand) usable only where GT is valid AND the baseline predicted a finite joint set.
     fin_c = torch.isfinite(pcam[:n]).all(-1).all(-1)      # [n,2]
     fin_w = torch.isfinite(pworld[:n]).all(-1).all(-1)    # [n,2]
@@ -157,6 +168,9 @@ def main():
     ap.add_argument("--wa_short", type=int, default=16)
     ap.add_argument("--max_seqs", type=int, default=0)
     ap.add_argument("--out", default="baseline_world_eval.json")
+    ap.add_argument("--drop_partial_tail", action="store_true",
+                    help="score only whole segment_len windows, so this row's segment set matches "
+                         "eval_world_space's (which never predicts the ragged tail)")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
     if args.selftest:
@@ -175,7 +189,8 @@ def main():
         if not os.path.exists(pp):
             continue
         rows, seq_c = eval_sequence(os.path.join(args.data_root, sq), pp,
-                                    args.segment_len, args.wa_short)
+                                    args.segment_len, args.wa_short,
+                                    drop_partial_tail=args.drop_partial_tail)
         results += rows
         if seq_c is not None:
             seq_c_rows.append(seq_c)

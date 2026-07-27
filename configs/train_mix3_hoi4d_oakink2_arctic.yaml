@@ -1,0 +1,89 @@
+# Mixed 3-dataset training under the Cyrus protocol: the HARDER data goes in TRAIN.
+#   train = HOI4D (367 seq) + OakInk2 (109 seq) + ARCTIC (267 seq)
+#   test  = H2O (177 seq), fully held out - never appears in data_roots below.
+# Supersedes train_mix3_hoi4d_h2o_arctic.yaml (which had the split the other way round).
+# clip_stride 16 MUST match the feature-cache build (cache keys are <seq>_<frame_offset>).
+data:
+  data_roots:
+    - root: "/cluster/scratch/dmonopoli/hoi4d_train"
+      name: "hoi4d"
+      weight: 1.0
+      feature_cache_dir: "/cluster/scratch/dmonopoli/featcache/hoi4d"
+    - root: "/cluster/scratch/dmonopoli/oakink2_ours"
+      name: "oakink2"
+      weight: 1.0
+      feature_cache_dir: "/cluster/scratch/dmonopoli/featcache/oakink2"
+    - root: "/cluster/scratch/dmonopoli/arctic_ours"
+      name: "arctic"
+      weight: 1.0
+      feature_cache_dir: "/cluster/scratch/dmonopoli/featcache/arctic"
+  # Equal per-root sampling mass -> balances the 367/109/267 seq imbalance via WeightedRandomSampler.
+  num_frames: 16
+  resolution: [224, 224]
+  clip_stride: 16
+  val_split: 0.02
+  num_workers: 4
+
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  freeze_backbone: true
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: false
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: false
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+
+loss_weights:
+  kp3d:          0.05
+  kp2d:          0.05
+  global_orient: 0.32
+  hand_pose:     0.32
+  betas:         0.32
+  transl:        3.2
+  gs_l1:         0.0
+  gs_lpips:      0.0
+
+training:
+  lr: 1e-4
+  min_lr: 1e-7
+  epochs: 10
+  batch_size: 32
+  grad_accum_steps: 1
+  log_every: 100
+  val_every: 3000
+  save_every: 2000
+  seed: 42
+  output_dir: "/cluster/scratch/dmonopoli/checkpoints/mix3_hoi4d_oakink2_arctic"
+
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 0
+
+hand_crop:
+  rescale_factor: 1.5
+
+debug:
+  enabled: false
+  max_sequences: 5
+  single_frame: false
+
+wandb:
+  enabled: true
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "mix3 HOI4D+OakInk2+ARCTIC (H2O held out)"
+  tags: ["mixed", "3dataset", "cyrus-protocol"]
+  notes: "Cyrus protocol: harder data in train (OakInk2 in), H2O held out as the test set."
