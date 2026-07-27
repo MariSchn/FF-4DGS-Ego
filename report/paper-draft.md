@@ -1,236 +1,246 @@
-# Metric Hands, ~~Metric Scene~~: Feedforward Egocentric Gaussian Reconstruction Anchored to the Hand
+# Absolute Egocentric Hand Pose from Frozen Feedforward Reconstruction Features
 
-> **⚠️ MAJOR REFRAME (2026-06-17) — read `report/overnight-findings.md` first.**
-> The **"metric scene"** half of this draft is **FALSIFIED**. The non-circular B2 experiment (GT object
-> depth, hand region excluded) shows the hand anchor makes object-region depth **WORSE** (a01 134.7cm vs
-> baseline 61.9cm), and the earlier "scene becomes metric" signal was a hand-region **circular artifact**
-> (non-circular scale CV ~13–28% for both). Root cause is fundamental: the frozen monocular backbone is
-> ~62cm-inaccurate on objects, so no anchor weight can make the scene metric.
-> **Surviving contribution = metric HAND PLACEMENT** (−35% MPJPE, 4.5cm hand depth) + recoverable global
-> scale. The scene render IS preserved at low anchor weight (a01 32.81 vs baseline 32.55 dB). Below, all
-> "metric scene"/object-metric claims must be cut; keep them only as a reported negative/limitation.
-> Sections §1–§5 still need rewriting around hand placement; the money table (§5.1) is updated.
-
-**Working draft — reframed 2026-06-17.** Target: revised down toward **workshop / arXiv** unless the external
-placement comparison (HaWoR/Hand3R) is clearly SOTA-competitive. Citations: §References (`novelty-assessment.md`).
+**Working draft, rewritten 2026-07 around the current thesis.** The previous draft
+("Metric Hands, Metric Scene") argued a scene-metric claim that was experimentally
+falsified; see the thesis-history note at the bottom. Target: CVPR ~Nov 2026.
+Numbers in [brackets] are pending; everything else matches the canonical HOI4D results.
+Citations: §References (`novelty-assessment.md`, `related-work-positioning.md`).
 
 ---
 
 ## Abstract
 
-Monocular feedforward 3D Gaussian Splatting (3DGS) reconstructs a scene in a single pass, but only **up to an
-unknown scale** — the depth is geometrically consistent yet not metric. In egocentric hand–object video, however,
-a *metric* signal is already present in every frame: the user's hand, whose absolute size and articulation are
-recovered reliably by parametric (MANO) hand estimators. We exploit this and propose a feedforward method that makes
-both the hand **placement** and the surrounding **scene** metric in one pass, by anchoring the up-to-scale Gaussian
-scene to the in-scene metric hand — with **no metric-depth foundation model and no multi-view**. Concretely, a frozen
-feedforward GS backbone predicts up-to-scale Gaussians; a hand head predicts metric MANO joints; and a Hand-Depth
-Geometric Loss Anchor (HDGLA) pulls the predicted scene depth toward the metric hand depth at the projected joints,
-propagating metric scale from the hand into the scene through a trainable hand-to-scene injection. On HOT3D (Aria),
-our coupling improves absolute hand placement by **[−35%] (52.9 vs 81.4 mm MPJPE)** over a strong same-data baseline
-while preserving articulation (**PA-MPJPE ≈ [7.9] mm**), and — measured against ground-truth object geometry in
-**non-hand** regions — reduces scene-depth error from **[≈25 cm to ≈10 cm]** and scale variability (CV) from
-**[25.5% to 5.9%]**. A generic metric-depth foundation model (UniDepth) is **[>2×]** less accurate at the hand than
-our anchor, showing the hand is a cheaper and more accurate metric source in this setting. The contribution is the
-**direction** — a trusted-metric hand rescaling an up-to-scale feedforward GS scene — which is open relative to
-concurrent work that anchors the hand *into* a metric-scene foundation model.
+Estimating where a hand is in 3D, in metric camera coordinates, from a single egocentric
+RGB stream is the part of hand pose estimation that crop-based methods structurally get
+wrong: weak-perspective regressors recover articulation well but leave the absolute
+translation under-constrained, and world-space methods buy absolute scale with SLAM plus a
+metric-depth foundation model. [REFRAME IN PROGRESS, 2026-07-15: the original claim that
+a frozen scene-reconstruction backbone specially encodes absolute hand depth is FALSIFIED
+by our own backbone-swap ablation (frozen DINOv2 21.9mm beats recon 23.6mm; random-init
+27.7mm). The paper's contribution is the RECIPE and its controlled analysis, not the
+backbone.] We show that a lightweight MANO hand head trained on frozen generic features,
+with an absolute-3D keypoint loss (kp3d_abs) and hand-box crop geometry, yields
+camera-frame absolute hand pose with no SLAM, no depth foundation model, and no scene
+supervision. On a 157-sequence HOI4D test split with dense GT depth, the head reaches
+**23.6mm absolute camera-frame MPJPE** with GT-derived boxes (leakage-audited clean split
+as headline), versus **83.4mm (WiLoR)** and **88.0mm (HaMeR)** run end-to-end in their
+fully native regime (own detector, full-res frames, true-focal conversion) on the same
+split. Hand3R reports ~42.6mm on its own, unpublished split; the comparison is cross-split
+and cross-protocol and we do not claim to beat it. We further show the result degrades
+gracefully under bounding-box noise (31.8mm under jitter, recovered to 27.3mm by
+jitter-augmented training) and report an end-to-end detector-box protocol [detbox v2,
+eval in flight; detector boxes built, recall 0.829].
 
 ---
 
 ## 1. Introduction
 
-Feedforward 3DGS backbones (VGGT/DUSt3R-MASt3R lineage) have made single-pass 3D reconstruction from a handful of
-images practical, but monocular feedforward reconstruction is fundamentally **scale-ambiguous**: the predicted
-Gaussians are correct up to a global similarity, so distances are not in meters. Recovering metric scale usually
-requires one of: a metric-depth foundation model, a calibrated multi-view/stereo baseline, IMU/SLAM, or a known-size
-object placed in the scene. Each adds a dependency or an assumption that does not hold for casual monocular
-egocentric capture.
+Egocentric hand-object interaction video needs the hand in *metric camera space*: contact
+reasoning, manipulation learning, and AR overlays all break if the hand floats at the wrong
+depth. Yet the dominant estimators are crop-based weak-perspective regressors (HaMeR,
+WiLoR): excellent articulation (PA-MPJPE of a few mm) but absolute translation recovered
+from a crop-scale heuristic, which fails badly in the egocentric near field. The standard
+escape is a pipeline: SLAM for camera trajectory plus a metric-depth foundation model for
+scale (HaWoR, WHOLE, EgoGrasp), or a metric scene foundation model that the hand is anchored
+into (Hand3R).
 
-We observe that egocentric hand–object interaction video carries its own metric ruler: **the hand**. Parametric hand
-estimators recover metric MANO meshes whose absolute scale and articulation are reliable (low PA-MPJPE), even when
-the absolute *placement* (translation/depth) is uncertain. If the up-to-scale scene is forced to agree with the
-metric hand where they overlap, the hand's known scale propagates into the scene — making the whole reconstruction
-metric without any external metric prior.
+We take a third route. We ask what actually delivers absolute egocentric hand depth in a
+single feedforward model, and answer with controlled ablations: a HaMeR-style MANO head on
+FROZEN features (any strong generic backbone suffices; reconstruction pretraining is not
+required), trained with an absolute-3D keypoint loss and hand-box crop geometry, recovers
+camera-frame hand pose at 21.9-23.6mm on HOI4D. Run end-to-end in their native regime, the
+crop-based baselines sit at 83-88mm absolute on the same split.
 
-This direction — **hand-anchors-scene** — is the opposite of the most closely related concurrent work (Hand3R
-[hand3r]), which anchors the hand *into* a scene whose scale comes from a foundation model, and is distinct from
-egocentric world-frame hand methods (HaWoR [hawor]) that mask the hand out and reconstruct no scene. To our
-knowledge, a trusted-metric in-scene hand rescaling an up-to-scale **feedforward GS** scene in egocentric video is
-open (§2, [novelty]).
-
-**Contributions.**
-1. A feedforward, single-pass method that recovers a **metric-scale** Gaussian scene from monocular egocentric RGB by
-   anchoring scale to the in-scene metric hand — no metric-depth FM, no multi-view.
-2. The Hand-Depth Geometric Loss Anchor (HDGLA) and a trainable hand-to-scene injection that propagate metric scale
-   from the hand into the scene, with a `scene_follows_hand` gradient direction we justify and ablate.
-3. A **non-circular** evaluation of scene-metricity using ground-truth object geometry in non-hand regions, plus a
-   metric-depth-FM baseline and a causal ablation — moving beyond hand-only MPJPE.
-4. State-of-the-art-competitive absolute hand placement on HOT3D and a metric scene at no cost to articulation or
-   rendering quality.
+**Contributions.** [REFRAMED 2026-07-15 after the backbone-swap null; final wording
+pending the detbox v2 number and discussion with supervision.]
+1. A controlled decomposition of absolute egocentric hand depth: absolute-3D keypoint
+   supervision is causally necessary (zeroing it: 725mm), the backbone is NOT the source
+   of metric depth (frozen DINOv2 21.9 beats recon 23.6; random-init 27.7), and box crop
+   geometry carries a large share of the signal (motivating the honest detector-box
+   protocol).
+2. A simple single-model recipe: frozen generic backbone + MANO head + kp3d_abs
+   supervision, no SLAM, no depth-FM, no scene supervision, evaluated end-to-end with
+   detector boxes [detbox v2].
+3. An evaluation on dense-GT-depth egocentric data (HOI4D; H2O [in progress]) with
+   native-regime end-to-end baselines, box-convention ablations both ways, bbox-robustness
+   ablations, and a leakage-audited split.
 
 ---
 
 ## 2. Related Work
 
-**Feedforward / generalizable 3DGS.** DUSt3R/MASt3R, VGGT, NoPoSplat, AnySplat and Splat-SAP predict geometry or
-Gaussians in a single pass [anysplat, splatsap]. They obtain scale from intrinsics, a stereo baseline, or post-hoc
-alignment — **never from an in-scene metric anchor**. Our backbone is in this lineage (NeoVerse/WorldMirror) and is
-frozen; we add the metric coupling around it.
+**Feedforward reconstruction backbones.** DUSt3R/MASt3R, VGGT, CUT3R, WorldMirror, NeoVerse
+regress geometry (pointmaps, depth, cameras, Gaussians) in a single pass. We use a frozen
+NeoVerse-lineage backbone purely as a feature extractor; we do not train, evaluate, or claim
+its scene output.
 
-**Metric scale for monocular reconstruction.** Metric-depth foundation models (UniDepth [unidepth], Metric3D)
-regress absolute depth directly; object-supplemented bundle adjustment [frost] anchors SLAM scale to a known object
-size. These are either an extra heavy model or a classical, non-feedforward, non-GS pipeline. We show (§5, E1) a
-foundation model is less accurate at the hand than our anchor in this setting.
+**Crop-based hand pose.** HaMeR-style transformers and WiLoR recover metric MANO articulation
+from crops but leave absolute translation weak-perspective-constrained. Run end-to-end in
+their fully native regime on our HOI4D split (own detector, full-res frames, true-focal
+conversion), their absolute camera-frame error is 88.0 and 83.4mm respectively, the failure
+mode we target. (Their published demo conversion uses a dummy focal length and is non-metric
+by construction, ~24.5m; forcing them into our 224px crop regime inflates error to
+170-240mm, which we report only as a box-convention ablation, not as the comparison.)
 
-**Hand pose and hand-aware reconstruction.** HaMeR-style transformers regress metric MANO from RGB. MCC-HO [mccho]
-uses the hand to disambiguate a **held object** (object-only, no scene, hand-relative). HaWoR [hawor] recovers
-world-frame hand motion using DROID-SLAM + Metric3D on the **background** — the inverse of ours: it masks the hand
-out and reconstructs no scene. Interaction-aware 4D-GS methods [iags] couple hands and scene but are per-scene
-optimization with calibrated multi-view, not feedforward and not metric-from-monocular.
+**World-space ego hands.** HaWoR (DROID-SLAM + Metric3D on the background, hand masked out),
+WHOLE, EgoGrasp assemble absolute scale from external SLAM and depth-FMs. Multi-stage, with
+heavy dependencies; we use a single frozen backbone.
 
-**The closest neighbor — Hand3R [hand3r]** (concurrent, 2026) jointly predicts a hand and a dense metric-scale scene
-in a single feedforward pass on CUT3R point maps. We differ on two axes that preserve our contribution: (i)
-**representation** — 3D Gaussians vs point maps; and, more importantly, (ii) **coupling direction** — Hand3R anchors
-the hand *into* a metric scene whose scale is supplied by the scene model, whereas we let the trusted-metric hand
-**rescale** the up-to-scale scene. Hand3R also evaluates on DexYCB/HOI4D and does not report scene-metric accuracy;
-we evaluate scene-metricity directly on HOT3D/Aria. We treat Hand3R as concurrent and cite-and-contrast.
-
-The area (egocentric hand+scene metric reconstruction) is crowding rapidly in 2025–2026 [novelty]; we foreground the
-**direction** as the durable differentiator and re-verify novelty immediately before submission.
+**The closest neighbor: Hand3R** (concurrent, 2026) jointly predicts a hand and a dense
+metric scene in one feedforward pass on CUT3R, reporting ~42.6mm absolute C-MPJPE on HOI4D.
+It gets absolute scale from a metric scene foundation model; we show a hand head alone,
+without any metric scene output, is sufficient. We do NOT claim to beat Hand3R: their
+split is unpublished, the box conventions differ, and the joint sets may differ (theirs
+possibly 21-joint with fingertips vs our smplx-16), so the numbers are in the same
+neighborhood but not comparable [footnote in table; a same-protocol run is impossible
+until their split/code is released].
+HaPTIC is the strongest video baseline we run: root-relative C_rr 25.7 on the native-HD
+rerun (28.7 at 224px) / WA 35.3; its absolute number awaits the true-focal conversion
+pass [in flight].
 
 ---
 
 ## 3. Method
 
 ### 3.1 Overview
-Given a short monocular egocentric clip, a frozen feedforward GS backbone $f_\theta$ predicts up-to-scale Gaussians
-and a per-pixel scene depth $D_\text{gs}$. A hand head $h_\phi$ predicts metric MANO parameters for both hands, from
-which we obtain camera-frame metric joints $J$. A trainable **hand-to-scene injection** conditions the Gaussian
-prediction on the hand, and the **HDGLA** loss ties $D_\text{gs}$ to the metric hand depth at the projected joints.
-Only the hand head and the injection are trained; the backbone stays frozen, so we never trade away the backbone's
-geometry — we only rescale and place it.
+Given a monocular egocentric clip, a frozen feedforward reconstruction backbone produces
+per-frame features. A trained hand head consumes hand-region crops of these features plus
+global context and regresses MANO parameters and an absolute root translation; a
+differentiable MANO layer yields camera-frame metric joints.
 
-### 3.2 Hand head
-A HaMeR-style transformer head predicts the 64-D two-hand MANO parameter vector; a differentiable MANO layer maps it
-to camera-frame joints $J \in \mathbb{R}^{S\times2\times16\times3}$. The head is supervised by standard 2D/3D
-keypoint, pose, shape and translation losses, plus an **absolute-3D placement** term ($\text{kp3d\_abs}$) that
-supervises the global translation that monocular hand heads otherwise leave under-constrained.
+### 3.2 Hand head and supervision
+A HaMeR-style transformer head predicts the MANO parameter vector and translation. Beyond
+the standard 2D/3D keypoint, pose, and shape losses, the head is supervised with an
+**absolute-3D keypoint loss (kp3d_abs)** on unaligned camera-frame joints. This is the term
+that forces the head to read absolute depth out of the backbone features instead of leaving
+translation to a weak-perspective heuristic; removing it is the primary ablation [control
+run pending].
 
-### 3.3 Hand-Depth Geometric Loss Anchor (HDGLA)
-Project the detached metric joints to normalized pixel coordinates and bilinearly sample the scene depth there,
-$\tilde d = \text{sample}(D_\text{gs}, \pi(J))$. HDGLA is a smooth-$L_1$ between the sampled scene depth and the
-metric hand depth $z(J)$:
-$$\mathcal{L}_\text{anchor} = \text{Huber}_\beta\big(\tilde d,\; z(J)\big)$$
-over valid (visible, in-frame, positive-depth) joints. The **direction** is `scene_follows_hand`: the 2D sampling
-location is always the detached hand projection (a stable grid), and the gradient flows **only into $D_\text{gs}$** —
-the trusted metric hand is never perturbed by this term. We compared the three directions and found
-`scene_follows_hand` clearly best (**[89.4 vs 172 mm]** vs `hand_follows_scene`, which diverges; §5), consistent with
-the premise that the hand's metric scale is more reliable than monocular scene depth. A warmup defers the anchor
-until the hand head has stabilized.
-
-### 3.4 Hand-to-scene injection and metric scale head
-Because the backbone is frozen, HDGLA's gradient is absorbed by a small **trainable injection** that conditions the
-Gaussian/depth prediction on the (valid-masked) hand — this is the mechanism by which the hand reshapes the scene
-depth, including, we test, in non-hand regions (§5, E2). A closed-form metric-scale head solves the single global
-scale $s=\text{median}(z(J)/\tilde d)$ used to read out metric depth and to evaluate scale stability.
-
-### 3.5 Training
-We warm-start from a converged hand head and fine-tune at a gentle learning rate, freezing the backbone, on
-HOT3D/Aria clips (pinhole-rectified, $224\times224$). This isolates the contribution of the metric coupling on top
-of a strong placement baseline ("50 mm → 50 mm + coupling").
+### 3.3 Box protocol
+Training and the headline evaluation use GT-derived hand bounding boxes. Because this is an
+evaluation advantage over detector-driven baselines, we (a) measure degradation under box
+perturbation (jitter and fixed boxes), (b) retrain with jitter augmentation, and (c) report
+an end-to-end protocol with detector boxes at native resolution [detbox v2, pending].
 
 ---
 
 ## 4. Experimental Setup
 
-**Datasets.** HOT3D (Aria egocentric hand–object), pinhole-rectified. [HOI4D port planned for cross-dataset
-comparison with Hand3R (E5).]
+**Data.** HOI4D (dense GT depth), 157-sequence test split, right hand, smplx-16 joints.
+Split audit: 5 warm-start-contaminated sequences excluded in the clean-152 headline; a
+scene-disjoint-132 variant controls for sibling takes. H2O [pending].
 
-**Metrics.** Hand: MPJPE / PA-MPJPE (mm), even-sampled across sequences for robustness (absolute MPJPE is
-split-dependent, so we only compare same-split deltas). Scene-metric: scene-depth error vs GT object geometry in
-**non-hand** regions (cm), fraction within 10 cm, and the global-scale coefficient of variation (CV). Scene quality:
-GS PSNR/SSIM/LPIPS from re-rendered Gaussians.
+**Metrics.** Absolute camera-frame MPJPE (C-abs), root-relative (C_rr), world-space
+(W-MPJPE), PA-MPJPE.
 
-**Baselines.** (i) a strong same-data hand head **without** the anchor; (ii) a metric-depth foundation model
-(UniDepth-v2) sampled at the hand; (iii) [HaWoR on HOT3D]; (iv) [Hand3R on HOI4D].
-
----
-
-## 5. Experiments
-
-### 5.1 Headline table (the "money" table)
-
-**Updated 2026-06-17 with real numbers.** ✅ supports the (reframed) hand-placement claim; ❌ falsified.
-
-| Claim | Metric | Baseline | Ours | Status |
-|---|---|---|---|---|
-| **Hand placement** ✅ | MPJPE ↓ (9-seq) | 81.4 mm | **52.9 mm (−35%)** | ✅ confirmed (anchor 1.0) |
-| Articulation preserved ✅ | PA-MPJPE | ≈7.5 mm | ≈7.9 mm | ✅ confirmed |
-| Coupling direction ✅ | MPJPE ↓ | 172 mm (hand←scene) | 89.4 mm (scene←hand) | ✅ confirmed |
-| Hand metric @ hand ✅ | depth residual | — | 4.5 cm | ✅ confirmed |
-| Scene render preserved (low anchor) ✅ | PSNR | 32.55 dB | 32.81 dB (a01) | ✅ (anchor 1.0 → 26.78, −7.2 dB) |
-| **Scene metric on OBJECTS** ❌ | depth err median (non-circ) | **61.9 cm** | **134.7 cm** | ❌ **FALSIFIED** — anchor distorts scene depth |
-| Scale stability on objects ❌ | scale CV (non-circular) | 27.6% | 12.8–27.6% | ❌ the 25→6% "win" was a hand-region circular artifact |
-| **Causal** (abs-3D) | control MPJPE | — | stays high? | ⏳ E0 running (99395) |
-| vs metric-depth FM | UniDepth err @ hand | [>10] cm? | 4.5 cm | ⏳ E1 (torch cu128 fixed; re-test on 5060ti) |
-
-### 5.2 Hand placement (confirmed)
-Warm-starting a converged hand head and adding the metric coupling reduces robust 9-sequence MPJPE from **81.4 → 52.9
-mm (−35%)** while PA-MPJPE stays at **≈7.9 mm** (articulation parity). Our model generalizes across splits (53→53 mm)
-where the baseline degrades (61→81 mm), i.e. the gain is not split luck.
-
-### 5.3 Causal ablation (E0, pending)
-We zero the absolute-3D and anchor terms (keeping the warm-start + fine-tuning) to test whether the placement gain is
-caused by the coupling or merely by more fine-tuning. **Claim it if** the control stays ≥[60] mm (1-seq) / ≥[75] mm
-(9-seq); otherwise we reframe the contribution toward the metric scene (E2) rather than placement.
-
-### 5.4 Versus a metric-depth foundation model (E1, pending)
-We run UniDepth-v2 (ViT-L) on the same frames and sample its metric depth at the projected hand joints, comparing its
-hand-depth error to our anchor's 4.5 cm. **Claim it if** UniDepth's error is **[>10 cm] (≥2×)**: the in-scene hand is
-the cheaper, more accurate metric source. *(Extract + eval implemented; UniDepth weights cached.)*
-
-### 5.5 Non-circular scene-metricity on objects (E2, pending)
-The at-hand scene-metric result (§5.1) is semi-circular (the anchor trains at the hand). To prove the **scene** is
-metric, we render GT object depth from HOT3D object meshes + per-frame 6-DoF poses and compare the predicted scene
-depth in **object** regions (hand region excluded), after fixing scale from the hand alone. Our GT-depth renderer is
-validated: object-surface depth sampled at hand–object contact agrees with the independent metric hand depth to
-**1.6–4.2 cm**. **Claim it if** the anchored object-region error is clearly below the no-anchor baseline (e.g.
-[≈10 cm] vs [≈25 cm]; δ<10 cm up ≥15 pts).
-
-### 5.6 Scene quality (E3, pending)
-Because the backbone is frozen and only the injection changes the Gaussians, we verify the metric coupling does not
-degrade rendering: GS PSNR/SSIM/LPIPS within [≈0.5 dB] of the baseline.
-
-### 5.7 External baselines and cross-dataset (E4/E5/E6, planned)
-[HaWoR on HOT3D]; [HOI4D port for head-to-head with Hand3R]; results on ≥2 datasets.
+**Baselines.** WiLoR and HaMeR run end-to-end in their fully native regime (own detector,
+full-res frames, true-focal conversion) as the primary rows, plus a box-convention
+ablation in our crop regime; HaPTIC (video, native-HD); Hand3R (paper numbers, their
+split, footnoted as non-comparable); HaWoR (own-SLAM world regime) [build in progress].
 
 ---
 
-## 6. Discussion and Limitations
+## 5. Results
 
-- **Frozen backbone** means we rescale/place rather than re-predict geometry — a strength (no quality regression) and
-  a limit (we cannot fix gross backbone errors). The injection's reach into non-hand regions is exactly what E2 tests.
-- **Absolute MPJPE is split-dependent**; we report same-split deltas only.
-- **Single GPU / serial** evaluation throughput; the cross-dataset HOI4D port (E5) is the main remaining lift.
-- **Novelty is time-sensitive** (the area is crowding); we re-verify immediately before submission and, if needed,
-  stake the claim on arXiv + a workshop while completing the main-track evaluation.
+### 5.1 Headline table
+
+| Method | C-abs (mm) | C_rr (mm) | Regime / notes |
+|---|---|---|---|
+| **Ours (winner10ep)** | **23.6** (full-157; clean-152 is the headline) | 17.3 | GT-derived boxes (oracle localization; honest E2E = detbox v2, below) |
+| Ours (frozen DINOv2 backbone) | 21.9 | 14.8 | same recipe, generic backbone |
+| WiLoR (native E2E) | 83.4 | 27.2 | own detector, full-res, true-focal; 156/157 seqs |
+| HaMeR (native E2E) | 88.0 | 30.3 | WiLoR detector (own infeasible, see footnote), native 2.0 rescale |
+| HaPTIC | [true-focal pass in flight] | 25.7 (native-HD) | video baseline |
+| Hand3R | ~42.6 | - | paper number, their split, NOT comparable (unpublished split, box/joint conventions differ) |
+
+Box-convention ablation (demoted from headline): forcing baselines into our 224px crop
+regime gives WiLoR 206.3 det-box / 240.0 GT-box and HaMeR 176.8 det-box / 168.3 GT-box;
+GT boxes do not rescue weak-perspective absolute depth.
+
+**Long-window world space (128-frame segments).** All rows below use one scorer, `wa_short` 30,
+the same 60-sequence subset and matched segment counts, so they differ only in the predictor and
+the camera trajectory. Offline rows share a single DROID/HaWoR trajectory, making this the most
+controlled comparison available.
+
+| Row | Regime | W-MPJPE | WA-short | WA-long | C-abs |
+|---|---|---|---|---|---|
+| Ours (self-chained) | online | [full-157 dump in flight] | - | - | - |
+| Ours + SLAM | offline | **128.1** | 27.4 | 45.0 | 32.6 |
+| WiLoR + SLAM | offline | 143.2 | 29.2 | 48.6 | 71.2 |
+| HaWoR | offline | 147.2 | 34.6 | 56.1 | 94.8 |
+| HaMeR + SLAM | offline | 150.6 | 30.6 | 49.9 | 73.7 |
+| _Ours + GT camera track_ | _oracle_ | _40.8_ | _17.7_ | _21.7_ | _33.3_ |
+
+Composed with the same trajectory, our hands give the best offline world result (128.1 vs
+143-151), but no method is close to the 40.8 oracle: at 128 frames the error is dominated by the
+camera trajectory, not the hand. Replacing one half of the per-frame SE(3) with ground truth
+isolates the terms: 128.1 → 109.3 (GT rotation) → 80.3 (GT translation) → 35.1 (both). The track
+is 4.79° / 102.5 mm from GT; translation is the larger single term, but neither half alone
+recovers half the gap, so rotation and translation errors are strongly coupled and partially
+cancel in hand placement. Forcing the per-sequence track scale to GT does not help (128.1 →
+137.1): egocentric clips translate too little for that scale to be well conditioned. The
+practical consequence is that any long-window fix must re-estimate the full 6-DoF trajectory
+jointly; rotation-only or translation-only correction is capped at ~80-110 mm. We report the
+long window as a characterized, field-wide limitation rather than a claim.
+
+### 5.2 Box robustness
+winner10ep degrades to 31.8mm under 0.2 jitter and 43.5mm with fixed 0.30 boxes. The
+jitter-augmented retrain (TEST60) holds at clean 26.9 / jitter 27.3 / fixed 31.2, so the
+sensitivity is trainable away at small cost.
+
+### 5.3 End-to-end with detector boxes
+The naive E2E number (140.6mm) was diagnosed as a flawed-input artifact: detection at 224px,
+no box squaring, decayed carry-forward fallbacks (det-vs-GT IoU 0.383, 18.8% of frames with
+zero overlap). The corrected protocol (HD detection + the exact training box protocol) has
+its detector boxes built (157/157 seqs, mean detection recall 0.829); the eval on winner10ep
+and the jitter-robust checkpoint is [in flight]. The honest E2E number goes here and is the
+number this paper leads with against the native baselines (83-88mm).
+
+### 5.4 Ablations
+- **kp3d_abs causal control** (TEST60, all else identical): zeroing only the absolute-3D
+  term gives C_abs 725 / C_rr 131. Absolute supervision is causally necessary.
+- **Backbone swap** (full-157, same head/recipe/data): recon 23.6/17.3, frozen DINOv2 ViT-L
+  21.9/14.8, random-init frozen 27.7/18.3. The backbone is not the source of metric depth;
+  the random-init result implicates box crop geometry as a major depth cue, which is why
+  the detector-box E2E protocol (5.3) is the honest headline.
+- **Seed variance** [3-seed run queued; required to license the backbone-swap ordering].
 
 ---
 
-## 7. Conclusion
-The user's hand is a free, accurate, in-scene metric ruler. Coupling an up-to-scale feedforward Gaussian scene to the
-metric hand in a single pass yields a metric hand placement and a metric scene without a metric-depth foundation
-model or multi-view. The contribution is the direction — hand-anchors-scene — and a non-circular evaluation that
-shows the scene, not only the hand, becomes metric.
+## 6. Limitations
+
+- Headline protocol uses GT-derived boxes; the detector-box E2E number [in flight] is the
+  honest headline and box geometry is a known depth cue (see random-init ablation).
+- Long-window (128-frame) world accuracy is weak in absolute terms for every method we can
+  run, ours included; we claim camera-frame absolute pose and short-window world placement,
+  not long-window world accuracy. The comparison is now fair (matched trajectory, scorer,
+  sequences and segments) and we lead the offline rows at 128.1 vs 143-151, but the 40.8
+  GT-trajectory oracle shows how much of the remaining error is camera-trajectory drift.
+- Hand3R comparison is cross-split, cross-box-convention, and possibly cross-joint-count;
+  a same-protocol run is impossible until their split/code is released.
+- Single dataset until H2O lands [training in progress, subject-disjoint split].
+- HaMeR could not be run with its own detector (dependency-incompatible); it uses the
+  WiLoR detector with HaMeR's native rescale.
+- H2O column trains the head from scratch (no HOI4D warm start, to avoid cross-dataset
+  contamination) and zeroes MANO parameter-space losses (H2O's MANO convention is 44-49mm
+  off smplx forward kinematics); keypoint losses are identical to HOI4D.
 
 ---
 
-## References (verified — see novelty-assessment.md)
-- [frost] Frost et al., *Recovering Stable Scale in Monocular SLAM Using Object-Supplemented BA*, IEEE T-RO 2018.
-- [mccho] *MCC-HO*, CVPR 2024 — arXiv:2404.06507.
-- [hawor] *HaWoR*, CVPR 2025 — arXiv:2501.02973.
-- [hand3r] *Hand3R*, 2026 — arXiv:2602.03200 (CUT3R).
-- [iags] *Interaction-Aware 4D Gaussian Splatting*, Nov 2025 — arXiv:2511.14540.
-- [anysplat] *AnySplat*, 2025 — arXiv:2505.23716. [splatsap] *Splat-SAP*, 2025 — arXiv:2511.22704.
-- [unidepth] *UniDepth*, CVPR 2024.
-- [novelty] Internal verified novelty sweep, `report/novelty-assessment.md`.
+## References (see novelty-assessment.md for the verified sweep)
+- [hand3r] *Hand3R*, 2026, arXiv:2602.03200 (CUT3R).
+- [hawor] *HaWoR*, CVPR 2025, arXiv:2501.02973.
+- [whole] *WHOLE*, 2026, arXiv:2602.22209. [egograsp] *EgoGrasp*, 2026, arXiv:2601.01050.
+- [wilor] *WiLoR*. [hamer] *HaMeR*. [haptic] *HaPTIC*.
+- [vggt] *VGGT*, arXiv:2503.11651. [worldmirror] *WorldMirror*, arXiv:2510.10726.
+- [neoverse] *NeoVerse*, arXiv:2601.00393. [cut3r] *CUT3R*, arXiv:2501.12387.
+- [mccho] *MCC-HO*, CVPR 2024, arXiv:2404.06507.
+
+---
+**Thesis history.** The previous version of this draft ("Metric Hands, Metric Scene") claimed
+that anchoring an up-to-scale feedforward Gaussian scene to the in-scene metric hand makes the
+scene metric. That claim was experimentally falsified: the non-circular object-depth eval
+(2026-06) showed the anchor makes object-region depth worse, and the scale-source ablation
+(2026-07) showed hand-as-global-scene-scale reaches only 0.728 vs oracle 1.022. The 4DGS
+backbone is frozen third-party and Gaussian rendering is off; scene reconstruction is not a
+contribution lever. The old draft is preserved in git history.
