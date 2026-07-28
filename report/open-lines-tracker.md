@@ -19,9 +19,13 @@ Caught by: all three scene-scale variants bit-identical on 314/314 segments (sca
 the camera translation) → `--diag_cam` showed `pred_cam_excursion=0.000000 m` vs 19–46 mm of GT
 camera motion per clip → `s_gt_med` NaN everywhere, since that stat needs centre motion > 1e-4.
 
-**Invalidated** (do not quote): every "ours" world/W number below, the rot/trans decomposition of
-our own trajectory, and the "scene scale is neutral" verdict. The chunk-link and dense-chain
-"neutral" verdicts must be **re-verified** — they ran through the same path.
+**Contamination window, dated from git**: the offending line entered `eval_world_space` in
+`d8faf8d` (2026-07-27). Only runs from that commit onward are affected.
+**Invalidated** (do not quote): ours online self-chained, the rot/trans decomposition of our own
+trajectory, the **G1 dense-chain** verdict, and the "scene scale is neutral" verdict (definitively
+wrong — variants were bit-identical on 314/314 pre-fix, 0/3 post-fix).
+**Valid, predate the flag**: chunk-link (205.2/202.1), the gravity and full-rotation oracles, the
+oracle-depth gate, re16/velGT, and the short-window world headline 36.2/33.2/37.3.
 **Unaffected**: all baseline rows (HaMeR/WiLoR+SLAM, HaWoR, Dyn-HaMR — they never call
 `predict_clip`) and every camera-frame C-MPJPE/C-abs number (they ignore `c2w`).
 

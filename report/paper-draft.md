@@ -220,8 +220,8 @@ number this paper leads with against the native baselines (83-88mm).
   run, ours included; we claim camera-frame absolute pose and short-window world placement,
   not long-window world accuracy. The comparison protocol is fair (matched trajectory, scorer,
   sequences and segments), but our own rows are being re-measured after the identity-camera-pose
-  fix (`9dd474d`) and no "ours" world number should be quoted until that lands. The short-window
-  world headline came through the same eval path and must be re-verified for the same reason.
+  fix (`9dd474d`) and no long-window "ours" number should be quoted until that lands. The
+  short-window world headline predates the offending commit (`d8faf8d`) and is unaffected.
 - Hand3R comparison is cross-split, cross-box-convention, and possibly cross-joint-count;
   a same-protocol run is impossible until their split/code is released.
 - Single dataset until H2O lands [training in progress, subject-disjoint split].
