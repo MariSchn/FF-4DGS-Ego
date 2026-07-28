@@ -7,6 +7,29 @@ Legend — Status: 🟢 running · 🟡 queued · 🔵 results-in-needs-verdict 
 
 _Last updated: 2026-07-05 (morning). See memory for the live state; the table below is a Jul-5 snapshot._
 
+## 2026-07-28 CORRECTION — identity-camera-pose bug invalidates the "ours" world rows below
+
+`predict_clip` reads camera poses from `preds["rendered_extrinsics"]`, which is published by the
+rasterizer. The `gs_anchor_only` fast path (added to dodge the gsplat hang on gb10) returns
+*before* the rasterizer, so the key was missing and `predict_clip` silently fell back to identity
+`c2w` — **zero camera translation and zero camera rotation**. Fixed in `9dd474d` by republishing
+the camera head's `camera_poses` in the fast path, plus a loud warning on the fallback.
+
+Caught by: all three scene-scale variants bit-identical on 314/314 segments (scale multiplies only
+the camera translation) → `--diag_cam` showed `pred_cam_excursion=0.000000 m` vs 19–46 mm of GT
+camera motion per clip → `s_gt_med` NaN everywhere, since that stat needs centre motion > 1e-4.
+
+**Invalidated** (do not quote): every "ours" world/W number below, the rot/trans decomposition of
+our own trajectory, and the "scene scale is neutral" verdict. The chunk-link and dense-chain
+"neutral" verdicts must be **re-verified** — they ran through the same path.
+**Unaffected**: all baseline rows (HaMeR/WiLoR+SLAM, HaWoR, Dyn-HaMR — they never call
+`predict_clip`) and every camera-frame C-MPJPE/C-abs number (they ignore `c2w`).
+
+**Unlocked by the fix**: the hand-derived scene scale is now measurable against the true camera
+scale — `s_hand_med` 0.858 vs `s_gt_med` 1.111, ratio **0.574**. We under-scale the camera
+trajectory by ~43%, and since W/WA align rigidly without re-solving scale, that converts straight
+into trajectory shape error. This is the new leading candidate lever.
+
 ## 2026-07-27 UPDATE — offline-SLAM lever closed, trajectory error decomposed
 
 Two more long-window levers tested. Everything below is 128-frame segments, `wa_short` 30, one

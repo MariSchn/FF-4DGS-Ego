@@ -162,26 +162,31 @@ the same 60-sequence subset and matched segment counts, so they differ only in t
 the camera trajectory. Offline rows share a single DROID/HaWoR trajectory, making this the most
 controlled comparison available.
 
+> **NUMBERS PENDING RE-MEASUREMENT (2026-07-28).** Every row that passes through our own world
+> lift was invalidated by an identity-camera-pose bug: the `gs_anchor_only` fast path returned
+> before the rasterizer, which is what publishes `rendered_extrinsics`, so `predict_clip` fell
+> back to identity `c2w` and the world trajectory had zero camera translation *and* rotation.
+> Fixed in `9dd474d`; the full-157 re-dump is running. The baseline rows below are unaffected
+> (they never call `predict_clip`), as are all camera-frame C-MPJPE numbers.
+
 | Row | Regime | W-MPJPE | WA-short | WA-long | C-abs |
 |---|---|---|---|---|---|
-| Ours (self-chained) | online | [full-157 dump in flight] | - | - | - |
-| Ours + SLAM | offline | **128.1** | 27.4 | 45.0 | 32.6 |
+| Ours (self-chained) | online | [re-measuring] | - | - | - |
+| Ours + SLAM | offline | [re-measuring] | - | - | - |
 | WiLoR + SLAM | offline | 143.2 | 29.2 | 48.6 | 71.2 |
 | HaWoR | offline | 147.2 | 34.6 | 56.1 | 94.8 |
 | HaMeR + SLAM | offline | 150.6 | 30.6 | 49.9 | 73.7 |
-| _Ours + GT camera track_ | _oracle_ | _40.8_ | _17.7_ | _21.7_ | _33.3_ |
 
-Composed with the same trajectory, our hands give the best offline world result (128.1 vs
-143-151), but no method is close to the 40.8 oracle: at 128 frames the error is dominated by the
-camera trajectory, not the hand. Replacing one half of the per-frame SE(3) with ground truth
-isolates the terms: 128.1 → 109.3 (GT rotation) → 80.3 (GT translation) → 35.1 (both). The track
-is 4.79° / 102.5 mm from GT; translation is the larger single term, but neither half alone
-recovers half the gap, so rotation and translation errors are strongly coupled and partially
-cancel in hand placement. Forcing the per-sequence track scale to GT does not help (128.1 →
-137.1): egocentric clips translate too little for that scale to be well conditioned. The
-practical consequence is that any long-window fix must re-estimate the full 6-DoF trajectory
-jointly; rotation-only or translation-only correction is capped at ~80-110 mm. We report the
-long window as a characterized, field-wide limitation rather than a claim.
+What the bug did *not* invalidate is the shape of the problem: at 128 frames every method we can
+run is far from a GT-trajectory oracle, so the long-window error is dominated by the camera
+trajectory rather than the hand. It did invalidate our earlier conclusion that the scene scale is
+neutral - with identity cameras the scale multiplied a zero translation, which is exactly why all
+three scale variants were bit-identical on 314/314 segments. With real camera poses restored, the
+hand-derived scene scale measures 0.858 against a true camera-trajectory scale of 1.111
+(ratio 0.574), i.e. we under-scale the camera trajectory by ~43%. Because W/WA align rigidly
+without re-solving scale, that under-scale converts directly into trajectory shape error, and it
+is now the leading candidate lever. We report the long window as a characterized limitation until
+the re-measurement lands.
 
 ### 5.2 Box robustness
 winner10ep degrades to 31.8mm under 0.2 jitter and 43.5mm with fixed 0.30 boxes. The
@@ -213,9 +218,10 @@ number this paper leads with against the native baselines (83-88mm).
   honest headline and box geometry is a known depth cue (see random-init ablation).
 - Long-window (128-frame) world accuracy is weak in absolute terms for every method we can
   run, ours included; we claim camera-frame absolute pose and short-window world placement,
-  not long-window world accuracy. The comparison is now fair (matched trajectory, scorer,
-  sequences and segments) and we lead the offline rows at 128.1 vs 143-151, but the 40.8
-  GT-trajectory oracle shows how much of the remaining error is camera-trajectory drift.
+  not long-window world accuracy. The comparison protocol is fair (matched trajectory, scorer,
+  sequences and segments), but our own rows are being re-measured after the identity-camera-pose
+  fix (`9dd474d`) and no "ours" world number should be quoted until that lands. The short-window
+  world headline came through the same eval path and must be re-verified for the same reason.
 - Hand3R comparison is cross-split, cross-box-convention, and possibly cross-joint-count;
   a same-protocol run is impossible until their split/code is released.
 - Single dataset until H2O lands [training in progress, subject-disjoint split].
