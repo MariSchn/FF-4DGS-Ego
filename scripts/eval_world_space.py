@@ -111,6 +111,16 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
     else:
         _S = pred_joints.shape[1]
         c2w = torch.eye(4, device=pred_joints.device).unsqueeze(0).repeat(_S, 1, 1)
+        # SHOUT. Identity poses mean the world lift has NO camera motion at all, so every
+        # world/W metric degenerates to hand-joint chaining and every scene-scale variant
+        # collapses to the same number. This used to pass silently and invalidated a whole
+        # round of scale/linking experiments before the diag_cam probe caught it.
+        if not getattr(predict_clip, "_warned_identity_c2w", False):
+            predict_clip._warned_identity_c2w = True
+            print("  !! NO rendered_extrinsics IN preds - falling back to IDENTITY camera poses. "
+                  "World/W metrics from this run are NOT valid (no camera motion). Ensure the "
+                  "model publishes camera_poses (see worldmirror gs_anchor_only fast path).",
+                  flush=True)
     gs_depth = preds.get("gs_depth")
     # Dump support: a nearest-subsampled 32x32 per-frame scene depth (fp16). Nearest (not avg)
     # keeps real depth samples so offline scene-point backprojection has no flying-pixel blend.
@@ -238,7 +248,8 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                   refine_sanity=False, robust_scale=False,
                   da3_wrist_cache_dir=None, contact_cache_dir=None, contact_gate="off",
                   oracle_depth=False, dense_link=False,
-                  gravity_oracle=False, gravity_axis=(0.0, 1.0, 0.0), dump_cam_dir=None):
+                  gravity_oracle=False, gravity_axis=(0.0, 1.0, 0.0), dump_cam_dir=None,
+                  diag_cam=False):
     """Eval all `segment_len` segments of one sequence; return list of per-segment metrics.
 
     ``feed_intrinsics``: condition the backbone on the *known* camera intrinsics (ray prior,
@@ -350,6 +361,23 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             cc = predict_clip(preds, mano_model, device, cam_intr, model=model, anchor_log=anchor_log,
                               ref_d_scene=_ref, contact_mask=_con, depth_out=clip_depths)
             clip_cams.append(cc)
+
+            if diag_cam:
+                # The scene scale multiplies ONLY the camera translation, so its effect on the
+                # world trajectory is proportional to how far the camera actually moves within a
+                # clip. Every scale variant (per-clip / median / pooled) came out BIT-IDENTICAL on
+                # all 314 real segments despite a per-clip scale std of 0.28, which is exactly what
+                # a degenerate (near-zero) predicted camera translation would produce. Print the
+                # predicted excursion next to the GT one to settle it.
+                _pc = cc[1][:, :3, 3]                                   # predicted centres [S,3]
+                _pe = float((_pc - _pc.mean(0)).norm(dim=-1).max())
+                _ge = float("nan")
+                if "cam_extrinsics" in batch:
+                    _gc = torch.inverse(batch["cam_extrinsics"].float())[:, :3, 3]
+                    _ge = float((_gc - _gc.mean(0)).norm(dim=-1).max())
+                print(f"  [diagcam seg{seg} c{c + 1}] pred_cam_excursion={_pe:.6f} m | "
+                      f"gt_cam_excursion={_ge:.6f} m | s_clip={float(cc[2]):.4f} | "
+                      f"has_extrinsics={'cam_extrinsics' in batch}", flush=True)
 
             if dump_cam_dir is not None:
                 pj = cc[0].detach().cpu().float()                      # [S,H,16,3] cam-frame joints
@@ -757,6 +785,8 @@ def main():
                          "gravity (W_MPJPE_gravOracle) + full-rotation ceiling (W_MPJPE_rotOracle)")
     ap.add_argument("--gravity_axis", default="0,1,0",
                     help="world gravity direction, comma-separated (HOI4D world is Y-up -> 0,1,0)")
+    ap.add_argument("--diag_cam", action="store_true",
+                    help="print predicted vs GT per-clip camera-centre excursion (scale-effect diagnostic)")
     ap.add_argument("--dump_cam_preds", default="",
                     help="if set, dump per-seq per-frame cam-space hands {cam_joints[N,2,16,3],valid} "
                          "to this dir (for the 'ours + SLAM' world composition, lever 2)")
@@ -827,7 +857,8 @@ def main():
                                      oracle_depth=args.oracle_depth, dense_link=args.dense_link,
                                      gravity_oracle=args.gravity_oracle,
                                      gravity_axis=tuple(float(x) for x in args.gravity_axis.split(",")),
-                                     dump_cam_dir=(args.dump_cam_preds or None))
+                                     dump_cam_dir=(args.dump_cam_preds or None),
+                                     diag_cam=args.diag_cam)
         except Exception as e:
             print(f"[skip {os.path.basename(sq)}] {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()

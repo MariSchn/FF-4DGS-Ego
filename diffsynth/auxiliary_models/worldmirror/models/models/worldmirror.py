@@ -9,7 +9,13 @@ from ..heads.camera_head import CameraHead
 from ..heads.dense_head import DPTHead
 from ..heads.hamer_head import HamerManoHead
 from ..heads.hand_to_gs_injection import HandToGSInjection
-from .rasterization import GaussianSplatRenderer
+try:
+    from .rasterization import GaussianSplatRenderer
+except (ImportError, ModuleNotFoundError):
+    # GaussianSplatRenderer pulls compiled CUDA extensions (torch_scatter, gsplat).
+    # It is only instantiated when enable_gs=true; keep the import optional so a
+    # GS-off training/eval env does not require those extensions.
+    GaussianSplatRenderer = None
 from ..utils.camera_utils import vector_to_camera_matrices, extrinsics_to_vector
 from ..utils.priors import normalize_depth, normalize_poses
 
@@ -479,10 +485,26 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             preds["gs_depth"] = gs_depth
             preds["gs_depth_conf"] = gs_depth_conf
 
-            # Fast path for the L1 metric anchor / L2 scale eval: gs_depth (above)
-            # is all they need. Skip the expensive splat build + voxel prune +
-            # rasterization. Off by default; inference always renders.
-            if not is_inference and getattr(self, "gs_anchor_only", False):
+            # Fast path for the L1 metric anchor / L2 scale eval and the G1 dense-link world eval:
+            # gs_depth (above) is all these consumers need, so skip the expensive splat build +
+            # voxel prune + rasterization at the end of this block. That render needs gsplat /
+            # torch_scatter, which are only optional imports and fall to a hanging CPU path on nodes
+            # (e.g. gb10/aarch64) without a compiled fast rasterizer. Off by default; opt in via
+            # model.gs_anchor_only. Applies in inference too - depth-only consumers never render.
+            if getattr(self, "gs_anchor_only", False):
+                # The RENDER is what normally publishes rendered_extrinsics (rasterization.py sets
+                # it from prepare_cameras(predictions), i.e. straight from the camera head at line
+                # ~346 - the rasterizer does not refine it). Returning here without republishing it
+                # made every downstream world eval silently fall back to IDENTITY camera poses in
+                # predict_clip, so the chained "world trajectory" had zero camera translation and
+                # zero camera rotation. That is what made all three scene-scale variants come out
+                # bit-identical (scale multiplies only the camera translation) and it invalidated
+                # every scale/linking lever measured through this path. Republish the camera-head
+                # poses here; this costs nothing and keeps the fast path faithful.
+                if "camera_poses" in preds:
+                    preds["rendered_extrinsics"] = preds["camera_poses"]
+                if "camera_intrs" in preds:
+                    preds["rendered_intrinsics"] = preds["camera_intrs"]
                 return preds
 
             # Dynamic GS attributes
