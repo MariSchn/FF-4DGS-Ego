@@ -61,13 +61,22 @@ def load_gt(seq_dir: str):
 
 
 def eval_sequence(seq_dir: str, pred_path: str, segment_len: int, wa_short: int,
-                  drop_partial_tail: bool = False):
+                  drop_partial_tail: bool = False, hands: str = "both"):
     """Score one sequence; return (per-segment metric dicts, per-sequence C metrics).
 
     C-MPJPE is computed once over the WHOLE sequence so aggregation is per-sequence,
     matching eval_hand_cam_anchor.py — segments exist only for the world-gauge metrics,
     which need windowed alignment. Averaging C over segments instead would weight long
     sequences by their segment count and make the table incomparable to ours.
+
+    hands selects which hands enter the WORLD metrics: "both" (default, historical behaviour)
+    or "right" (RH only). This matters: C-MPJPE has always been right-hand-only (RH=1) while the
+    world metrics summed over BOTH hands, so the two metric families were scored on different
+    hand sets. That asymmetry is the leading explanation for our WA-MPJPE sitting at 34.7 against
+    Hand3R's 22.54 while W matches to 2.5% - W is dominated by global drift common to both hands,
+    whereas WA removes global placement and is therefore dominated by whichever hand is tracked
+    worst. Papers split into a right-hand-only cluster (HaWoR self-report 11.27, Hand3R 22.54)
+    and a both-hands cluster (StableHand 30.20, ours 34.7).
 
     drop_partial_tail keeps only whole segment_len windows. eval_world_space (our own online
     row) enumerates floor(n_clips / clips_per_seg) segments and never predicts the ragged tail,
@@ -102,10 +111,15 @@ def eval_sequence(seq_dir: str, pred_path: str, segment_len: int, wa_short: int,
             continue
         sl = slice(s0, s0 + t)
 
-        # ---- world metrics over BOTH hands ([t,32,3]); mask per (hand) x16 joints ----
-        gw = gt_world[sl].reshape(t, 2 * J, 3)
-        pw = pworld[sl].reshape(t, 2 * J, 3)
-        vw = (valid[sl] & fin_w[sl]).repeat_interleave(J, dim=1)   # [t,32]
+        # ---- world metrics; hand set is explicit (see `hands`) ----
+        if hands == "right":
+            gw = gt_world[sl, RH]                                   # [t,16,3]
+            pw = pworld[sl, RH]
+            vw = (valid[sl, RH] & fin_w[sl, RH]).unsqueeze(-1).expand(-1, J)
+        else:
+            gw = gt_world[sl].reshape(t, 2 * J, 3)                  # [t,32,3]
+            pw = pworld[sl].reshape(t, 2 * J, 3)
+            vw = (valid[sl] & fin_w[sl]).repeat_interleave(J, dim=1)
         if int(vw.sum()) >= 3:
             w = w_mpjpe_first_window_aligned(pw, gw, vw, wa_short)
             wa_s = wa_mpjpe(pw, gw, window=wa_short, valid=vw)
@@ -168,6 +182,10 @@ def main():
     ap.add_argument("--wa_short", type=int, default=16)
     ap.add_argument("--max_seqs", type=int, default=0)
     ap.add_argument("--out", default="baseline_world_eval.json")
+    ap.add_argument("--hands", choices=["both", "right"], default="both",
+                    help="which hands enter the WORLD metrics. C-MPJPE is always right-hand-only, "
+                         "so --hands right makes both metric families use the same hand set and "
+                         "matches the Hand3R / HaWoR convention.")
     ap.add_argument("--drop_partial_tail", action="store_true",
                     help="score only whole segment_len windows, so this row's segment set matches "
                          "eval_world_space's (which never predicts the ragged tail)")
@@ -190,14 +208,22 @@ def main():
             continue
         rows, seq_c = eval_sequence(os.path.join(args.data_root, sq), pp,
                                     args.segment_len, args.wa_short,
-                                    drop_partial_tail=args.drop_partial_tail)
+                                    drop_partial_tail=args.drop_partial_tail,
+                                    hands=args.hands)
         results += rows
         if seq_c is not None:
             seq_c_rows.append(seq_c)
         if rows:
             n_scored += 1
     agg = aggregate(results, seq_c_rows)
-    json.dump({"aggregate": agg, "per_segment": results, "per_seq_c": seq_c_rows},
+    # Stamp the protocol so the artifact records its own hand set and window. The hand set in
+    # particular was previously implicit (world = both hands, C = right only) and that asymmetry
+    # went unnoticed for a long time.
+    protocol = {"segment_len": args.segment_len, "wa_short": args.wa_short,
+                "hands": args.hands, "drop_partial_tail": bool(args.drop_partial_tail),
+                "pred_dir": args.pred_dir, "data_root": args.data_root}
+    json.dump({"protocol": protocol, "aggregate": agg, "per_segment": results,
+               "per_seq_c": seq_c_rows},
               open(args.out, "w"), indent=2)
     print(f"BASELINE_WORLD_EVAL n_seqs={n_scored} n_segs={agg['n_segments']}")
     print(f"  W_MPJPE={agg['W_MPJPE']:.1f}  WA_short={agg['WA_MPJPE_short']:.1f}  "
