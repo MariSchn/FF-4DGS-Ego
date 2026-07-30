@@ -1063,6 +1063,8 @@ def setup_vis_items(dataset, num_vis_frames, seq_cache, mano_model, preload=Fals
     from scripts.hand_vis_utils import setup_vis_context
 
     n = len(dataset.clips)
+    if num_vis_frames <= 0 or n == 0:
+        return []  # num_vis_frames<=0 disables visualization (e.g. wandb off)
     step = max(1, n // num_vis_frames)
     items = []
     for clip_idx in torch.arange(0, n, step).tolist()[:num_vis_frames]:
@@ -1468,11 +1470,75 @@ def _apply_overrides(cfg, overrides):
 
 
 
+# --------------------------------------------------------------------------- recipe guard
+# The proven HOI4D recipe (winner10ep, the 23.6 mm C-abs headline). kp3d_abs is the absolute-3D
+# keypoint loss and it is CAUSALLY NECESSARY for absolute placement: the ablation that zeroes it
+# gives C_abs 725 vs C_rr 131.
+PROVEN_LOSS_RECIPE = {
+    "kp3d_abs": 1.0, "transl": 1.0, "kp3d": 0.05, "kp2d": 0.05,
+    "betas": 0.01, "global_orient": 0.01, "hand_pose": 0.01,
+}
+
+
+def _check_loss_recipe(cfg, strict: bool = True):
+    """Fail loudly when the loss recipe drifts from the one that produced the headline.
+
+    This exists because the loss sum reads ``loss_weights.get("kp3d_abs", 0.0)``, so a config that
+    simply omits the key trains with NO absolute supervision and nothing complains. Two full
+    training runs were lost that way: the mixed-dataset config had no kp3d_abs at all and scored
+    C_abs 119.9 against the 23.6 canonical while C_rr was unchanged at 16.7 - absolute broken,
+    articulation intact, the exact signature of missing absolute supervision.
+    """
+    lw = cfg.get("loss_weights", {}) or {}
+    problems, notes = [], []
+
+    kp3d_abs = lw.get("kp3d_abs")
+    if kp3d_abs is None:
+        problems.append("kp3d_abs is ABSENT. The loss sum defaults it to 0.0, so the model gets "
+                        "NO absolute-3D supervision: C_abs degrades several-fold while C_rr looks "
+                        "fine. Set kp3d_abs: 1.0.")
+    elif float(kp3d_abs) == 0.0:
+        problems.append("kp3d_abs is 0.0 -> no absolute supervision. Set kp3d_abs: 1.0 unless "
+                        "this is deliberately the zeroed-loss causal control.")
+    elif float(kp3d_abs) != PROVEN_LOSS_RECIPE["kp3d_abs"]:
+        notes.append(f"kp3d_abs={kp3d_abs} differs from the proven 1.0 (0.5 is the older "
+                     f"24.9mm-era value kept in exp_p4_jitterrob).")
+
+    for k, want in PROVEN_LOSS_RECIPE.items():
+        if k == "kp3d_abs":
+            continue
+        got = lw.get(k)
+        if got is None:
+            notes.append(f"{k} is absent (proven recipe uses {want}).")
+        elif float(got) != float(want):
+            notes.append(f"{k}={got} differs from the proven {want}.")
+
+    if not (cfg.get("metric_scale") or {}).get("enable", False):
+        notes.append("metric_scale.enable is not set; the proven recipe enables it with "
+                     "clamp [0.1, 10.0].")
+
+    print("=" * 78, flush=True)
+    print("LOSS RECIPE: " + "  ".join(f"{k}={lw.get(k)}" for k in sorted(lw)), flush=True)
+    for n in notes:
+        print(f"  [recipe note] {n}", flush=True)
+    for p_ in problems:
+        print(f"  !! RECIPE ERROR: {p_}", flush=True)
+    print("=" * 78, flush=True)
+
+    if problems and strict:
+        raise SystemExit("Refusing to train: this loss recipe would silently disable absolute "
+                         "supervision. Fix the config, or pass --allow_recipe_drift if this is "
+                         "an intentional ablation.")
+
+
 def train():
 
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/train_hand_head.yaml")
+    parser.add_argument("--allow_recipe_drift", action="store_true",
+                        help="permit a loss recipe that disables absolute supervision "
+                             "(only for deliberate ablations such as the kp3d_abs=0 control)")
     parser.add_argument("overrides", nargs="*", metavar="KEY=VAL",
                         help="Config overrides, e.g. training.lr=3e-4 model.hamer_head_kwargs.depth=4")
     args = parser.parse_args()
@@ -1483,6 +1549,8 @@ def train():
     if args.overrides:
         _apply_overrides(cfg, args.overrides)
         print(f"Config overrides: {args.overrides}")
+
+    _check_loss_recipe(cfg, strict=not args.allow_recipe_drift)
 
     data_cfg     = cfg["data"]
     model_cfg    = cfg["model"]

@@ -1,7 +1,10 @@
-# Mixed 3-dataset training under the Cyrus protocol: the HARDER data goes in TRAIN.
-#   train = HOI4D (367 seq) + OakInk2 (109 seq) + ARCTIC (267 seq)
-#   test  = H2O (177 seq), fully held out - never appears in data_roots below.
-# Supersedes train_mix3_hoi4d_h2o_arctic.yaml (which had the split the other way round).
+# HOI4D-ONLY CONTROL for the mixed-training claim.
+# Byte-identical to train_mix3_hoi4d_oakink2_arctic.yaml except that data_roots contains ONLY
+# hoi4d. Same losses, same schedule, same from-scratch init, same sampler, same feature cache.
+# WHY THIS EXISTS: the 23.6 canonical came from `jitterrob`/`winner10ep`, which differ from the
+# mixed run in warm start, box-jitter augmentation, epochs AND data. Comparing the mixed model
+# against it would confound four variables at once, so a change could never be attributed to
+# data mixing. This control varies ONLY the data.
 # clip_stride 16 MUST match the feature-cache build (cache keys are <seq>_<frame_offset>).
 data:
   data_roots:
@@ -9,15 +12,6 @@ data:
       name: "hoi4d"
       weight: 1.0
       feature_cache_dir: "/cluster/scratch/dmonopoli/featcache/hoi4d"
-    - root: "/cluster/scratch/dmonopoli/oakink2_ours"
-      name: "oakink2"
-      weight: 1.0
-      feature_cache_dir: "/cluster/scratch/dmonopoli/featcache/oakink2"
-    - root: "/cluster/scratch/dmonopoli/arctic_ours"
-      name: "arctic"
-      weight: 1.0
-      feature_cache_dir: "/cluster/scratch/dmonopoli/featcache/arctic"
-  # Equal per-root sampling mass -> balances the 367/109/267 seq imbalance via WeightedRandomSampler.
   num_frames: 16
   resolution: [224, 224]
   clip_stride: 16
@@ -84,7 +78,7 @@ training:
   val_every: 3000
   save_every: 2000
   seed: 42
-  output_dir: "/cluster/scratch/dmonopoli/checkpoints/mix3_hoi4d_oakink2_arctic"
+  output_dir: "/cluster/scratch/dmonopoli/checkpoints/ctrl_hoi4d_only"
 
 visualization:
   mano_model_folder: "models/MANO"
@@ -102,6 +96,6 @@ wandb:
   enabled: true
   project: "hand-head-training"
   entity: 3DV-Project
-  run_name: "mix3 HOI4D+OakInk2+ARCTIC (H2O held out)"
+  run_name: "CONTROL HOI4D-only (same recipe as mix3cyrus)"
   tags: ["mixed", "3dataset", "cyrus-protocol"]
   notes: "Cyrus protocol: harder data in train (OakInk2 in), H2O held out as the test set."
