@@ -119,6 +119,13 @@ def main():
     ap.add_argument("--max_seqs", type=int, default=0)
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--no_backup", action="store_true")
+    ap.add_argument("--gate", action="store_true",
+                    help="EXIT NONZERO if the regenerated boxes are not actually rectangular and "
+                         "unclamped (square_frac > 0.05, or outside01_frac == 0, or nothing kept). "
+                         "Use on a --dry_run over a few sequences so a caller can refuse to "
+                         "overwrite a whole store with boxes that did not change convention. "
+                         "Printing the numbers is not enough: a job script that ignores them will "
+                         "happily overwrite 177 sequences.")
     a = ap.parse_args()
 
     seqs = sorted(d for d in os.listdir(a.data_root)
@@ -138,16 +145,38 @@ def main():
                   f"outside01_frac={stats['outside01_frac']:.3f} "
                   f"W={stats['W']:.0f} H={stats['H']:.0f} f={stats['f']:.1f}", flush=True)
     print(f"\nREGEN status: {counts}")
-    if agg:
-        sq = np.nanmean([x["square_frac"] for x in agg])
-        out = np.nanmean([x["outside01_frac"] for x in agg])
-        kept = sum(x["kept"] for x in agg)
-        was = sum(x["was_valid"] for x in agg)
-        print(f"REGEN kept {kept}/{was} (frame,hand) entries")
-        print(f"REGEN square_frac={sq:.4f} (want ~0: rectangular, NOT squared)")
-        print(f"REGEN outside01_frac={out:.4f} (want >0: unclamped, HOI4D-style)")
-        if sq > 0.05:
-            print("  !! still mostly square - the regeneration did not take effect")
+    if not agg:
+        print("REGEN produced NO statistics - no sequence had both a joints cache and boxes.")
+        if a.gate:
+            raise SystemExit("GATE FAILED: nothing to measure, so the convention is unverified.")
+        return
+
+    sq = np.nanmean([x["square_frac"] for x in agg])
+    out = np.nanmean([x["outside01_frac"] for x in agg])
+    kept = sum(x["kept"] for x in agg)
+    was = sum(x["was_valid"] for x in agg)
+    print(f"REGEN kept {kept}/{was} (frame,hand) entries")
+    print(f"REGEN square_frac={sq:.4f} (want ~0: rectangular, NOT squared)")
+    print(f"REGEN outside01_frac={out:.4f} (want >0: unclamped, HOI4D-style)")
+
+    problems = []
+    if sq > 0.05:
+        problems.append(f"square_frac={sq:.4f} > 0.05 - boxes are still mostly SQUARE, so the "
+                        f"regeneration did not change convention")
+    if not (out > 0.0):
+        problems.append(f"outside01_frac={out:.4f} - no box falls outside [0,1], so the boxes are "
+                        f"still CLAMPED")
+    if kept == 0:
+        problems.append("kept 0 entries - every box was rejected")
+
+    for p in problems:
+        print(f"  !! {p}")
+    if problems and a.gate:
+        raise SystemExit("GATE FAILED: refusing to certify these boxes as joints_to_bbox "
+                         "convention. Do NOT overwrite the store; any eval on it would measure a "
+                         "box-convention artefact (previously C-abs ~290-380 mm), not accuracy.")
+    if a.gate:
+        print("GATE PASSED: boxes are rectangular and unclamped.")
 
 
 if __name__ == "__main__":
