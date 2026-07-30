@@ -229,7 +229,15 @@ def main():
                                  "anchor_dz_gated_mm", "anchor_disagree_mm")}
     agg["n_seqs"] = len(results)
     with open(args.out, "w") as f:
-        json.dump({"aggregate": agg, "per_seq": results}, f, indent=2)
+        # Stamp the protocol so the artifact is self-describing (see eval_world_space for why:
+        # a result JSON that does not record its own clip settings cannot be audited later).
+        protocol = {
+            "clip_len": args.clip_len, "stride": args.stride,
+            "train_num_frames": int(cfg.get("data", {}).get("num_frames", -1)),
+            "matches_locked_protocol": (args.clip_len == 16 and args.stride == 8),
+            "config": args.config, "data_root": args.data_root,
+        }
+        json.dump({"protocol": protocol, "aggregate": agg, "per_seq": results}, f, indent=2)
     tag = "ANCHOR ON" if anchor_on else "anchor OFF"
     print(f"\nOURS HOI4D camera-frame ({tag}):  C-abs={agg['C_abs']:.1f}  "
           f"C-MPJPE(root-rel)={agg['C_MPJPE']:.1f}  "

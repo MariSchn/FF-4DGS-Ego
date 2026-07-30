@@ -799,6 +799,24 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+
+    # PROTOCOL GUARD. The head is trained on 16-frame clips (data.num_frames), and the locked
+    # paper protocol is 16-frame chunks with an overlap of 8, i.e. --clip_len 16 --stride 8
+    # (which are also the argparse defaults). Evaluating at any other clip length runs the model
+    # out of distribution: measured C-abs degrades monotonically 29.7 / 30.2 / 30.7 / 32.2 at
+    # clip_len 16 / 32 / 48 / 64. An entire round of world numbers was silently produced at 32/16
+    # before this was caught, so make any deviation impossible to miss.
+    _tf = int(cfg.get("data", {}).get("num_frames", 16))
+    if (args.clip_len, args.stride) != (16, 8):
+        print("=" * 78, flush=True)
+        print(f"!! PROTOCOL DEVIATION: clip_len={args.clip_len} stride={args.stride}, "
+              f"expected the locked 16/8.", flush=True)
+        print("!! Numbers from this run are NOT paper-reportable unless this is a deliberate "
+              "probe (e.g. the context-length gate).", flush=True)
+        print("=" * 78, flush=True)
+    if args.clip_len != _tf:
+        print(f"!! clip_len={args.clip_len} != training num_frames={_tf} -> the model is being "
+              f"run OUT OF DISTRIBUTION.", flush=True)
     from scripts.hand_vis_utils import MANOModel
     mano_model = MANOModel(cfg["visualization"]["mano_model_folder"])
     model = build_model(cfg, device)
@@ -892,7 +910,20 @@ def main():
             agg[k] = _mean(k)
         agg["n_segments"] = len(valid)
         with open(args.out, "w") as f:
-            json.dump({"aggregate": agg, "per_segment": results}, f, indent=2)
+            # Stamp the protocol into the artifact. Without this a result JSON cannot be
+            # audited after the fact - exactly how the provenance of the short-window world
+            # table became unrecoverable (the producing job script was gone and the JSON did
+            # not say what clip length it used).
+            protocol = {
+                "clip_len": args.clip_len, "stride": args.stride,
+                "segment_len": args.segment_len, "wa_short": args.wa_short,
+                "train_num_frames": int(cfg.get("data", {}).get("num_frames", -1)),
+                "matches_locked_protocol": (args.clip_len == 16 and args.stride == 8),
+                "robust_scale": bool(args.robust_scale),
+                "config": args.config, "data_root": args.data_root,
+            }
+            json.dump({"protocol": protocol, "aggregate": agg, "per_segment": results},
+                      f, indent=2)
         print(f"\nOURS W-MPJPE  per-clip={agg['W_MPJPE']:.1f}  per-seq-median={agg['W_MPJPE_smed']:.1f}  "
               f"per-seq-pooled={agg['W_MPJPE_spool']:.1f}")
         print(f"OURS WA(short/long)  per-clip={agg['WA_MPJPE_short']:.1f}/{agg['WA_MPJPE_long']:.1f}  "
