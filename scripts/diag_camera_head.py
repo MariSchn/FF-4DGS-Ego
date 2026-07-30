@@ -201,6 +201,10 @@ def main() -> None:
     ap.add_argument("--clip_len", type=int, default=16)
     ap.add_argument("--stride", type=int, default=8)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--force_enable_cam", action="store_true",
+                    help="Build the camera head even if the config disables it. The head's weights "
+                         "come from the base checkpoint either way, so this diagnoses the same "
+                         "frozen camera head the world eval uses, from any training config.")
     args = ap.parse_args()
 
     import smplx
@@ -211,6 +215,9 @@ def main() -> None:
     cfg = yaml.safe_load(open(args.config))
     device = "cuda" if torch.cuda.is_available() else "cpu"
     mcfg = cfg["model"]
+    if args.force_enable_cam and not mcfg.get("enable_cam", True):
+        print("[force_enable_cam] config had enable_cam: false - building the camera head anyway")
+        mcfg["enable_cam"] = True
 
     # The camera head only exists if the model was built with it; make that explicit rather than
     # letting `camera_poses` silently go missing and reporting a meaningless all-NaN table.
