@@ -51,6 +51,12 @@ def main() -> None:
                          "from a RANDOMLY initialized backbone (fixed seed 0). If these "
                          "tokens train a head as well as the pretrained ones, the "
                          "'reconstruction features encode metric depth' claim is dead.")
+    ap.add_argument("--cam_token_out", default=None,
+                    help="also dump the per-frame CAMERA token (token_list[-1][:,:,0]) here, one "
+                         "[S,C] bf16 tensor per clip under the same <seq>_<offset>.pt key. This is "
+                         "what CameraHead consumes; the patch-token cache strips it, so camera-head "
+                         "training is impossible without it. ~64 KB/clip vs ~16.8 MB, so it is "
+                         "nearly free to build in the same pass.")
     ap.add_argument("--save_model", default=None,
                     help="save the constructed model's state_dict here (random-init arm: the "
                          "eval points model.checkpoint at this file so the eval-time backbone "
@@ -91,6 +97,9 @@ def main() -> None:
         emit_cache_key=True,
     )
     os.makedirs(args.out, exist_ok=True)
+    if args.cam_token_out:
+        os.makedirs(args.cam_token_out, exist_ok=True)
+        print(f"also dumping camera tokens -> {args.cam_token_out}", flush=True)
 
     # Corrupt-clip tolerance: decord's threaded decoder can hard-fail on damaged
     # mp4 bitstreams (observed: "Error at MB" -> DECORDError kills the worker).
@@ -131,11 +140,23 @@ def main() -> None:
             token_list, patch_start_idx, _, _ = model.visual_geometry_transformer(
                 imgs, use_motion=False)
             tokens = token_list[-1][:, :, patch_start_idx:]     # [B, S, P, C]
+            # CameraHead reads latest_feat[:, :, 0] - the camera token, which sits BEFORE
+            # patch_start_idx and is therefore stripped by the slice above. Without it the
+            # camera head cannot be trained from cache at all. It is one token per frame:
+            # [S, C] bf16 is ~64 KB/clip against ~16.8 MB for the patch tokens, so dumping it
+            # alongside costs ~0.4% more disk and saves a second full backbone pass.
+            cam_tokens = token_list[-1][:, :, 0] if args.cam_token_out else None
         tokens = tokens.to(torch.bfloat16).cpu()
+        if cam_tokens is not None:
+            cam_tokens = cam_tokens.to(torch.bfloat16).cpu()    # [B, S, C]
         for b, p in enumerate(paths):
             if not os.path.exists(p):
                 torch.save(tokens[b].clone(), p)
                 done += 1
+            if cam_tokens is not None:
+                cp = os.path.join(args.cam_token_out, os.path.basename(p))
+                if not os.path.exists(cp):
+                    torch.save(cam_tokens[b].clone(), cp)
         if (done + skip) % 200 < args.batch_size:
             print(f"cache progress: done={done} skip={skip}", flush=True)
     print(f"CACHE_BUILD_DONE done={done} skip={skip} out={args.out}", flush=True)
