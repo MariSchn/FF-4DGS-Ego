@@ -162,31 +162,48 @@ the same 60-sequence subset and matched segment counts, so they differ only in t
 the camera trajectory. Offline rows share a single DROID/HaWoR trajectory, making this the most
 controlled comparison available.
 
-> **NUMBERS PENDING RE-MEASUREMENT (2026-07-28).** Every row that passes through our own world
-> lift was invalidated by an identity-camera-pose bug: the `gs_anchor_only` fast path returned
-> before the rasterizer, which is what publishes `rendered_extrinsics`, so `predict_clip` fell
-> back to identity `c2w` and the world trajectory had zero camera translation *and* rotation.
-> Fixed in `9dd474d`; the full-157 re-dump is running. The baseline rows below are unaffected
-> (they never call `predict_clip`), as are all camera-frame C-MPJPE numbers.
+**Protocol.** 16 frames at 224x224 in **both training and inference**; chunks of 16 with an
+overlap of 8, predictions averaged on the overlap. W-MPJPE uses a single first-window rigid
+alignment (rotation + translation, scale held fixed, never re-solved) that is reused for every
+later frame, with no per-chunk re-alignment. WA-MPJPE uses a per-window Procrustes (similarity)
+alignment. Long window = 128-frame segments.
+
+> **OURS ROWS PENDING RE-MEASUREMENT AT THE MATCHED 16/8 SETTING (2026-07-30).** Two issues were
+> found and fixed. (i) An identity-camera-pose bug: the `gs_anchor_only` fast path returned before
+> the rasterizer, which is what publishes `rendered_extrinsics`, so `predict_clip` silently fell
+> back to identity `c2w` and the world trajectory had zero camera translation *and* rotation
+> (fixed in `9dd474d`). (ii) A train/inference mismatch: the head is trained on 16-frame clips but
+> every world eval had been run with `--clip_len 32 --stride 16`, i.e. double the training length
+> and out of distribution. The full-157 re-run at the matched 16/8 setting is in flight.
+> The baseline rows below are unaffected by both: they never call `predict_clip`, and they are
+> external per-frame predictions scored independently of our clip length. All camera-frame
+> C-MPJPE numbers are likewise unaffected.
 
 | Row | Regime | W-MPJPE | WA-short | WA-long | C-abs |
 |---|---|---|---|---|---|
-| Ours (self-chained) | online | [re-measuring] | - | - | - |
-| Ours + SLAM | offline | [re-measuring] | - | - | - |
-| WiLoR + SLAM | offline | 143.2 | 29.2 | 48.6 | 71.2 |
-| HaWoR | offline | 147.2 | 34.6 | 56.1 | 94.8 |
-| HaMeR + SLAM | offline | 150.6 | 30.6 | 49.9 | 73.7 |
+| Ours (self-chained) | online | [re-measuring at 16/8] | - | - | - |
+| Ours + SLAM | offline | [re-measuring at 16/8] | - | - | - |
+| HaWoR | offline | 215.6 | 42.0 | 71.7 | 86.9 |
+| WiLoR + SLAM | offline | 219.0 | 36.4 | 65.1 | 84.0 |
+| HaMeR + SLAM | offline | 227.6 | 37.5 | 66.5 | 89.0 |
 
-What the bug did *not* invalidate is the shape of the problem: at 128 frames every method we can
-run is far from a GT-trajectory oracle, so the long-window error is dominated by the camera
-trajectory rather than the hand. It did invalidate our earlier conclusion that the scene scale is
-neutral - with identity cameras the scale multiplied a zero translation, which is exactly why all
-three scale variants were bit-identical on 314/314 segments. With real camera poses restored, the
-hand-derived scene scale measures 0.858 against a true camera-trajectory scale of 1.111
-(ratio 0.574), i.e. we under-scale the camera trajectory by ~43%. Because W/WA align rigidly
-without re-solving scale, that under-scale converts directly into trajectory shape error, and it
-is now the leading candidate lever. We report the long window as a characterized limitation until
-the re-measurement lands.
+A 20-sequence preview at the matched 16/8 setting gives ours W 166.6, WA-short 27.8, WA-long
+54.2, C-abs 29.7, against a re-anchor-every-16-frames ceiling of 25.2. Clip length barely moves
+W (167.9 at 32 frames) but does move the camera-frame error: C-abs degrades monotonically as
+clips lengthen, 29.7 / 30.2 / 30.7 / 32.2 at 16 / 32 / 48 / 64, because the head only ever saw
+16 frames. That is the concrete cost of the mismatch and the reason the matched setting is the
+one reported.
+
+The shape of the long-window problem is robust to both fixes: every method we can run sits far
+from a GT-trajectory oracle, so the error is dominated by the camera trajectory rather than the
+hand. What the fixes did overturn is the list of levers. Re-measured on valid data, per-clip and
+per-sequence scene scale (1.5%), chunk-linking (1.3%), dense-chaining (negative) and an oracle
+GT wrist depth (2%) are all neutral or harmful, and offline SLAM lands on top of our own
+trajectory rather than improving it. Reducing the number of chaining seams five-fold buys only
+8% of W while leaving WA-long flat, so the drift accumulates per frame rather than per seam. The
+single informative comparison is that discarding our predicted camera entirely and chaining on
+hand overlap alone *beats* using it, which localizes the remaining error in the frozen camera
+head rather than in any post-hoc correction of its output.
 
 ### 5.2 Box robustness
 winner10ep degrades to 31.8mm under 0.2 jitter and 43.5mm with fixed 0.30 boxes. The
