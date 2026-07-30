@@ -748,6 +748,12 @@ def main():
     ap.add_argument("--segment_len", type=int, default=128)
     ap.add_argument("--clip_len", type=int, default=16)
     ap.add_argument("--stride", type=int, default=8)
+    ap.add_argument("--declare_protocol", default=None, metavar="REASON",
+                    help="Record a non-16/8 clip/stride as a DELIBERATE ablation rather than an "
+                         "accidental deviation, and write REASON into the result JSON. Use for "
+                         "the window-length arm (e.g. --declare_protocol 'window-length ablation: "
+                         "model trained at 32 frames'). It does NOT suppress the train/inference "
+                         "mismatch warning, which is the check that actually invalidates numbers.")
     ap.add_argument("--wa_short", type=int, default=16)
     ap.add_argument("--max_segs", type=int, default=0, help="cap segments per sequence (0 = all)")
     ap.add_argument("--oracle_cam", action="store_true",
@@ -809,14 +815,23 @@ def main():
     _tf = int(cfg.get("data", {}).get("num_frames", 16))
     if (args.clip_len, args.stride) != (16, 8):
         print("=" * 78, flush=True)
-        print(f"!! PROTOCOL DEVIATION: clip_len={args.clip_len} stride={args.stride}, "
-              f"expected the locked 16/8.", flush=True)
-        print("!! Numbers from this run are NOT paper-reportable unless this is a deliberate "
-              "probe (e.g. the context-length gate).", flush=True)
+        if args.declare_protocol:
+            # A declared window-length ablation is legitimate PROVIDED the model was trained at
+            # this window. Declaring it does not excuse a train/inference mismatch, so the
+            # out-of-distribution check below still fires independently.
+            print(f"DECLARED PROTOCOL: clip_len={args.clip_len} stride={args.stride} "
+                  f"-- {args.declare_protocol}", flush=True)
+        else:
+            print(f"!! PROTOCOL DEVIATION: clip_len={args.clip_len} stride={args.stride}, "
+                  f"expected the locked 16/8.", flush=True)
+            print("!! Numbers from this run are NOT paper-reportable unless this is a deliberate "
+                  "probe. Pass --declare_protocol '<reason>' to record it as intentional.",
+                  flush=True)
         print("=" * 78, flush=True)
     if args.clip_len != _tf:
         print(f"!! clip_len={args.clip_len} != training num_frames={_tf} -> the model is being "
-              f"run OUT OF DISTRIBUTION.", flush=True)
+              f"run OUT OF DISTRIBUTION. This is the mismatch that invalidated a whole round of "
+              f"world numbers; --declare_protocol does NOT make it valid.", flush=True)
     from scripts.hand_vis_utils import MANOModel
     mano_model = MANOModel(cfg["visualization"]["mano_model_folder"])
     model = build_model(cfg, device)
@@ -914,11 +929,19 @@ def main():
             # audited after the fact - exactly how the provenance of the short-window world
             # table became unrecoverable (the producing job script was gone and the JSON did
             # not say what clip length it used).
+            _tf_stamp = int(cfg.get("data", {}).get("num_frames", -1))
             protocol = {
                 "clip_len": args.clip_len, "stride": args.stride,
                 "segment_len": args.segment_len, "wa_short": args.wa_short,
-                "train_num_frames": int(cfg.get("data", {}).get("num_frames", -1)),
+                "train_num_frames": _tf_stamp,
                 "matches_locked_protocol": (args.clip_len == 16 and args.stride == 8),
+                # A declared ablation is NOT the same artifact as an accidental deviation, but it
+                # is also not the locked protocol. Keep both facts: matches_locked_protocol stays
+                # honestly false, and the reason this run is legitimate is recorded next to it.
+                "declared_protocol": args.declare_protocol,
+                # The mismatch that actually invalidates numbers is inference != training, not
+                # inference != 16. Record it explicitly so an audit needs no other file.
+                "train_inference_match": (args.clip_len == _tf_stamp),
                 "robust_scale": bool(args.robust_scale),
                 "config": args.config, "data_root": args.data_root,
             }
