@@ -22,7 +22,9 @@ data:
   resolution: [224, 224]
   clip_stride: 16
   val_split: 0.02
-  num_workers: 4
+  # 4 workers OOM-killed the 24G job when the val loader's workers stacked on the train
+  # loader's; 2 halves resident dataloader RAM and the feature cache makes loading cheap anyway.
+  num_workers: 2
 
 model:
   checkpoint: "models/NeoVerse/reconstructor.ckpt"
@@ -46,15 +48,30 @@ model:
     dropout: 0.0
     crop_global_depth: 1
 
+# Loss weights copied VERBATIM from the proven recipe (configs/exp_p4_jitterrob.yaml, the
+# 23.6mm C-abs headline). The previous mix3 weights were a different, unvalidated recipe and -
+# critically - omitted kp3d_abs entirely. kp3d_abs is the absolute-3D keypoint loss; our own
+# causal ablation shows removing it destroys absolute placement (C_abs 725 vs C_rr 131) while
+# leaving articulation intact. Training mix3cyrus without it produced exactly that signature:
+# C_abs 119.9 (5x worse than 23.6) with C_rr 16.7 (unchanged). Do not diverge from these
+# weights without re-running that ablation.
 loss_weights:
-  kp3d:          0.05
-  kp2d:          0.05
-  global_orient: 0.32
-  hand_pose:     0.32
-  betas:         0.32
-  transl:        3.2
-  gs_l1:         0.0
-  gs_lpips:      0.0
+  betas:              0.01
+  global_orient:      0.01
+  hand_pose:          0.01
+  kp2d:               0.05
+  kp3d:               0.05
+  kp3d_abs:           0.5
+  transl:             1.0
+  hand_depth_anchor:  0.0
+  root_anchor:        0.0
+  gs_l1:              0.0
+  gs_lpips:           0.0
+
+# Present in the proven recipe and previously missing here.
+metric_scale:
+  enable: true
+  clamp: [0.1, 10.0]
 
 training:
   lr: 1e-4
