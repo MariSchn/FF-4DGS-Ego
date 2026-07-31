@@ -163,11 +163,17 @@ def main():
     if sq > 0.05:
         problems.append(f"square_frac={sq:.4f} > 0.05 - boxes are still mostly SQUARE, so the "
                         f"regeneration did not change convention")
-    if not (out > 0.0):
-        problems.append(f"outside01_frac={out:.4f} - no box falls outside [0,1], so the boxes are "
-                        f"still CLAMPED")
     if kept == 0:
         problems.append("kept 0 entries - every box was rejected")
+    # outside01_frac is NOT a gate. It is evidence of unclamping only when some hand actually
+    # leaves the frame, which is a property of the FOOTAGE, not of the convention. Measured on
+    # H2O: the 3-sequence dry-run sample gave 0.0000 (those hands never exit frame) while the
+    # full 177-sequence store gave 0.0234. Gating on it would have blocked a correct
+    # regeneration. square_frac is the reliable convention marker, so gate on that alone.
+    if not (out > 0.0):
+        print(f"  note: outside01_frac={out:.4f} - no box leaves the frame in this sample. That is "
+              f"expected on a small or fully-in-frame sample and is NOT a failure; only "
+              f"square_frac gates.")
 
     for p in problems:
         print(f"  !! {p}")

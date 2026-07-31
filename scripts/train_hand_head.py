@@ -1479,6 +1479,50 @@ PROVEN_LOSS_RECIPE = {
     "betas": 0.01, "global_orient": 0.01, "hand_pose": 0.01,
 }
 
+# Step at which to verify the declared losses are actually being computed. Late enough that a
+# single degenerate batch cannot trigger it, early enough to abort before hours are wasted.
+_EFFECT_CHECK_STEP = 50
+
+
+def _check_loss_effect(loss_weights: dict, avg_terms: dict, step: int,
+                       strict: bool = True) -> None:
+    """Verify every loss with a nonzero WEIGHT has produced a nonzero VALUE.
+
+    _check_loss_recipe reads the config, so it proves only that a term was *declared*. It cannot
+    detect a term that is declared and then never computed - a missing GT field, a wrong data
+    root, or a warmup ramp pinned at zero all produce exactly that, and training then completes
+    with a healthy-looking loss curve.
+
+    This is the check that catches it: at ``step`` the running average of each weighted term must
+    be nonzero. A term that is genuinely, legitimately zero here (a perfectly fit loss at step 50)
+    does not happen in practice on this model.
+    """
+    dead = []
+    for name, weight in sorted(loss_weights.items()):
+        if float(weight) == 0.0:
+            continue                                  # deliberately disabled, nothing to check
+        if name not in avg_terms:
+            continue                                  # term is not tracked in avg_terms at all
+        if abs(float(avg_terms[name])) <= 0.0:
+            dead.append(f"{name} (weight={weight}) contributed EXACTLY 0.0")
+
+    print(f"\n[loss effect check @ step {step}] " +
+          "  ".join(f"{k}={avg_terms[k]:.5f}" for k in sorted(loss_weights)
+                    if k in avg_terms and float(loss_weights[k]) != 0.0), flush=True)
+    if not dead:
+        print("[loss effect check] PASSED: every weighted loss is actually firing.", flush=True)
+        return
+
+    for d in dead:
+        print(f"  !! {d}", flush=True)
+    msg = ("Refusing to continue: a loss with a nonzero weight is never computed, so the model is "
+           "training WITHOUT the supervision the config claims. This is how a run reaches C-abs "
+           "725 while its own log prints kp3d_abs=1.0. Pass --allow_recipe_drift only for a "
+           "deliberate ablation.")
+    if strict:
+        raise SystemExit(msg)
+    print(f"[loss effect check] WARNING (non-strict): {msg}", flush=True)
+
 
 def _check_loss_recipe(cfg, strict: bool = True):
     """Fail loudly when the loss recipe drifts from the one that produced the headline.
@@ -2486,13 +2530,29 @@ def train():
                                "train/grad_norm":          grad_norm.item(),
                                "lr": scheduler.get_last_lr()[0]}, step=global_step)
 
+                # EFFECT-LEVEL RECIPE CHECK, once, after enough steps to average out a quiet batch.
+                # _check_loss_recipe validates what the config DECLARES; it cannot see whether a
+                # term is actually computed. A weight can be 1.0 while the loss is identically 0
+                # (missing GT field, wrong data root, a ramp stuck at 0), and training then runs to
+                # completion looking healthy. That is how a control run reached C-abs 725 with
+                # kp3d_abs=1.0 printed in its own log. Verify the weighted terms actually fire.
+                if global_step == _EFFECT_CHECK_STEP:
+                    _check_loss_effect(loss_weights, avg_terms, global_step,
+                                       strict=not args.allow_recipe_drift)
+
                 if global_step % log_every == 0 or global_step == 1:
                     lr = scheduler.get_last_lr()[0]
                     tqdm.write(
                         f"  step {global_step} | train_loss={avg_loss:.4f} "
                         f"(t={avg_terms['transl']:.4f} o={avg_terms['global_orient']:.4f} "
                         f"p={avg_terms['hand_pose']:.4f} b={avg_terms['betas']:.4f} "
-                        f"kp3d={avg_terms['kp3d']:.4f} kp2d={avg_terms['kp2d']:.4f} "
+                        f"kp3d={avg_terms['kp3d']:.4f} "
+                        # kp3d_abs was MISSING from this line, which made an all-important term
+                        # invisible in every job log: a run with dead absolute supervision looked
+                        # identical to a healthy one. ramp is shown because a nonzero weight still
+                        # contributes nothing while abs_ramp is 0.
+                        f"kp3d_abs={avg_terms['kp3d_abs']:.4f}(ramp={abs_ramp:.2f}) "
+                        f"kp2d={avg_terms['kp2d']:.4f} "
                         f"gs_l1={avg_terms['gs_l1']:.4f} gs_lpips={avg_terms['gs_lpips']:.4f}) "
                         f"| grad_norm={grad_norm.item():.4f} | lr={lr:.2e}"
                     )
