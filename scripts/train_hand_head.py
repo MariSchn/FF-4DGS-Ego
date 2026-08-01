@@ -2537,7 +2537,8 @@ def train():
                 # completion looking healthy. That is how a control run reached C-abs 725 with
                 # kp3d_abs=1.0 printed in its own log. Verify the weighted terms actually fire.
                 if global_step == _EFFECT_CHECK_STEP:
-                    _check_loss_effect(loss_weights, avg_terms, global_step,
+                    # `w` is this scope's loss-weight dict (w = cfg["loss_weights"] above).
+                    _check_loss_effect(w, avg_terms, global_step,
                                        strict=not args.allow_recipe_drift)
 
                 if global_step % log_every == 0 or global_step == 1:

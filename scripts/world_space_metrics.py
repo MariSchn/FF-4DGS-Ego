@@ -91,6 +91,89 @@ def apply_similarity(pts: torch.Tensor, s: torch.Tensor, r: torch.Tensor, t: tor
 
 
 # --------------------------------------------------------------------------- chaining
+# --------------------------------------------------------------------------- gravity-view (GVHMR)
+# Ported from zju3dv/GVHMR (hmr4d/utils/geo/hmr_global.get_R_c2gv). The GV frame per frame has
+# y=gravity, x=gravity x camera-forward, z=x x y; composing world orientation with only YAW about
+# gravity keeps the gravity axis drift-free (GVHMR's core long-sequence trick). Torch-only so this
+# module stays pytorch3d-free and unit-testable.
+def _rodrigues(axis: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
+    """Axis-angle -> rotation matrix, per row. axis [...,3] (unit), angle [...] -> [...,3,3]."""
+    ax, ay, az = axis[..., 0], axis[..., 1], axis[..., 2]
+    zero = torch.zeros_like(ax)
+    K = torch.stack([torch.stack([zero, -az, ay], -1),
+                     torch.stack([az, zero, -ax], -1),
+                     torch.stack([-ay, ax, zero], -1)], -2)                    # [...,3,3] skew-sym
+    eye = torch.eye(3, device=axis.device, dtype=axis.dtype).expand(K.shape)
+    s = torch.sin(angle)[..., None, None]
+    c = (1.0 - torch.cos(angle))[..., None, None]
+    return eye + s * K + c * (K @ K)
+
+
+def get_R_c2gv(R_w2c: torch.Tensor, gravity_in_w: torch.Tensor) -> torch.Tensor:
+    """Camera->gravity-view rotation (direct port of GVHMR get_R_c2gv). GV axes in cam coords:
+    y = gravity, x = y x cam_forward(z), z = x x y. R_w2c [...,3,3] world->cam; gravity_in_w [3]."""
+    g = (gravity_in_w / gravity_in_w.norm().clamp_min(1e-9)).to(R_w2c)
+    y = torch.einsum('...ij,j->...i', R_w2c, g)                                # gravity in cam
+    zc = torch.tensor([0., 0., 1.], device=R_w2c.device, dtype=R_w2c.dtype).expand_as(y)
+    x = torch.cross(y, zc, dim=-1)
+    n = x.norm(dim=-1, keepdim=True)
+    x = torch.where(n < 1e-5,
+                    torch.tensor([1., 0., 0.], device=R_w2c.device, dtype=R_w2c.dtype).expand_as(x),
+                    x / n.clamp_min(1e-9))
+    z = torch.cross(x, y, dim=-1)
+    R_gv2c = torch.stack([x, y, z], dim=-1)                                    # cols = gv axes in cam
+    return R_gv2c.transpose(-1, -2)
+
+
+def _mean_rotation(R: torch.Tensor) -> torch.Tensor:
+    """Chordal-mean of a rotation stack [N,3,3], projected back onto SO(3) via SVD."""
+    M = R.mean(0)
+    U, _, Vt = torch.linalg.svd(M)
+    Rm = U @ Vt
+    if torch.det(Rm) < 0:
+        U = U.clone(); U[:, -1] = -U[:, -1]; Rm = U @ Vt
+    return Rm
+
+
+def gravity_align_c2w(c2w_pred: torch.Tensor, c2w_gt: torch.Tensor,
+                      gravity_in_w: torch.Tensor, mode: str = "tilt") -> torch.Tensor:
+    """GAUGE-SAFE gravity-view oracle correction of a PREDICTED cam->world trajectory.
+
+    Both corrections stay in the PREDICTED world frame - the physical gravity is read in the
+    gauge-independent CAMERA frame (via the GT rotation) and referenced to the predicted
+    trajectory's OWN drift-free direction, so the GT-world gauge is never mixed in (that mix was a
+    bug: it made even the full-rotation oracle worse than the baseline). Translation is never
+    touched, isolating the rotation contribution. ``mode``:
+      * "tilt": remove per-frame TILT/ROLL drift only - align each frame's predicted gravity to the
+        segment-median predicted gravity, keeping predicted yaw (about gravity) + translation.
+        The GVHMR gravity-view oracle: does a gravity anchor fix the long-window W drift?
+      * "rot":  remove ALL rotation drift - replace predicted rotations with the GT rotation
+        transported into the predicted gauge by the constant offset G = chordal-mean(Rp Rg^T).
+        The camera-rotation ceiling.
+    A trajectory with no rotation drift is returned unchanged (both modes), so gravOracle/rotOracle
+    below the baseline means real drift was removed. c2w_* [N,4,4]; gravity_in_w [3]."""
+    out = c2w_pred.clone()
+    Rp, Rg = c2w_pred[:, :3, :3], c2w_gt[:, :3, :3]
+    if mode == "rot":
+        G = _mean_rotation(torch.einsum('nij,nkj->nik', Rp, Rg))               # pred<-GT constant gauge
+        out[:, :3, :3] = torch.einsum('ij,njk->nik', G, Rg)
+        return out
+    g = (gravity_in_w / gravity_in_w.norm().clamp_min(1e-9)).to(Rp)
+    g_c = torch.einsum('nij,j->ni', Rg.transpose(-1, -2), g)                   # physical gravity in camera (gauge-free)
+    pg = torch.einsum('nij,nj->ni', Rp, g_c)                                   # predicted gravity in PRED world
+    pg = pg / pg.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+    ref = pg.median(0).values                                                  # drift-free reference (pred gauge)
+    ref = (ref / ref.norm().clamp_min(1e-9)).expand_as(pg)
+    v = torch.cross(pg, ref, dim=-1)
+    s = v.norm(dim=-1)
+    c = (pg * ref).sum(-1).clamp(-1.0, 1.0)
+    axis = torch.where(s.unsqueeze(-1) > 1e-6, v / s.unsqueeze(-1).clamp_min(1e-9),
+                       torch.tensor([1., 0., 0.], device=Rp.device, dtype=Rp.dtype).expand_as(v))
+    R_fix = _rodrigues(axis, torch.atan2(s, c))                                # per-frame tilt-drift removal
+    out[:, :3, :3] = torch.einsum('nij,njk->nik', R_fix, Rp)
+    return out
+
+
 def chain_trajectories_by_overlap(clip_worlds: list[torch.Tensor], overlap: int) -> torch.Tensor:
     """Stitch a list of clip-local world trajectories into one global trajectory.
 
@@ -114,6 +197,69 @@ def chain_trajectories_by_overlap(clip_worlds: list[torch.Tensor], overlap: int)
         global_traj[-o:] = 0.5 * (global_traj[-o:] + clip_global[:o])
         global_traj = torch.cat([global_traj, clip_global[o:]], dim=0)
     return global_traj
+
+
+def chain_trajectories_dense(clip_worlds: list[torch.Tensor],
+                             clip_dense: list[torch.Tensor],
+                             dense_valid: list[torch.Tensor], overlap: int,
+                             per_clip_scale: bool = False, robust: bool = True,
+                             min_corr: int = 64) -> tuple[torch.Tensor, dict]:
+    """MonST3R-inspired G1 gate: greedy chaining where each link's transform is solved from
+    DENSE static-scene correspondences instead of the ~10 cm hand-joint cluster.
+
+    Rationale: the long-window W bottleneck is accumulated per-link rigid error - 16 joints
+    (+1 camera centre) constrain each seam's ROTATION poorly, and drift is the product of the
+    per-link errors. A shared overlap frame is the same physical image observed by both clips,
+    so the same pixel unprojected under each clip's depth+camera is a correspondence pair on the
+    static scene: thousands of room-scale points per seam pin rotation with a lever arm the hand
+    cluster cannot provide (MonST3R's static-scene alignment idea; hands are pre-masked out by
+    the caller, our analogue of its dynamic masks).
+
+    ``clip_worlds[i]``  [Lc, J, 3]  hand joints in clip i's local world (what gets scored).
+    ``clip_dense[i]``   [Lc, P, 3]  scene points in the SAME clip-local world frame.
+    ``dense_valid[i]``  [Lc, P]     per-point validity (finite depth, non-hand).
+    Correspondence is positional: (frame, point-index) - the caller builds every clip's dense set
+    on the same fixed pixel grid, so no matching is needed on the shared frames.
+    ``per_clip_scale=False`` (default) pins each link to rigid SE(3): the pooled scene scale is
+    already applied, so a per-link Umeyama scale would only re-fit noise (the _linkr lesson).
+    Falls back to the joint-based solve on links with fewer than ``min_corr`` valid pairs.
+    Returns ``(global_traj [T,J,3], diag)`` with per-link residuals/counts in ``diag``.
+    """
+    assert len(clip_worlds) >= 2 and overlap >= 1
+    assert len(clip_dense) == len(clip_worlds) == len(dense_valid)
+    solver = solve_similarity_robust if robust else solve_similarity
+    lc = clip_worlds[0].shape[0]
+    step = lc - overlap
+    global_traj = clip_worlds[0].clone()
+    prev_dense_g = clip_dense[0].clone()           # previous clip's dense set, globalized
+    diag = {"n_corr": [], "resid_mm": [], "fallback": 0}
+    for i in range(1, len(clip_worlds)):
+        o = min(overlap, clip_worlds[i].shape[0], global_traj.shape[0])
+        vb = dense_valid[i - 1][step:step + o] & dense_valid[i][:o]          # [o, P] both-valid
+        src_d = clip_dense[i][:o][vb]                                        # [N,3] clip-local
+        dst_d = prev_dense_g[step:step + o][vb]                              # [N,3] global
+        if src_d.shape[0] >= min_corr:
+            s, r, t = solver(src_d, dst_d)
+            if not per_clip_scale:
+                # keep the (scale-invariant) rotation, re-solve translation under s=1.
+                sd64, dd64 = src_d.to(torch.float64), dst_d.to(torch.float64)
+                t = (dd64.mean(0) - r.to(torch.float64) @ sd64.mean(0)).to(r.dtype)
+                s = torch.ones((), dtype=r.dtype, device=r.device)
+            resid = (apply_similarity(src_d, s, r, t) - dst_d).norm(dim=-1)
+            diag["n_corr"].append(int(src_d.shape[0]))
+            diag["resid_mm"].append(float(resid.median()) * 1000.0)
+        else:                                                                # joint fallback
+            src_j = clip_worlds[i][:o].reshape(-1, 3)
+            dst_j = global_traj[-o:].reshape(-1, 3)
+            s, r, t = solve_similarity(src_j, dst_j)
+            diag["n_corr"].append(int(src_d.shape[0]))
+            diag["resid_mm"].append(float("nan"))
+            diag["fallback"] += 1
+        clip_global = apply_similarity(clip_worlds[i], s, r, t)
+        prev_dense_g = apply_similarity(clip_dense[i], s, r, t)
+        global_traj[-o:] = 0.5 * (global_traj[-o:] + clip_global[:o])
+        global_traj = torch.cat([global_traj, clip_global[o:]], dim=0)
+    return global_traj, diag
 
 
 def chain_trajectories_global(clip_worlds: list[torch.Tensor], overlap: int,

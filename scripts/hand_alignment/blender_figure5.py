@@ -132,11 +132,11 @@ def build_gaussian_cloud(g, opacity_thresh, radius_scale, radius_max, emission, 
     return obj
 
 
-def hand_material(name, base, subsurf):
+def hand_material(name, base, subsurf, roughness=0.45):
     mat = bpy.data.materials.new(name); mat.use_nodes = True
     bsdf = mat.node_tree.nodes["Principled BSDF"]
     bsdf.inputs["Base Color"].default_value = (*base, 1.0)
-    bsdf.inputs["Roughness"].default_value = 0.45
+    bsdf.inputs["Roughness"].default_value = roughness
     for key, val in (("Subsurface Weight", subsurf),):
         if key in bsdf.inputs:
             bsdf.inputs[key].default_value = val
@@ -159,7 +159,8 @@ def add_hand(path, name, mat):
 
 
 def setup_camera(extr_matrix, intr_matrix, res, dist, tilt_deg, lift, target, fov_mult,
-                 ego, back, hero=False, extent=0.2, vfov=50.0, fill=0.55, zoom=1.0):
+                 ego, back, hero=False, extent=0.2, vfov=50.0, fill=0.55, zoom=1.0,
+                 orbit_deg=0.0):
     C = np.asarray(extr_matrix, np.float64)          # cam2world (OpenCV)
     R, t = C[:3, :3], C[:3, 3]
     view_dir = R[:, 2]                                # OpenCV +Z (look direction)
@@ -200,8 +201,14 @@ def setup_camera(extr_matrix, intr_matrix, res, dist, tilt_deg, lift, target, fo
         M.translation = mathutils.Vector(tuple(pos))
         cam.matrix_world = M
     else:
-        # external look-at toward the hand midpoint
-        pos = target - dist * view_dir + lift * up_world
+        # external look-at toward the hand midpoint; --orbit swings the viewpoint
+        # around the camera-up axis (0 = straight along the ego view direction)
+        vd = view_dir
+        if orbit_deg:
+            q = mathutils.Quaternion(mathutils.Vector(tuple(up_world)),
+                                     math.radians(orbit_deg))
+            vd = np.asarray(q.to_matrix()) @ view_dir
+        pos = target - dist * vd + lift * up_world
         fwd = mathutils.Vector(tuple(target - pos))
         M = fwd.to_track_quat("-Z", "Y").to_matrix().to_4x4()
         M.translation = mathutils.Vector(tuple(pos))
@@ -214,13 +221,13 @@ def setup_camera(extr_matrix, intr_matrix, res, dist, tilt_deg, lift, target, fo
     return cam
 
 
-def add_lights(center, up):
+def add_lights(center, up, light_scale=1.0):
     up = np.asarray(up, np.float64)
-    key = bpy.data.lights.new("key", "AREA"); key.energy = 220; key.size = 1.6
+    key = bpy.data.lights.new("key", "AREA"); key.energy = 220 * light_scale; key.size = 1.6
     ko = bpy.data.objects.new("key", key)
     ko.location = tuple(np.asarray(center) + up * 1.4 + np.array([0.8, 0.0, -0.6]))
     bpy.context.collection.objects.link(ko)
-    fill = bpy.data.lights.new("fill", "AREA"); fill.energy = 90; fill.size = 2.2
+    fill = bpy.data.lights.new("fill", "AREA"); fill.energy = 90 * light_scale; fill.size = 2.2
     fo = bpy.data.objects.new("fill", fill)
     fo.location = tuple(np.asarray(center) + up * 0.6 + np.array([-1.1, 0.2, -0.4]))
     bpy.context.collection.objects.link(fo)
@@ -252,6 +259,20 @@ def main():
     ap.add_argument("--vfov", type=float, default=50.0)
     ap.add_argument("--fill", type=float, default=0.55)
     ap.add_argument("--zoom", type=float, default=1.0)
+    ap.add_argument("--light_scale", type=float, default=1.0,
+                    help="scale key/fill light energy (small scenes blow out at 1.0)")
+    ap.add_argument("--bg", type=float, default=0.05, help="world background grey value")
+    ap.add_argument("--bg_strength", type=float, default=0.35)
+    ap.add_argument("--film_white", action="store_true",
+                    help="transparent film composited over white (white holes, "
+                         "lighting unchanged)")
+    ap.add_argument("--orbit", type=float, default=0.0,
+                    help="swing the look-at camera around the up axis (deg)")
+    ap.add_argument("--matte", action="store_true",
+                    help="clay-look hands (no subsurface, saturated palette)")
+    ap.add_argument("--hand_clear", type=float, default=0.0,
+                    help="drop gaussians within this distance of any hand vertex "
+                         "(scene units) so the meshes aren't speckled")
     ap.add_argument("--save_blend", default=None, help="also write a .blend you can open")
     ap.add_argument("--no-render", action="store_true")
     args = ap.parse_args(argv)
@@ -267,15 +288,31 @@ def main():
 
     clear_scene()
     g = parse_inria_ply(ply)
+    if args.hand_clear > 0:
+        hv_all = [parse_obj(p)[0] for p in (hl, hr) if os.path.exists(p)]
+        if hv_all:
+            hv_all = np.concatenate(hv_all, 0)
+            keep = np.ones(len(g["xyz"]), bool)
+            for i in range(0, len(g["xyz"]), 8192):   # chunked pairwise distances
+                d = np.linalg.norm(g["xyz"][i:i + 8192, None, :] - hv_all[None], axis=2)
+                keep[i:i + 8192] = d.min(axis=1) > args.hand_clear
+            print(f"[hand_clear] dropped {(~keep).sum():,} gaussians near hands")
+            g = {k: v[keep] for k, v in g.items()}
     build_gaussian_cloud(g, args.opacity_thresh, args.radius_scale, args.radius_max,
                          args.emission, args.lum_floor)
 
+    if args.matte:
+        skin_mat = hand_material("skin", (0.87, 0.50, 0.44), 0.0, roughness=0.65)
+        glove_mat = hand_material("glove", (0.45, 0.66, 0.88), 0.0, roughness=0.65)
+    else:
+        skin_mat = hand_material("skin", (0.83, 0.46, 0.40), 0.25)
+        glove_mat = hand_material("glove", (0.18, 0.46, 0.80), 0.0)
     hand_pts = []
     if os.path.exists(hl):
-        add_hand(hl, "hand_left", hand_material("skin", (0.83, 0.46, 0.40), 0.25))
+        add_hand(hl, "hand_left", skin_mat)
         hand_pts.append(parse_obj(hl)[0])
     if os.path.exists(hr):
-        add_hand(hr, "hand_right", hand_material("glove", (0.18, 0.46, 0.80), 0.0))
+        add_hand(hr, "hand_right", glove_mat)
         hand_pts.append(parse_obj(hr)[0])
     if hand_pts:
         hv = np.concatenate(hand_pts, 0)
@@ -287,12 +324,13 @@ def main():
     up_world = -np.asarray(extr, np.float64)[:3, 1]
     setup_camera(extr, intr, args.res, args.dist, args.tilt, args.lift, target,
                  args.fov_mult, args.ego, args.back,
-                 hero=args.hero, extent=extent, vfov=args.vfov, fill=args.fill, zoom=args.zoom)
-    add_lights(target, up_world)
+                 hero=args.hero, extent=extent, vfov=args.vfov, fill=args.fill,
+                 zoom=args.zoom, orbit_deg=args.orbit)
+    add_lights(target, up_world, args.light_scale)
 
     world = bpy.data.worlds.new("w"); world.use_nodes = True
-    world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.05, 0.05, 0.06, 1.0)
-    world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.35
+    world.node_tree.nodes["Background"].inputs["Color"].default_value = (args.bg, args.bg, args.bg, 1.0)
+    world.node_tree.nodes["Background"].inputs["Strength"].default_value = args.bg_strength
     bpy.context.scene.world = world
 
     sc = bpy.context.scene
@@ -311,7 +349,9 @@ def main():
     sc.cycles.max_bounces = 8
     sc.render.resolution_x = args.res
     sc.render.resolution_y = args.res
-    sc.render.film_transparent = False
+    sc.render.film_transparent = args.film_white
+    if args.film_white:
+        sc.render.image_settings.color_mode = "RGBA"   # composite over white afterwards
     sc.view_settings.view_transform = "AgX" if "AgX" in [v.name for v in bpy.types.ColorManagedViewSettings.bl_rna.properties['view_transform'].enum_items] else "Standard"
 
     # open every 3D viewport in Rendered shading, looking THROUGH the camera, so the

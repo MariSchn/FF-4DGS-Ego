@@ -992,7 +992,15 @@ def main():
                   f"  -> ratio far from 1 => our hand scale is BIASED vs truth; large ± => NOISY; "
                   f"both feed world drift (the world-lift scales camera translation by s_hand).")
     else:
-        print("No valid segments evaluated.")
+        # Exit NONZERO. Returning 0 here made a total failure look like a successful job: the
+        # H2O run "completed" in 46 s having evaluated nothing (every sequence raised
+        # KeyError: 'gt'), and its SLURM state was COMPLETED. A job that produced no measurement
+        # must fail loudly, or a dependent job will happily chain off it.
+        raise SystemExit(
+            "No valid segments evaluated - every sequence was skipped. This is a FAILURE, not an "
+            "empty result: check the per-sequence [skip ...] lines above for the cause (a missing "
+            "cache key and a wrong data_root both look like this)."
+        )
 
 
 if __name__ == "__main__":

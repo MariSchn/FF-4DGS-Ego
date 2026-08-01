@@ -105,9 +105,18 @@ def regen_sequence(seq_dir, res, rf, dry_run=False, no_backup=False):
         bak = bp.replace(".pt", ".square_backup.pt")
         if not os.path.exists(bak):
             torch.save(old, bak)
-    torch.save({"bboxes": torch.from_numpy(boxes),
-                "valid": torch.from_numpy(ok & valid.numpy()),
-                "convention": "joints_to_bbox rf1.5 rectangular unclamped (regenerated)"}, bp)
+
+    # PRESERVE every other key. The store's box file also carries "gt": the GT MANO params
+    # rewritten from world into CAMERA frame, which HOT3DHandDataset reads as cached["gt"].
+    # Writing a fresh dict with only bboxes/valid silently deleted it and every eval on the
+    # store then died with KeyError: 'gt'. That transform (_transform_gt_to_crop_local) is
+    # world -> camera only; it takes bbox_frames but never uses it, so "gt" is INDEPENDENT of
+    # the box convention and is correct to carry across unchanged.
+    out_dict = {k: v for k, v in old.items() if k not in ("bboxes", "valid")}
+    out_dict["bboxes"] = torch.from_numpy(boxes)
+    out_dict["valid"] = torch.from_numpy(ok & valid.numpy())
+    out_dict["convention"] = "joints_to_bbox rf1.5 rectangular unclamped (regenerated)"
+    torch.save(out_dict, bp)
     return "ok", stats
 
 

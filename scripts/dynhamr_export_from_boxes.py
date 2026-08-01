@@ -108,6 +108,13 @@ def project_px(joints_cam, focal, cx, cy):
 
 
 def export_seq(seq_dir, seq, runner, box_dir, out_root, tid):
+    # Skip if already exported: the resumable full-157 build re-invokes this every job, and
+    # WiLoR inference over ~300 frames is the bottleneck. Cached tracks are deterministic, so a
+    # non-empty track dir means this seq is done -> don't redo it.
+    track_dir_done = os.path.join(out_root, "dynhamr", "track_preds", seq, tid)
+    if os.path.isdir(track_dir_done) and any(
+            fn.endswith("_keypoints.json") for fn in os.listdir(track_dir_done)):
+        return {"skipped": True, "N": 0, "n_pred": 0, "res": "cached"}
     b = load_boxes(seq_dir, seq, box_dir)
     if b is None:
         return None

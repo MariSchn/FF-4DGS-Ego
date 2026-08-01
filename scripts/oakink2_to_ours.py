@@ -74,16 +74,25 @@ def ego_serial_of(anno, override):
 
 def convert_seq(seq, anno, mano, image_root, out_root, device, ego_serial, max_frames=0):
     ego = ego_serial_of(anno, ego_serial)
-    frames = list(anno.get("mocap_frame_id_list", sorted(anno.get("raw_mano", {}).keys())))
+    # cam_intr/cam_extr are keyed by ROLE NAME ('egocentric'), while cam_def maps serial->name
+    # and the image directories use the SERIAL (verified on anno_preview 2026-07-26). Resolve the
+    # role key via cam_def, falling back to serial keying in case another release keys by serial.
+    ego_key = anno.get("cam_def", {}).get(ego, ego)
+    K_by = anno.get("cam_intr", {}).get(ego_key) or anno.get("cam_intr", {}).get(ego, {})
+    E_by = anno.get("cam_extr", {}).get(ego_key) or anno.get("cam_extr", {}).get(ego, {})
+    if not E_by:
+        print(f"SEQ_SKIP {seq}: no ego extrinsics for serial {ego} / key {ego_key}", flush=True)
+        return None
+    # Iterate CAMERA frames (extrinsics keys), NOT the mocap list: mocap runs at 4x the camera
+    # rate (verified: 10449 mocap frames vs stride-4 camera frames 1,5,9,...), so iterating mocap
+    # frames leaves 75% of cache rows invalid AND misaligns the video (written only for existing
+    # images) against the cache row index. Camera-frame iteration keeps video frame t == cache
+    # row t, the contract HOT3DHandDataset assumes.
+    frames = sorted(E_by.keys())
     if max_frames:
         frames = frames[:max_frames]
     N = len(frames)
     if N == 0:
-        return None
-    K_by = anno.get("cam_intr", {}).get(ego, {})
-    E_by = anno.get("cam_extr", {}).get(ego, {})
-    if not E_by:
-        print(f"SEQ_SKIP {seq}: no ego extrinsics for serial {ego}", flush=True)
         return None
 
     mano_ns = types.SimpleNamespace(right=mano["right"], left=mano["left"])
@@ -151,20 +160,39 @@ def convert_seq(seq, anno, mano, image_root, out_root, device, ego_serial, max_f
     out_seq = os.path.join(out_root, seq_id)
     os.makedirs(os.path.join(out_seq, "hand_data"), exist_ok=True)
     scene_dir = os.path.join(image_root, seq)
+
+    def _img_path(fid):
+        # extracted OakInk2 ego frames are zero-padded PNGs (000001.png, verified); keep jpg and
+        # unpadded fallbacks for other releases.
+        for c in (os.path.join(scene_dir, ego, f"{int(fid):06d}.png"),
+                  os.path.join(scene_dir, ego, f"{int(fid):06d}.jpg"),
+                  os.path.join(scene_dir, ego, f"{fid}.png"),
+                  os.path.join(scene_dir, ego, f"{fid}.jpg")):
+            if os.path.exists(c):
+                return c
+        return None
+
+    # two-pass: resolve dimensions from the first existing image, then write EXACTLY one video
+    # frame per cache row (black-padded where the image is missing) so video frame t == cache
+    # row t always holds - the contract HOT3DHandDataset assumes.
     vw, W, H = None, None, None
-    for fid in frames:
-        cands = glob.glob(os.path.join(scene_dir, ego, f"*{fid}*.jpg")) or \
-            [os.path.join(scene_dir, ego, f"{fid}.jpg")]
-        im = cv2.imread(cands[0]) if cands and os.path.exists(cands[0]) else None
-        if im is None:
-            continue
-        if vw is None:
-            H, W = im.shape[:2]
-            vw = cv2.VideoWriter(os.path.join(out_seq, "video_main_rgb.mp4"),
-                                 cv2.VideoWriter_fourcc(*"mp4v"), 30, (W, H))
-        vw.write(im)
-    if vw is not None:
+    first = next((p for p in (_img_path(fid) for fid in frames) if p), None)
+    n_black = 0
+    if first is not None:
+        H, W = cv2.imread(first).shape[:2]
+        vw = cv2.VideoWriter(os.path.join(out_seq, "video_main_rgb.mp4"),
+                             cv2.VideoWriter_fourcc(*"mp4v"), 30, (W, H))
+        for fid in frames:
+            p = _img_path(fid)
+            im = cv2.imread(p) if p else None
+            if im is None:
+                im = np.zeros((H, W, 3), np.uint8)
+                n_black += 1
+            vw.write(im)
         vw.release()
+    if n_black > 0 or first is None:
+        print(f"  [{seq}] video: first={'ok' if first else 'MISSING'} black-padded={n_black}/{N}",
+              flush=True)
 
     # intrinsics resolved earlier (K_ego / f_pre); require them
     if K_ego is None:
