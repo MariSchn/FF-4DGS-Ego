@@ -207,9 +207,8 @@ def main() -> None:
                          "frozen camera head the world eval uses, from any training config.")
     args = ap.parse_args()
 
-    import smplx
-
     from scripts.eval_world_space import build_model
+    from scripts.hand_vis_utils import MANOModel
     from scripts.train_hand_head import HOT3DHandDataset
 
     cfg = yaml.safe_load(open(args.config))
@@ -225,8 +224,10 @@ def main() -> None:
     if not hasattr(model, "cam_head"):
         raise SystemExit("this model has no cam_head - nothing to diagnose")
 
-    mano = smplx.create(cfg["visualization"]["mano_model_folder"], model_type="mano",
-                        use_pca=False, is_rhand=True, flat_hand_mean=False)
+    # Use the repo's MANOModel wrapper, exactly as eval_world_space does. Calling smplx.create
+    # directly fails here: it appends model_type as a subdirectory and looks for
+    # models/MANO/mano/MANO_RIGHT.pkl, whereas the checkout stores models/MANO/MANO_RIGHT.pkl.
+    mano = MANOModel(cfg["visualization"]["mano_model_folder"])
 
     seqs = sorted(d for d in os.listdir(args.data_root)
                   if os.path.isdir(os.path.join(args.data_root, d)))[: args.max_seqs]
