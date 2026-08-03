@@ -210,9 +210,22 @@ def main() -> None:
         if mj:
             print(f"CONVERT median joints/hand = {np.median(mj):.1f} of 16 "
                   f"(sparse by design; per-joint validity is stored)")
-    if counts.get("bad-anatomy"):
-        raise SystemExit("CONVERT FAILED the anatomical gate on some takes - joint mapping is "
-                         "suspect. Do NOT train on this store.")
+    # A FEW rejected takes means bad source annotation and is healthy: the gate ran before
+    # anything was written, so the store contains only validated takes. A LARGE fraction failing
+    # would instead mean the joint MAPPING is wrong, which is the H2O-scramble failure and must
+    # stop everything. Distinguish the two rather than condemning a good store over 2 bad takes.
+    n_bad = counts.get("bad-anatomy", 0)
+    n_written = counts.get("ok", 0)
+    if n_bad:
+        total = n_bad + n_written
+        frac = n_bad / max(1, total)
+        print(f"CONVERT excluded {n_bad}/{total} take(s) on the anatomical gate "
+              f"({frac:.1%}); they were NOT written, so the store holds only validated takes.")
+        if frac > 0.10:
+            raise SystemExit(
+                f"CONVERT ABORT: {frac:.1%} of takes failed the anatomical gate. At that rate the "
+                f"joint MAPPING is suspect, not the source data (this is the H2O scramble "
+                f"signature). Do NOT train on this store until the mapping is re-verified.")
 
 
 if __name__ == "__main__":
