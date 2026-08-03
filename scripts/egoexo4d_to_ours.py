@@ -87,6 +87,51 @@ def bone_length_report(joints: np.ndarray, valid: np.ndarray) -> dict:
     return res
 
 
+def video_hw(path: str) -> tuple[int, int] | None:
+    """(H, W) of a video, or None if unreadable."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        import decord
+        return tuple(decord.VideoReader(path)[0].asnumpy().shape[:2])
+    except Exception:
+        return None
+
+
+def rescale_K_to_video(K: np.ndarray, vid_hw: tuple[int, int]) -> tuple[np.ndarray, float]:
+    """Rescale intrinsics from the resolution they were published at to the video we actually have.
+
+    THIS IS NOT OPTIONAL. Ego-Exo4D publishes ego_pose intrinsics for the 512x512 ego frame
+    (cx = cy = 255.5), but the practical download is downscaled_takes/448 at 448x448. Using the
+    published K against a 448 video puts every projection and every crop box out by 12.5% -
+    the same class of silent input-convention error as the H2O square-vs-rectangular boxes,
+    which cost us every H2O number until it was found.
+    """
+    # A centred principal point with 0-indexed pixel centres means cx = (W - 1) / 2, so
+    # W = 2*cx + 1. Ego-Exo4D's cx = cy = 255.5 is therefore exactly 512, not 511 - and using
+    # 2*cx would give a 0.2% wrong scale, i.e. right-looking but not right.
+    implied_w = round(float(K[0, 2]) * 2.0 + 1.0)
+    implied_h = round(float(K[1, 2]) * 2.0 + 1.0)
+    h, w = vid_hw
+    if implied_w <= 0 or implied_h <= 0:
+        return K, 1.0
+    sx, sy = w / implied_w, h / implied_h
+    if abs(sx - sy) > 1e-3:
+        # Non-uniform rescale would mean a non-square downscale; our [f, cx, cy] store format
+        # cannot express two focal lengths, so refuse rather than silently pick one.
+        raise ValueError(f"non-uniform intrinsics rescale sx={sx:.4f} sy={sy:.4f}")
+    # Focal scales directly. The principal point does NOT: under the pixel-centre convention a
+    # resize maps c -> (c + 0.5) * s - 0.5. Plain multiplication is the naive form and lands
+    # 255.5*0.875 = 223.5625 instead of the true 448-frame centre 223.5. Small, but this is the
+    # difference between exactly right and approximately right, and it biases every crop box.
+    Ks = K.copy()
+    Ks[0, 0] *= sx
+    Ks[1, 1] *= sy
+    Ks[0, 2] = (K[0, 2] + 0.5) * sx - 0.5
+    Ks[1, 2] = (K[1, 2] + 0.5) * sy - 0.5
+    return Ks, float(sx)
+
+
 def convert_take(uid: str, take_name: str, hand_json: str, cam_json: str,
                  video_src: str, out_dir: str, ego_key: str = "aria01") -> tuple[str, dict]:
     ann = json.load(open(hand_json))
@@ -106,9 +151,20 @@ def convert_take(uid: str, take_name: str, hand_json: str, cam_json: str,
     if not frames:
         return "no-frames", {}
 
+    # Per-frame world->camera extrinsics, keyed by frame string. VERIFIED world-frame: projecting
+    # annotation3D through (extrinsics, intrinsics) reproduces the INDEPENDENTLY published
+    # annotation2D to a 0-6.5 px median on a 512 px image. A wrong frame convention would be
+    # hundreds of pixels out, so this pins both the frame and the 3x4 layout.
+    EX = ego.get("camera_extrinsics") or {}
+    if not isinstance(EX, dict) or not EX:
+        return "no-extrinsics", {}
+
     n = len(frames)
-    J = np.zeros((n, 2, 16, 3), np.float64)
+    J = np.zeros((n, 2, 16, 3), np.float64)          # world frame
+    JC = np.zeros((n, 2, 16, 3), np.float64)         # camera frame (what the model predicts)
     V = np.zeros((n, 2, 16), bool)
+    W2C = np.tile(np.eye(4), (n, 1, 1))
+    has_ext = np.zeros(n, bool)
     for t, fr in enumerate(frames):
         lst = ann.get(str(fr)) or []
         if not lst:
@@ -117,6 +173,20 @@ def convert_take(uid: str, take_name: str, hand_json: str, cam_json: str,
         for hi, side in enumerate(SIDES):
             j, ok = joints_from_annotation(e, side)
             J[t, hi], V[t, hi] = j, ok
+        P = EX.get(str(fr))
+        if P is None:
+            # No pose for this frame -> camera-frame joints are unknowable, so mark the whole
+            # frame invalid rather than emitting joints in an undefined frame.
+            V[t] = False
+            continue
+        P = np.asarray(P, np.float64)
+        if P.shape != (3, 4):
+            V[t] = False
+            continue
+        W2C[t, :3, :4] = P
+        has_ext[t] = True
+        for hi in range(2):
+            JC[t, hi] = (P[:, :3] @ J[t, hi].T).T + P[:, 3]
 
     # Anatomical gate, per hand, before anything is written.
     stats = {"take": take_name, "frames": n}
@@ -130,22 +200,45 @@ def convert_take(uid: str, take_name: str, hand_json: str, cam_json: str,
 
     hand_valid = V.any(-1)                                # [n,2] hand present at all
     stats["frac_frames_any_hand"] = float(np.mean(hand_valid.any(-1)))
+    stats["frac_frames_with_pose"] = float(np.mean(has_ext))
     stats["median_joints_per_hand"] = float(np.median(V.sum(-1)[hand_valid])) if hand_valid.any() else 0.0
 
     hd = os.path.join(out_dir, take_name, "hand_data")
     os.makedirs(hd, exist_ok=True)
     torch.save(torch.tensor(J, dtype=torch.float32), os.path.join(hd, "gt_joints_cache_world.pt"))
+    # Camera-frame joints are what the model predicts, and our stores name this cache _cam_v2.
+    torch.save(torch.tensor(JC, dtype=torch.float32), os.path.join(hd, "gt_joints_cache_cam_v2.pt"))
     torch.save(torch.tensor(V), os.path.join(hd, "gt_joints_valid.pt"))
-    torch.save(torch.tensor([float(K[0, 0]), float(K[0, 2]), float(K[1, 2])]),
+    # T_cam_world (w2c) 4x4, matching every other store's cam_extrinsics_cache convention.
+    torch.save(torch.tensor(W2C, dtype=torch.float32),
+               os.path.join(hd, "cam_extrinsics_cache.pt"))
+    # Intrinsics MUST match the video we actually have, not the resolution they were published
+    # at. Refuse rather than store a K that silently disagrees with the frames.
+    vhw = video_hw(video_src)
+    if vhw is None:
+        return "no-video", stats
+    try:
+        Ks, k_scale = rescale_K_to_video(K, vhw)
+    except ValueError as exc:
+        stats["gate"] = str(exc)
+        return "bad-intrinsics-rescale", stats
+    stats["video_hw"] = list(vhw)
+    stats["K_scale"] = round(k_scale, 4)
+    torch.save(torch.tensor([float(Ks[0, 0]), float(Ks[0, 2]), float(Ks[1, 2])]),
                os.path.join(hd, "cam_intrinsics.pt"))
     torch.save(torch.tensor(np.asarray(frames, np.int64)), os.path.join(hd, "annotated_frames.pt"))
     with open(os.path.join(out_dir, take_name, ".egoexo_meta.json"), "w") as f:
         json.dump({"take_uid": uid, "take_name": take_name, "n_annotated_frames": n,
                    "video_src": video_src, "ego_key": ego_key,
-                   "K": K.tolist(),
+                   "K_published": K.tolist(), "K_rescaled": Ks.tolist(),
+                   "K_scale": k_scale, "video_hw": list(vhw),
                    "NOTE": "3D joints are RAW ANNOTATIONS, not MANO. No MANO params exist for "
                            "this dataset, so param losses cannot be supervised from it.",
-                   "frames_are_sparse": True}, f, indent=2)
+                   "frames_are_sparse": True,
+                   "frames_with_camera_pose": int(has_ext.sum()),
+                   "joint_frames": "world = gt_joints_cache_world.pt, camera = "
+                                   "gt_joints_cache_cam_v2.pt (via per-frame w2c extrinsics)"},
+                  f, indent=2)
     if video_src and os.path.exists(video_src):
         link = os.path.join(out_dir, take_name, "video_main_rgb.mp4")
         if not os.path.exists(link):
