@@ -1,0 +1,116 @@
+# WINDOW-LENGTH ABLATION: 64-frame clips, against train_ctrl_hoi4d_only.yaml at 16.
+#
+# WHY THIS EXISTS. Our locked protocol is 16-frame clips at stride 8, in BOTH training and
+# inference. "Why 16?" is a question a reviewer will ask and we currently cannot answer with a
+# measurement. This config is the 32-frame arm; every field below is identical to
+# train_ctrl_hoi4d_only.yaml except the four marked CHANGED. Same data, same losses, same
+# schedule, same from-scratch init, same seed.
+#
+# WHAT IT ACTUALLY TESTS. The hand head is per-frame (hamer crops), so window length does not
+# change the head's receptive field. It changes two other things:
+#   (1) the frozen backbone's TEMPORAL ATTENTION CONTEXT, which is baked into the cached tokens
+#       (a 32-frame clip attends over twice the span, so features for frame t genuinely differ);
+#   (2) at inference, the number of chunk SEAMS in a long segment: a 128-frame segment is 15
+#       windows at 16/8, 7 at 32/16 and 3 at 64/32.
+# Expectation, stated up front so the result is falsifiable: MODEST. The ctxgate sweep showed 5x
+# fewer seams bought only 8% of W-MPJPE, and the long-window table shows W is dominated by camera
+# trajectory, which window length does not touch. Effect (1) is the genuinely unmeasured part.
+#
+# TRAIN/INFERENCE MATCH. A model trained here MUST be evaluated at clip_len 32 / stride 16, never
+# at 16/8. Evaluating a 32-trained head at 16 (or a 16-trained head at 32) is the train/inference
+# mismatch that already cost us one round of invalid numbers. The eval scripts guard the 16/8
+# protocol and require --declare_protocol to accept this arm.
+#
+# STEP-COUNT CAVEAT, do not paper over it. At clip_stride 32 there are HALF as many clips, so 10
+# epochs sees the same total FRAMES but takes half the optimizer steps. This config matches data
+# seen, which is the primary comparison. If the 32f arm loses by a small margin, step count is a
+# live confound and the arm must be re-run at epochs: 20 before concluding anything.
+data:
+  data_roots:
+    - root: "/cluster/scratch/dmonopoli/hoi4d_train"
+      name: "hoi4d"
+      weight: 1.0
+      # CHANGED: a 32-frame cache is a DIFFERENT cache. Tokens are [S,P,C] with S baked in, and
+      # the 16-frame tokens were computed under 16-frame attention, so they are not reusable.
+      feature_cache_dir: "/cluster/scratch/dmonopoli/featcache/hoi4d_64f"
+  num_frames: 64           # CHANGED (was 16)
+  resolution: [224, 224]
+  clip_stride: 64          # CHANGED (was 16) - MUST match the cache build's --clip_stride
+  val_split: 0.02
+  num_workers: 2
+
+model:
+  checkpoint: "models/NeoVerse/reconstructor.ckpt"
+  freeze_backbone: true
+  enable_hand: true
+  hand_head_type: "hamer"
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: false
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: false
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+
+# Identical to the 16-frame control. kp3d_abs 1.0 is the winner10ep value; a config omitting it
+# trains with NO absolute supervision and the guard in train_hand_head.py hard-exits.
+loss_weights:
+  betas:              0.01
+  global_orient:      0.01
+  hand_pose:          0.01
+  kp2d:               0.05
+  kp3d:               0.05
+  kp3d_abs:           1.0
+  transl:             1.0
+  hand_depth_anchor:  0.0
+  root_anchor:        0.0
+  gs_l1:              0.0
+  gs_lpips:           0.0
+
+metric_scale:
+  enable: true
+  clamp: [0.1, 10.0]
+
+training:
+  lr: 1e-4
+  min_lr: 1e-7
+  epochs: 10
+  # CHANGED: batch_size 16 x grad_accum 2 == the control's effective batch of 32. Halved because
+  # head activations scale with B*S, so B=32 at S=32 is twice the 16-frame run's footprint and
+  # OOMs the 23.5 GB card. The effective batch, and therefore the optimizer, is unchanged.
+  batch_size: 8
+  grad_accum_steps: 4
+  log_every: 100
+  val_every: 3000
+  save_every: 2000
+  seed: 42
+  output_dir: "/cluster/scratch/dmonopoli/checkpoints/hoi4d_64f"
+
+visualization:
+  mano_model_folder: "models/MANO"
+  num_vis_frames: 0
+
+hand_crop:
+  rescale_factor: 1.5
+
+debug:
+  enabled: false
+  max_sequences: 5
+  single_frame: false
+
+wandb:
+  enabled: true
+  project: "hand-head-training"
+  entity: 3DV-Project
+  run_name: "64-frame window ablation (vs 16-frame control)"
+  tags: ["ablation", "window-length", "32f"]
+  notes: "Window-length arm. Compare against ctrl_hoi4d_only (16f). Eval MUST be clip_len 64 stride 32."

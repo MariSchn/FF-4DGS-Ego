@@ -254,7 +254,9 @@ def main() -> None:
             gt_w2c = item["cam_extrinsics"].float()               # [S,4,4] T_cam_world
 
             from scripts.train_hand_head import build_views
-            imgs = item["images"].unsqueeze(0).to(device)
+            # HOT3DHandDataset emits "img", not "images" (see its __getitem__ and every other
+            # consumer: build_feature_cache uses batch["img"]).
+            imgs = item["img"].unsqueeze(0).to(device)
             hb = item.get("hand_bboxes")
             hv = item.get("hand_valid")
             if hb is not None:
