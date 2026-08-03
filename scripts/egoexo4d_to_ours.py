@@ -42,6 +42,8 @@ import os
 import numpy as np
 import torch
 
+from scripts.arctic_to_ours import joints_to_bbox
+
 FINGERS = ("index", "middle", "pinky", "ring", "thumb")
 # Our MANO-16: wrist, then index/middle/pinky/ring/thumb, three joints each.
 JOINT16 = ["wrist"] + [f"{f}_{i}" for f in FINGERS for i in (1, 2, 3)]
@@ -94,6 +96,17 @@ def video_hw(path: str) -> tuple[int, int] | None:
     try:
         import decord
         return tuple(decord.VideoReader(path)[0].asnumpy().shape[:2])
+    except Exception:
+        return None
+
+
+def video_len(path: str) -> int | None:
+    """Frame count of a video, or None if unreadable."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        import decord
+        return len(decord.VideoReader(path))
     except Exception:
         return None
 
@@ -159,37 +172,64 @@ def convert_take(uid: str, take_name: str, hand_json: str, cam_json: str,
     if not isinstance(EX, dict) or not EX:
         return "no-extrinsics", {}
 
-    n = len(frames)
+    # FRAME ALIGNMENT. Ego-Exo4D annotates roughly every 3rd frame (ids like 79, 82, 85...), but
+    # HOT3DHandDataset indexes every cache by VIDEO FRAME NUMBER. Storing only the annotated rows
+    # would pair video frame 0 with the joints of frame 79 - a silent, systematic image/label
+    # mismatch. So the caches are expanded to the FULL video length and validity is False on
+    # unannotated frames.
+    # Why not instead build clips from annotated frames only? That would use every annotation,
+    # but a 16-frame clip would then span 48 video frames (~1.6 s) versus ~0.53 s for every other
+    # dataset in the mix - a 3x temporal-extent inconsistency inside a single mixed-training run,
+    # invisible in any config. Protocol consistency wins; the cost is that ~2/3 of frames carry
+    # no hand supervision, which the validity mask states honestly.
+    n = video_len(video_src)
+    if n is None:
+        return "no-video", {}
     J = np.zeros((n, 2, 16, 3), np.float64)          # world frame
     JC = np.zeros((n, 2, 16, 3), np.float64)         # camera frame (what the model predicts)
     V = np.zeros((n, 2, 16), bool)
     W2C = np.tile(np.eye(4), (n, 1, 1))
     has_ext = np.zeros(n, bool)
-    for t, fr in enumerate(frames):
+
+    # Extrinsics are DENSE (one per video frame) even though hand annotations are sparse, so fill
+    # them independently - the camera trajectory is usable on frames with no hand label.
+    for k, P in EX.items():
+        try:
+            t = int(k)
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= t < n):
+            continue
+        P = np.asarray(P, np.float64)
+        if P.shape != (3, 4):
+            continue
+        W2C[t, :3, :4] = P
+        has_ext[t] = True
+
+    n_out_of_range = 0
+    for fr in frames:
+        if not (0 <= fr < n):
+            n_out_of_range += 1
+            continue
         lst = ann.get(str(fr)) or []
         if not lst:
             continue
         e = lst[0]
         for hi, side in enumerate(SIDES):
             j, ok = joints_from_annotation(e, side)
-            J[t, hi], V[t, hi] = j, ok
-        P = EX.get(str(fr))
-        if P is None:
-            # No pose for this frame -> camera-frame joints are unknowable, so mark the whole
-            # frame invalid rather than emitting joints in an undefined frame.
-            V[t] = False
+            J[fr, hi], V[fr, hi] = j, ok
+        if not has_ext[fr]:
+            # No camera pose -> camera-frame joints are undefined, so drop the label rather than
+            # emit joints in an unknown frame.
+            V[fr] = False
             continue
-        P = np.asarray(P, np.float64)
-        if P.shape != (3, 4):
-            V[t] = False
-            continue
-        W2C[t, :3, :4] = P
-        has_ext[t] = True
+        P = W2C[fr, :3, :4]
         for hi in range(2):
-            JC[t, hi] = (P[:, :3] @ J[t, hi].T).T + P[:, 3]
+            JC[fr, hi] = (P[:, :3] @ J[fr, hi].T).T + P[:, 3]
 
     # Anatomical gate, per hand, before anything is written.
-    stats = {"take": take_name, "frames": n}
+    stats = {"take": take_name, "frames": n, "annotated": len(frames),
+             "ann_out_of_range": n_out_of_range}
     for hi, side in enumerate(SIDES):
         bl = bone_length_report(J[:, hi], V[:, hi])
         stats[f"bones_{side}"] = {k: round(v, 4) for k, v in bl.items()}
@@ -227,6 +267,40 @@ def convert_take(uid: str, take_name: str, hand_json: str, cam_json: str,
     torch.save(torch.tensor([float(Ks[0, 0]), float(Ks[0, 2]), float(Ks[1, 2])]),
                os.path.join(hd, "cam_intrinsics.pt"))
     torch.save(torch.tensor(np.asarray(frames, np.int64)), os.path.join(hd, "annotated_frames.pt"))
+
+    # BOXES, in the SAME convention as every other training store: joints_to_bbox, rectangular
+    # per-axis x1.5, UNCLAMPED. Using a different convention here is exactly the H2O
+    # square+clamped mistake, which made an entire dataset's numbers meaningless.
+    rf = 1.5
+    fpx, cxp, cyp = float(Ks[0, 0]), float(Ks[0, 2]), float(Ks[1, 2])
+    vw, vh = float(vhw[1]), float(vhw[0])
+    boxes = np.zeros((n, 2, 4), np.float32)
+    bvalid = np.zeros((n, 2), bool)
+    hand_ok = V.any(-1)
+    for t in range(n):
+        for hi in range(2):
+            if not hand_ok[t, hi]:
+                continue
+            j = JC[t, hi]
+            m = V[t, hi]
+            if m.sum() < 3:
+                # A box from one or two joints is not a hand box; skip rather than emit a sliver.
+                continue
+            b = joints_to_bbox(j[m], fpx, cxp, cyp, vw, vh, rf=rf)
+            if b is None or not np.isfinite(b).all() or b[2] <= b[0] or b[3] <= b[1]:
+                continue
+            boxes[t, hi] = b
+            bvalid[t, hi] = True
+    torch.save({"bboxes": torch.from_numpy(boxes),
+                "valid": torch.from_numpy(bvalid),
+                "convention": "joints_to_bbox rf1.5 rectangular unclamped (egoexo4d)"},
+               os.path.join(hd, f"hand_bboxes_v2_rf{rf}_res224x224.pt"))
+    stats["boxes"] = int(bvalid.sum())
+    w_ = boxes[..., 2] - boxes[..., 0]
+    h_ = boxes[..., 3] - boxes[..., 1]
+    if bvalid.any():
+        stats["box_square_frac"] = float(np.mean(np.isclose(w_[bvalid], h_[bvalid], rtol=1e-3)))
+        stats["box_outside01_frac"] = float(np.mean((boxes[bvalid] < 0) | (boxes[bvalid] > 1)))
     with open(os.path.join(out_dir, take_name, ".egoexo_meta.json"), "w") as f:
         json.dump({"take_uid": uid, "take_name": take_name, "n_annotated_frames": n,
                    "video_src": video_src, "ego_key": ego_key,
