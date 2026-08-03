@@ -78,8 +78,8 @@ training:
   lr: 1e-4
   min_lr: 1e-7
   epochs: 10
-  batch_size: 32
-  grad_accum_steps: 1
+  batch_size: 16
+  grad_accum_steps: 2
   log_every: 100
   val_every: 3000
   save_every: 2000

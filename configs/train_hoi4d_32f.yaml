@@ -84,11 +84,12 @@ training:
   lr: 1e-4
   min_lr: 1e-7
   epochs: 10
-  # CHANGED: batch_size 16 x grad_accum 2 == the control's effective batch of 32. Halved because
-  # head activations scale with B*S, so B=32 at S=32 is twice the 16-frame run's footprint and
-  # OOMs the 23.5 GB card. The effective batch, and therefore the optimizer, is unchanged.
-  batch_size: 16
-  grad_accum_steps: 2
+  # CHANGED: batch_size 8 x grad_accum 4 == the control's effective batch of 32. Head attention
+  # activations scale with B*S, and the 23.5 GB card OOMs in hamer_head's
+  # scaled_dot_product_attention well before B=32 at S=32. Only the MICRO-batch shrinks; the
+  # optimizer's effective batch is unchanged, so this arm stays comparable to every other.
+  batch_size: 8
+  grad_accum_steps: 4
   log_every: 100
   val_every: 3000
   save_every: 2000
