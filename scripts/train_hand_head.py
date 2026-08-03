@@ -234,6 +234,7 @@ class HOT3DHandDataset(Dataset):
                             vecs.append(torch.zeros(HAND_PARAM_DIM))
                     return torch.cat(vecs)
 
+                seq_has_mano = True     # a real MANO trajectory backs these params
                 gt_per_frame = []
                 for frame_i in range(n_video):
                     ts = _closest_ts(frame_i)
@@ -246,6 +247,7 @@ class HOT3DHandDataset(Dataset):
                 # the joint cache is guaranteed present by the guard above).
                 hand_ts_sorted = list(range(n_video))
                 gt_per_frame = [torch.zeros(HAND_PARAM_DIM * NUM_HANDS) for _ in range(n_video)]
+                seq_has_mano = False        # zeros are a placeholder, NOT ground truth
 
             # Handle 2D GT joints + camera data. If we have to compute this
             # from scratch, we need world-frame joints (project_vertices applies
@@ -322,7 +324,17 @@ class HOT3DHandDataset(Dataset):
                     cached = torch.load(bbox_cache_path, weights_only=True)
                     bbox_frames = list(cached["bboxes"])
                     valid_frames = list(cached["valid"])
-                    gt_per_frame[:] = list(cached["gt"])
+                    # "gt" is the camera-frame MANO GT. Joints-only stores (Ego-Exo4D publishes
+                    # 3D keypoints, never MANO) legitimately have none. Absent it, gt_per_frame
+                    # stays ZEROS from the no-jsonl branch above - which is exactly why this
+                    # sequence must be flagged: an unmasked param loss against zeros would train
+                    # the model to predict zero MANO, silently and with a healthy-looking curve.
+                    if "gt" in cached:
+                        gt_per_frame[:] = list(cached["gt"])
+                    else:
+                        seq_has_mano = False
+                        print(f"{seq_path}: box cache has no 'gt' -> JOINTS-ONLY sequence, "
+                              f"MANO param losses will be masked off for it.")
                 else:
                     bbox_frames, valid_frames = HOT3DHandDataset._compute_projected_bboxes(
                         seq_path, n_video, hand_ts_sorted, gt_per_frame,
@@ -368,6 +380,8 @@ class HOT3DHandDataset(Dataset):
                     "gt_frames":    gt_per_frame[start : end],
                     "gt_joints":    seq_gt_joints[start : end].clone(),
                     "frame_offset": start,
+                    # False for joints-only stores; gates the MANO param losses downstream.
+                    "has_mano": seq_has_mano,
                     "seq_path":     seq_path,
                     "n_video":      n_video,
                 }
@@ -516,6 +530,8 @@ class HOT3DHandDataset(Dataset):
         # Frozen-feature cache: attach the precomputed backbone tokens (and the key
         # the builder uses to name them). Missing cache file = loud failure on
         # purpose — a silent fallback to the live backbone would corrupt A/Bs.
+        # Per-sample MANO availability, so the collate gives the train loop a [B] bool.
+        out["has_mano"] = bool(clip.get("has_mano", True))
         if self.emit_cache_key:
             out["cache_key"] = f"{os.path.basename(clip['seq_path'])}_{clip['frame_offset']}"
         if self.feature_cache_dir is not None:
@@ -1219,7 +1235,8 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 gt_pack = gt.view(*gt.shape[:-1], NUM_HANDS, HAND_PARAM_DIM)
                 has_hand = (gt_pack.abs().sum(dim=-1) > 1e-6).float()
 
-            param_losses = criterion_param(pred_params, gt, has_hand)
+            param_losses = criterion_param(pred_params, gt,
+                                           _param_mask(has_hand, vbatch))
 
             gt_joints = vbatch["gt_joints"].to(device)
             gt_conf = has_hand.unsqueeze(-1).unsqueeze(-1).expand(B, S, H, J, 1)
@@ -1483,6 +1500,28 @@ PROVEN_LOSS_RECIPE = {
 # single degenerate batch cannot trigger it, early enough to abort before hours are wasted.
 _EFFECT_CHECK_STEP = 50
 
+
+
+def _param_mask(has_hand: torch.Tensor, batch: dict) -> torch.Tensor:
+    """has_hand, additionally zeroed for samples that carry NO MANO ground truth.
+
+    The MANO param losses (transl / global_orient / hand_pose / betas) are the only ones that
+    need real MANO GT. Joints-only stores (Ego-Exo4D ships 3D keypoints, never MANO) leave
+    gt_per_frame as ZEROS, so an unmasked param loss would train the model to predict zero MANO -
+    silently, with a normal-looking loss curve, and with `transl` weighted 1.0.
+
+    The joint losses (kp3d / kp3d_abs / kp2d) keep using plain has_hand, because those samples DO
+    carry real joint supervision. That is the whole point of mixing them in: kp3d_abs, our
+    load-bearing absolute term, stays fully supervised.
+    """
+    hm = batch.get("has_mano")
+    if hm is None:
+        return has_hand
+    hm = torch.as_tensor(hm, device=has_hand.device).reshape(-1)
+    if hm.numel() != has_hand.shape[0]:
+        return has_hand
+    shape = (has_hand.shape[0],) + (1,) * (has_hand.dim() - 1)
+    return has_hand * hm.view(shape).to(has_hand.dtype)
 
 def _check_loss_effect(loss_weights: dict, avg_terms: dict, step: int,
                        strict: bool = True) -> None:
@@ -2283,7 +2322,8 @@ def train():
 
             # Parameter loss — split per MANO key, each masked per-hand.
             # Returns dict with 'transl', 'global_orient', 'hand_pose', 'betas'.
-            param_losses = criterion_param(pred_params, gt_params, has_hand)
+            param_losses = criterion_param(pred_params, gt_params,
+                                           _param_mask(has_hand, batch))
 
             # 3D keypoint loss. Confidence is 1 where the hand is present, 0 otherwise —
             # absent hands have zero GT joints but MANO's default pose would otherwise
