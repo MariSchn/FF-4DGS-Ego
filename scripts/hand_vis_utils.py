@@ -358,6 +358,54 @@ class MANOModel:
 # Data loading
 # ---------------------------------------------------------------------------
 
+def load_camera_calibration_from_models_json(json_path, camera_label="camera-rgb"):
+    """Build the same (T_device_camera, CameraCalibration) from ground_truth/camera_models.json.
+
+    WHY THIS EXISTS. load_camera_calibration below reads mps_slam_calibration/online_calibration.jsonl,
+    which ships only in HOT3D's `mps_artifacts` group (89 GB). The `ground_truth` group we already
+    have (4.8 MB/seq) carries the identical quantities for camera-rgb:
+        projectionModelType : "CameraModelType.FISHEYE624"
+        projectionParams    : the 15 FISHEYE624 params, params[0] = focal
+        T_Device_Camera     : quaternion_wxyz + translation_xyz
+        imageWidth/Height   : 1408 x 1408
+    Cross-check that this is the right source: params[0] is 609.7857 on P0001_10a27bf7, exactly the
+    f=609.78 of the validated historical run (preprocess_gb10.sh, pinhole_f609, 50.08 mm MPJPE).
+
+    Is the STATIC calibration acceptable in place of the ONLINE one? Yes, because the online path
+    already treats calibration as static: it reads only `f.readline()`, i.e. the first entry, and
+    applies it to the whole sequence. So both paths use one fixed calibration per sequence.
+    """
+    import json as _json
+
+    from projectaria_tools.core.calibration import CameraCalibration, FISHEYE624
+    from projectaria_tools.core.sophus import SE3
+
+    with open(json_path) as f:
+        cams = _json.load(f)
+    for cam in cams:
+        if cam.get("label") != camera_label:
+            continue
+        model = str(cam.get("projectionModelType", ""))
+        if "FISHEYE624" not in model:
+            raise RuntimeError(
+                f"{camera_label} in {json_path} is {model}, not FISHEYE624; this loader would "
+                f"silently mis-undistort it.")
+        params = np.array(cam["projectionParams"], dtype=np.float64)
+        t_dc = np.array(cam["T_Device_Camera"]["translation_xyz"], dtype=np.float64)
+        # online_calibration stores UnitQuaternion as [w, [x,y,z]]; this file stores a flat
+        # [w,x,y,z], so split it the same way before handing it to SE3.
+        q = cam["T_Device_Camera"]["quaternion_wxyz"]
+        T_device_camera = SE3.from_quat_and_translation(
+            float(q[0]), np.array(q[1:4], dtype=np.float64), t_dc)[0]
+        cam_calib = CameraCalibration(
+            camera_label, FISHEYE624, params, T_device_camera,
+            int(cam.get("imageWidth", 1408)), int(cam.get("imageHeight", 1408)),
+            None, 3.14159, "",
+        )
+        return T_device_camera, cam_calib
+    raise RuntimeError(f"Camera '{camera_label}' not found in {json_path}")
+
+
 def load_camera_calibration(jsonl_path, camera_label="camera-rgb"):
     from projectaria_tools.core.calibration import CameraCalibration, FISHEYE624
     from projectaria_tools.core.sophus import SE3

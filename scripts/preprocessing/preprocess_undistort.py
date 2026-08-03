@@ -54,6 +54,7 @@ from scripts.hand_vis_utils import (
     MANOModel,
     find_closest,
     load_camera_calibration,
+    load_camera_calibration_from_models_json,
     load_hand_poses,
     load_headset_trajectory,
     project_vertices,
@@ -394,11 +395,20 @@ def process_sequence(src_seq, dst_seq, args, mano):
     print(f"\n=== {seq_id} ===")
 
     calib_path   = src_seq / "mps_slam_calibration" / "online_calibration.jsonl"
+    # Fallback calibration source. online_calibration.jsonl ships only in HOT3D's mps_artifacts
+    # group (89 GB); ground_truth/camera_models.json is in the 4.8 MB/seq group we already have
+    # and carries the same FISHEYE624 params and T_Device_Camera for camera-rgb. The online path
+    # reads only the FIRST jsonl entry, so both are one static calibration per sequence.
+    models_path  = src_seq / "ground_truth" / "camera_models.json"
     headset_path = src_seq / "ground_truth" / "headset_trajectory.csv"
     jsonl_path   = src_seq / "hand_data" / "mano_hand_pose_trajectory.jsonl"
     video_path   = src_seq / "video_main_rgb.mp4"
-    if not all(p.exists() for p in [calib_path, headset_path, jsonl_path, video_path]):
-        print("  SKIP — missing required source files")
+    have_calib = calib_path.exists() or models_path.exists()
+    if not (have_calib and all(p.exists() for p in [headset_path, jsonl_path, video_path])):
+        missing = [str(p.name) for p in [headset_path, jsonl_path, video_path] if not p.exists()]
+        if not have_calib:
+            missing.append("online_calibration.jsonl OR camera_models.json")
+        print(f"  SKIP — missing required source files: {missing}")
         return
 
     meta_path = dst_seq / ".preprocessing_meta.json"
@@ -420,7 +430,10 @@ def process_sequence(src_seq, dst_seq, args, mano):
     (dst_seq / "mps_slam_calibration").mkdir(exist_ok=True)
 
     print("  Loading calibration ...")
-    T_device_camera, fisheye_calib = load_camera_calibration(str(calib_path))
+    if calib_path.exists():
+        T_device_camera, fisheye_calib = load_camera_calibration(str(calib_path))
+    else:
+        T_device_camera, fisheye_calib = load_camera_calibration_from_models_json(str(models_path))
     pinhole_calib = build_pinhole_target(fisheye_calib, args.focal)
     headset_poses = load_headset_trajectory(str(headset_path))
     headset_ts = sorted(headset_poses.keys())
