@@ -1874,6 +1874,9 @@ def train():
         contact_cache_dir=data_cfg.get("contact_cache_dir"),
         feature_cache_dir=data_cfg.get("feature_cache_dir"),
         bbox_perturb=data_cfg.get("bbox_perturb"),
+        # Sparsely-annotated roots (Ego-Exo4D labels ~2.3% of frames) otherwise yield clips
+        # with no supervised frame at all. No-op on dense roots, which keep 100% of clips.
+        min_labelled_frames=data_cfg.get("min_labelled_frames", 0),
     )
 
     if debug_cfg.get("single_frame", False):

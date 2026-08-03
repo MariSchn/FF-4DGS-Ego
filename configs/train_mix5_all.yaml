@@ -1,0 +1,118 @@
+# FIVE-DATASET SCALE-UP: HOI4D + OakInk2 + ARCTIC + HOT3D + Ego-Exo4D.
+# Eval stays HOI4D-157 and H2O (Dario 2026-08-03): H2O is HELD OUT, never in data_roots below.
+#
+# ORDER OF INTEGRATION (Dario): HOT3D first, Ego-Exo4D second. Both are Aria, but they differ:
+#   HOT3D      fisheye -> UNDISTORTED to pinhole by scripts/preprocessing/preprocess_undistort.py
+#              at f=609.78, the validated pinhole_f609 recipe (50.08 mm MPJPE).
+#   Ego-Exo4D  ego_pose publishes ALREADY-RECTIFIED pinhole intrinsics, so it needs no undistort.
+#              Its K is rescaled 512 -> 448 to match the downloaded video.
+# Cyrus's rule "pinhole only, cannot mix-train across camera types" is therefore satisfied by
+# both, for different reasons.
+#
+# EGO-EXO4D IS JOINTS-ONLY. It ships 3D keypoints, never MANO, so:
+#   - its MANO param losses are MASKED per sample via has_mano (train_hand_head._param_mask);
+#     unmasked they would train the model to predict ZERO MANO, silently, with transl at 1.0.
+#   - kp3d / kp3d_abs / kp2d ARE supervised, and kp3d_abs is the load-bearing absolute term, so
+#     the data still pulls its weight. This matches standard practice (HaMeR trains on
+#     datasets with only 2D keypoints).
+#
+# min_labelled_frames: Ego-Exo4D labels ~2.3% of frames, so most clips would carry NO supervision
+# at all. Requiring >= 4 labelled frames keeps ~7.6% of its clips (measured) and is a NO-OP on the
+# dense roots (they keep 100%), which is why it is safe to set globally.
+#
+# COST NOTE, do not overlook: there are no feature caches for hot3d/egoexo yet, so this config
+# trains UNCACHED (full backbone forward) unless caches are built first - hours per epoch rather
+# than minutes. Build featcache/hot3d and featcache/egoexo before a long run.
+data:
+  data_roots:
+  - root: /cluster/scratch/dmonopoli/hoi4d_train
+    name: hoi4d
+    weight: 1.0
+  - root: /cluster/scratch/dmonopoli/oakink2_ours
+    name: oakink2
+    weight: 1.0
+  - root: /cluster/scratch/dmonopoli/arctic_ours
+    name: arctic
+    weight: 1.0
+  - root: /cluster/scratch/dmonopoli/hot3d_pinhole_f609
+    name: hot3d
+    weight: 1.0
+  - root: /cluster/scratch/dmonopoli/egoexo_ours
+    name: egoexo4d
+    weight: 1.0
+  num_frames: 16
+  resolution:
+  - 224
+  - 224
+  clip_stride: 16
+  val_split: 0.02
+  num_workers: 2
+  min_labelled_frames: 4
+model:
+  checkpoint: models/NeoVerse/reconstructor.ckpt
+  freeze_backbone: true
+  enable_hand: true
+  hand_head_type: hamer
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: false
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: false
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+loss_weights:
+  betas: 0.01
+  global_orient: 0.01
+  hand_pose: 0.01
+  kp2d: 0.05
+  kp3d: 0.05
+  kp3d_abs: 1.0
+  transl: 1.0
+  hand_depth_anchor: 0.0
+  root_anchor: 0.0
+  gs_l1: 0.0
+  gs_lpips: 0.0
+metric_scale:
+  enable: true
+  clamp:
+  - 0.1
+  - 10.0
+training:
+  lr: 1e-4
+  min_lr: 1e-7
+  epochs: 10
+  batch_size: 16
+  grad_accum_steps: 2
+  log_every: 100
+  val_every: 3000
+  save_every: 2000
+  seed: 42
+  output_dir: /cluster/scratch/dmonopoli/checkpoints/mix5
+visualization:
+  mano_model_folder: models/MANO
+  num_vis_frames: 0
+hand_crop:
+  rescale_factor: 1.5
+debug:
+  enabled: false
+  max_sequences: 5
+  single_frame: false
+wandb:
+  enabled: true
+  project: hand-head-training
+  entity: 3DV-Project
+  run_name: mix5 HOI4D+OakInk2+ARCTIC+HOT3D+EgoExo4D (H2O held out)
+  tags:
+  - mixed
+  - 5dataset
+  - scale-up
+  notes: Five-dataset scale-up. Ego-Exo4D is joints-only (param losses masked).
