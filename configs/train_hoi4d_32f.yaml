@@ -12,9 +12,11 @@
 #       (a 32-frame clip attends over twice the span, so features for frame t genuinely differ);
 #   (2) at inference, the number of chunk SEAMS in a long segment: a 128-frame segment is 15
 #       windows at 16/8 but 7 at 32/16.
-# Expectation, stated up front so the result is falsifiable: MODEST. The ctxgate sweep showed 5x
-# fewer seams bought only 8% of W-MPJPE, and the long-window table shows W is dominated by camera
-# trajectory, which window length does not touch. Effect (1) is the genuinely unmeasured part.
+# Expectation, stated up front so the result is falsifiable: MODEST - but note the prior is now
+# WEAKER than it looked. The ctxgate sweep that suggested 5x fewer seams buy only ~8% of W-MPJPE
+# is RETRACTED (40 segments, not 157; that spread is noise). What still holds is the long-window
+# table, measured on 157 seqs: W is dominated by camera trajectory, which window length does not
+# touch. So read this arm WITHOUT assuming degradation - effect (1) is genuinely unmeasured.
 #
 # TRAIN/INFERENCE MATCH. A model trained here MUST be evaluated at clip_len 32 / stride 16, never
 # at 16/8. Evaluating a 32-trained head at 16 (or a 16-trained head at 32) is the train/inference

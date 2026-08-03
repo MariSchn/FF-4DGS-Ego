@@ -112,7 +112,7 @@ def main():
         else:
             print(f"  F={f:3d}  {r['why']}")
     print("NOTE: fitting is not the same as being worth it - changing num_frames invalidates the")
-    print("feature cache (keyed <seq>_<frame_offset>) and the ctxgate sweep showed C-abs DEGRADES")
+    print("feature cache (keyed <seq>_<frame_offset>) and a RETRACTED ctxgate sweep (40 segs, not 157) suggested C-abs degrades")
     print("with longer clips for a head trained at 16.")
 
 

@@ -9,8 +9,9 @@ and conflating them is exactly the mistake that already cost us a round of numbe
             TRAINED at 32 (configs/train_hoi4d_32f.yaml), not just a different eval flag.
   MISMATCHED clip_len != training num_frames. This measures out-of-distribution degradation and
             is a legitimate DIAGNOSTIC, but must never be quoted as a window-length result. Our
-            own ctxgate sweep showed C-abs degrades monotonically (29.7/30.2/30.7/32.2 at
-            16/32/48/64) purely from the mismatch.
+            own ctxgate sweep APPEARED to show C-abs degrading monotonically
+            (29.7/30.2/30.7/32.2) - but that is RETRACTED: it scored 40 segments, not 157,
+            so a 0.5 mm spread is noise. The mismatch penalty is UNMEASURED.
 
 So this runner takes an explicit (config, train_frames) per model arm, derives which clip lengths
 are matched for it, and stamps every output accordingly. It emits one JSON per cell plus a
