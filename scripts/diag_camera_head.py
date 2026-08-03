@@ -42,6 +42,14 @@ import torch
 import yaml
 
 
+# A verdict needs enough clips, from enough sequences, with enough actual camera motion.
+# The first real run produced a confident "CONVENTION BUG" from 3 clips of ONE sequence where the
+# camera moved 12 mm; the margin (0.82 vs a 0.83 threshold) was noise.
+MIN_CLIPS = 30
+MIN_SEQS = 5
+MIN_GT_MOTION_MM = 40.0
+
+
 class ClipStat(NamedTuple):
     """Per-clip camera diagnostics. All errors in the units noted; angles in degrees."""
 
@@ -173,6 +181,32 @@ def _summarise(stats: list[ClipStat]) -> None:
     print("\n--- VERDICT ---")
     rot, ident_rot, inv_rot = med("rot_err_deg"), med("ident_rot_err_deg"), med("inv_rot_err_deg")
     raw, opt, ident_t = med("t_err_raw_mm"), med("t_err_opt_mm"), med("ident_t_err_mm")
+    motion, n_seq = med("gt_motion_mm"), len({s.seq for s in stats})
+
+    # REFUSE TO CONCLUDE WITHOUT SIGNAL. Two ways this diagnostic can look decisive while being
+    # meaningless, both of which actually happened on the first real run:
+    #   * too few clips - 3 clips from 1 sequence produced a confident-looking "CONVENTION BUG"
+    #     whose margin (0.82 vs a 0.83 threshold) was pure noise;
+    #   * too little camera motion - if GT translation over a clip is ~12 mm and rotation ~1 deg,
+    #     then every error here is within the noise of a static camera and NOTHING can be
+    #     attributed to rotation, direction or scale.
+    if len(stats) < MIN_CLIPS or n_seq < MIN_SEQS:
+        print(f"  INCONCLUSIVE: only {len(stats)} clips from {n_seq} sequence(s) "
+              f"(need >= {MIN_CLIPS} clips over >= {MIN_SEQS} sequences).")
+        print("     Do NOT read the numbers above as a verdict. If sequences were skipped for a "
+              "missing cam_extrinsics, note the store only surfaces extrinsics when "
+              "gt_joints_2d_cache.pt, cam_extrinsics_cache.pt AND cam_intrinsics.pt all exist.")
+        print("=" * 78)
+        return
+    if motion < MIN_GT_MOTION_MM:
+        print(f"  INCONCLUSIVE: the GT camera moves only {motion:.1f} mm over a clip "
+              f"(< {MIN_GT_MOTION_MM} mm), and rotates {ident_rot:.2f} deg.")
+        print("     At this scale the camera is effectively STATIC within a clip, so the head has "
+              "almost no signal to predict and none of the comparisons below can separate a "
+              "convention bug from a scale bug from noise.")
+        print("     ACTIONABLE: diagnose at a LONGER clip length, where the camera actually moves.")
+        print("=" * 78)
+        return
 
     if np.isfinite(inv_rot) and inv_rot < rot * 0.7:
         print("  !! CONVENTION BUG: the INVERTED trajectory fits GT far better than the predicted one.")
