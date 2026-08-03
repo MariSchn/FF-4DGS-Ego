@@ -122,7 +122,18 @@ class HOT3DHandDataset(Dataset):
                  use_hand_crop=False, rescale_factor=2.0,
                  objects_dir=None, render_obj_depth=False, obj_render_res=224,
                  da3_wrist_cache_dir=None, contact_cache_dir=None,
-                 feature_cache_dir=None, emit_cache_key=False, bbox_perturb=None):
+                 feature_cache_dir=None, emit_cache_key=False, bbox_perturb=None,
+                 min_labelled_frames=0):
+        # LABEL-AWARE CLIP SAMPLING. Sparsely-annotated stores (Ego-Exo4D labels ~2.3% of
+        # frames) otherwise yield clips that contain NO supervised frame at all: they consume
+        # sampler weight and compute while producing zero gradient. Requiring >= N labelled
+        # frames per clip keeps the dataset useful.
+        # 0 = OFF and is the DEFAULT, so every densely-labelled store behaves exactly as before.
+        # KNOWN BIAS, stated so it is not discovered later: annotators label segments where hands
+        # are visible and active, so this selects that regime and the store cannot teach
+        # "no hand here". Our dense roots cover that case.
+        self.min_labelled_frames = int(min_labelled_frames)
+        self._clip_retention = {}
         self.num_frames = num_frames
         self.mano_model = mano_model
         self.res = res
@@ -373,6 +384,8 @@ class HOT3DHandDataset(Dataset):
                 print(f"Computed and saved GT joints for {seq_path}.")
 
             # Create Sliding Window Clips
+            _seq_seen, _seq_kept = [0], [0]
+            _lab_density = []
             for start in range(0, n_video - num_frames + 1, clip_stride):
                 end = start + num_frames
                 clip = {
@@ -388,6 +401,18 @@ class HOT3DHandDataset(Dataset):
                 if self.use_hand_crop:
                     clip["hand_bboxes"] = [b.clone() for b in bbox_frames[start : start + num_frames]]
                     clip["hand_valid"]  = [v.clone() for v in valid_frames[start : start + num_frames]]
+                    if self.min_labelled_frames > 0:
+                        n_lab = int(sum(bool(torch.as_tensor(v).any())
+                                        for v in clip["hand_valid"]))
+                        _seq_seen[0] += 1
+                        _lab_density.append(n_lab / max(1, num_frames))
+                        self._clip_retention[seq_path] = (_seq_kept[0], _seq_seen[0],
+                                                          _lab_density)
+                        if n_lab < self.min_labelled_frames:
+                            continue
+                        _seq_kept[0] += 1
+                        self._clip_retention[seq_path] = (_seq_kept[0], _seq_seen[0],
+                                                          _lab_density)
                 if seq_gt_joints_2d is not None:
                     clip["gt_joints_2d"]   = seq_gt_joints_2d[start : end].clone()    # [S, 2, 16, 3]
                     clip["cam_extrinsics"] = seq_cam_extrinsics[start : end].clone()  # [S, 4, 4]
@@ -404,6 +429,14 @@ class HOT3DHandDataset(Dataset):
         # Cached-training mode: keep only clips whose token file exists (the cache
         # builder skips corrupt-video clips). A stride mismatch or wrong dir would
         # drop everything — fail loudly on that instead of training on nothing.
+        if self.min_labelled_frames > 0 and self._clip_retention:
+            kept = sum(v[0] for v in self._clip_retention.values())
+            seen = sum(v[1] for v in self._clip_retention.values())
+            dens = [d for v in self._clip_retention.values() for d in v[2]]
+            print(f"[label-aware sampling] kept {kept}/{seen} clips "
+                  f"({100.0 * kept / max(1, seen):.1f}%) with >= {self.min_labelled_frames} "
+                  f"labelled frames; mean label density per candidate clip "
+                  f"{100.0 * (sum(dens) / max(1, len(dens))):.1f}%", flush=True)
         if self.feature_cache_dir is not None:
             n0 = len(self.clips)
             self.clips = [c for c in self.clips if os.path.exists(os.path.join(
