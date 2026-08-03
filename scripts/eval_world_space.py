@@ -778,7 +778,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--data_root", required=True)
-    ap.add_argument("--max_seqs", type=int, default=4)
+    # 0 = ALL sequences, and it is the DEFAULT. This used to default to 4 with 0 meaning
+    # "nothing" (the slice is [start : start+max_seqs]), which silently produced 4-sequence
+    # numbers that look like full results: the H2O zero-shot scored 4 of 177 and the 32-frame
+    # arm 4 of 157, both reported as if complete. A quick probe should be opt-IN, not the default.
+    ap.add_argument("--max_seqs", type=int, default=0,
+                    help="how many sequences to evaluate; 0 (default) means ALL")
     ap.add_argument("--seq_start", type=int, default=0, help="skip the first N cached sequences")
     ap.add_argument("--segment_len", type=int, default=128)
     ap.add_argument("--clip_len", type=int, default=16)
@@ -886,7 +891,16 @@ def main():
 
     all_seqs = sorted(os.path.join(args.data_root, d) for d in os.listdir(args.data_root)
                       if os.path.isdir(os.path.join(args.data_root, d)))
-    seqs = [s for s in all_seqs if _has_caches(s)][args.seq_start:args.seq_start + args.max_seqs]
+    _usable = [s for s in all_seqs if _has_caches(s)]
+    # max_seqs == 0 means ALL. Previously 0 sliced to an EMPTY list, so the intuitive "give me
+    # everything" silently evaluated nothing.
+    _end = len(_usable) if args.max_seqs <= 0 else args.seq_start + args.max_seqs
+    seqs = _usable[args.seq_start:_end]
+    print(f"evaluating {len(seqs)} of {len(_usable)} usable sequences "
+          f"(max_seqs={args.max_seqs or 'ALL'}, seq_start={args.seq_start})", flush=True)
+    if 0 < len(seqs) < 0.5 * len(_usable):
+        print(f"!! PARTIAL EVAL: {len(seqs)}/{len(_usable)} sequences. Numbers from this run are "
+              f"a PROBE, not a full result - do not put them in a table.", flush=True)
     print(f"Evaluating {len(seqs)}/{len(all_seqs)} sequences that have hand_data caches:",
           *[os.path.basename(s) for s in seqs], flush=True)
     if args.oracle_cam:
