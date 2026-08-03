@@ -31,6 +31,23 @@ def solve_similarity(src: torch.Tensor, dst: torch.Tensor,
     assert src.shape == dst.shape and src.shape[-1] == 3 and src.dim() == 2
     src = src.to(torch.float64)
     dst = dst.to(torch.float64)
+
+    # Drop non-finite correspondences BEFORE the SVD. A single NaN/Inf joint propagates through
+    # the covariance and makes torch.linalg.svd raise _LinAlgError, which in the chainer aborts
+    # the whole sequence: one bad clip then costs every sequence in the run (observed on the
+    # HOI4D-only control, where all 157 sequences were skipped for this reason). Dropping the bad
+    # rows keeps the good correspondences and degrades gracefully instead.
+    finite = torch.isfinite(src).all(-1) & torch.isfinite(dst).all(-1)
+    if not bool(finite.all()):
+        if weights is not None:
+            weights = weights[finite]
+        src, dst = src[finite], dst[finite]
+    if src.shape[0] < 3:
+        # Below 3 correspondences the similarity is not determined. Return identity rather than
+        # raising, so the caller records a useless-but-finite alignment for this pair.
+        return (torch.tensor(1.0), torch.eye(3, dtype=torch.float32, device=src.device),
+                torch.zeros(3, dtype=torch.float32, device=src.device))
+
     n = src.shape[0]
     if weights is None:
         w = torch.ones(n, dtype=torch.float64, device=src.device)
