@@ -1929,6 +1929,16 @@ def train():
 
     log_every  = training_cfg.get("log_every", 500)
     val_every  = training_cfg.get("val_every", 2000)
+    # If validation cannot run more than its initial step-1 pass, best_val_loss.pt keeps the
+    # UNTRAINED step-1 weights for the whole run and any eval pointed at it reports noise. That
+    # is the C-abs 725 bug: val_every=3000 with a 2222-step run. Clamp so validation actually
+    # happens, and say so, rather than silently producing a poisoned "best" checkpoint.
+    if val_every > total_steps:
+        new_every = max(1, total_steps // 4)
+        print(f"!! val_every={val_every} exceeds total_steps={total_steps}: validation would run "
+              f"only at step 1, leaving best_val_loss.pt holding UNTRAINED weights (this is how "
+              f"C-abs 725 happened). Clamping val_every -> {new_every}.", flush=True)
+        val_every = new_every
     val_max_batches = training_cfg.get("val_max_batches", None)  # None = full val set
     # PROFILE_STEPS=N prints a CUDA-synced forward/render/backward breakdown for
     # the first N steps, then trains normally. Zero overhead when unset.

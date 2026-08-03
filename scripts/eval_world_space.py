@@ -38,6 +38,40 @@ from scripts.world_space_metrics import (
 )
 
 
+# A checkpoint at this step or below cannot have learned anything; evaluating it reports
+# untrained-model performance as if it were a result.
+MIN_TRAINED_STEP = 10
+
+
+def _assert_checkpoint_is_trained(path, ck):
+    """Refuse to evaluate a checkpoint that was saved before training did anything.
+
+    THIS EXISTS BECAUSE OF C-abs 725. The HOI4D-only control was evaluated from
+    best_val_loss.pt, which sat at global_step=1: the config had val_every=3000 while the run
+    only reached 2222 steps, so validation ran ONCE at the start and never again, and the
+    step-1 model stayed 'best' forever. The eval then dutifully reported 725 mm - untrained
+    performance - and nothing in the pipeline objected. Two days of hypotheses (dead kp3d_abs,
+    data mixing, box conventions) were spent on what was a checkpoint-selection bug.
+    """
+    if not isinstance(ck, dict):
+        return
+    step = ck.get("global_step")
+    epoch = ck.get("epoch")
+    if step is None:
+        return
+    print(f"warm-start checkpoint: global_step={step} epoch={epoch}  ({os.path.basename(path)})",
+          flush=True)
+    if int(step) <= MIN_TRAINED_STEP:
+        raise SystemExit(
+            f"Refusing to evaluate {path}: global_step={step} means this checkpoint was saved "
+            f"before training had progressed, so any metric from it is untrained-model noise "
+            f"(this is exactly how C-abs 725 was produced).\n"
+            f"  Likely cause: training ran fewer steps than training.val_every, so validation "
+            f"never re-ran and the first checkpoint stayed 'best'.\n"
+            f"  Fix: evaluate hand_head_final.pt / latest.pt instead of best_val_loss.pt."
+        )
+
+
 def build_model(cfg, device):
     """Build WorldMirror from cfg, load the base checkpoint, warm-start the hand head."""
     from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
@@ -48,6 +82,7 @@ def build_model(cfg, device):
     model.load_state_dict(state, strict=False)
     if mcfg.get("warm_start_hand_head"):
         ws = torch.load(mcfg["warm_start_hand_head"], map_location=device)
+        _assert_checkpoint_is_trained(mcfg["warm_start_hand_head"], ws)
         sd = ws["model_state_dict"] if isinstance(ws, dict) and "model_state_dict" in ws else ws
         hh_keys = set(model.hand_head.state_dict().keys())
         loaded = {k: v for k, v in sd.items() if k in hh_keys}
