@@ -57,6 +57,14 @@ def main() -> None:
                          "what CameraHead consumes; the patch-token cache strips it, so camera-head "
                          "training is impossible without it. ~64 KB/clip vs ~16.8 MB, so it is "
                          "nearly free to build in the same pass.")
+    ap.add_argument("--min_labelled_frames", type=int, default=None,
+                    help="keep only clips with at least this many GT-labelled frames, exactly as "
+                         "the trainer does. MUST match data.min_labelled_frames in the training "
+                         "config: the cache is keyed <seq>_<offset>, so a build that filters MORE "
+                         "than the trainer leaves it looking up absent keys. Defaults to the "
+                         "config value. Sparse stores make this load-bearing rather than a "
+                         "tuning knob - Ego-Exo4D labels ~2.3% of frames, so an unfiltered build "
+                         "writes ~16.8 MB/clip for clips that carry no supervision at all.")
     ap.add_argument("--save_model", default=None,
                     help="save the constructed model's state_dict here (random-init arm: the "
                          "eval points model.checkpoint at this file so the eval-time backbone "
@@ -87,6 +95,11 @@ def main() -> None:
     seqs = discover_sequences(args.data_root)
     if args.max_seqs:
         seqs = seqs[: args.max_seqs]
+    min_lab = (args.min_labelled_frames if args.min_labelled_frames is not None
+               else data_cfg.get("min_labelled_frames", 0))
+    print(f"min_labelled_frames={min_lab} "
+          f"({'from --min_labelled_frames' if args.min_labelled_frames is not None else 'from config'})",
+          flush=True)
     ds = HOT3DHandDataset(
         seqs, mano,
         num_frames=data_cfg.get("num_frames", 16),
@@ -95,7 +108,13 @@ def main() -> None:
         use_hand_crop=model_cfg.get("use_hand_crop", False),
         rescale_factor=cfg.get("hand_crop", {}).get("rescale_factor", 1.5),
         emit_cache_key=True,
+        min_labelled_frames=min_lab,
     )
+    if len(ds) == 0:
+        raise SystemExit(
+            f"EMPTY DATASET after min_labelled_frames={min_lab} filtering over {len(seqs)} "
+            f"sequences. Building a cache here would write nothing and the training run would "
+            f"then fail on missing keys. Lower --min_labelled_frames or check the store's GT.")
     os.makedirs(args.out, exist_ok=True)
     if args.cam_token_out:
         os.makedirs(args.cam_token_out, exist_ok=True)
