@@ -8,6 +8,57 @@ Legend — Status: 🟢 running · 🟡 queued · 🔵 results-in-needs-verdict 
 _Last updated: 2026-08-03. Sections A-E below are a Jul-5 snapshot with dated updates prepended;
 read the 2026-08-03 hygiene pass FIRST - it retracts two numbers that later sections still cite._
 
+## 2026-08-04 RESULT - depth-diverse mixing confirmed, and the 725 line finally closed
+
+### ✅ The depth-prior prediction HELD, quantitatively
+
+  run                                  C_abs    C_rr   n_seg
+  HOI4D-only -> H2O zero-shot          184.8    59.7     757
+  **mix3 -> H2O zero-shot**            **66.2** 38.2     757
+  HOI4D-only in-domain (HOI4D-157)      23.9    18.0     314
+  mix3 in-domain (HOI4D-157)            30.8    16.6     314
+
+mix3 = HOI4D + OakInk2 + ARCTIC, H2O fully held out. Both H2O rows are full-coverage on identical
+757-segment splits, matched protocol 16/8, so they are directly comparable.
+
+The transfer law fit on the single-dataset case was `C_abs ~= 60 + 0.50 * |depth shift|`. HOI4D
+alone sits 174 mm deeper than H2O, so the law charges ~87 mm over the intercept and it scored
+184.8. mix3's depths (HOI4D 0.677, ARCTIC 0.474, OakInk2 0.386) BRACKET H2O's 0.503, the shift term
+collapses, and the law predicts ~60. **Observed 66.2.** The prediction was written into the job
+script before the run.
+
+**The trade, which is the paper-ready framing:** mixing costs **6.9 mm in-domain** and buys
+**118.6 mm out-of-domain**, roughly 17:1. Report both columns; the in-domain cost is what makes the
+out-of-domain gain credible. **Control still missing:** a same-size mixture that does NOT bracket
+H2O, to separate depth coverage from simply more data. Do not claim the mechanism in print without
+it.
+
+### ✅ The 725 line is closed
+
+The HOI4D-only control from its TRAINED checkpoint reads **C_abs 23.9 / C_rr 18.0**, consistent
+with the 23.6 headline. 725 was the untrained checkpoint and nothing else. The §2 caveat below
+stands as history; the datapoint itself is now superseded by a valid number.
+
+### Window length, matched arms (all retrained at their own length, 314 segs)
+
+  16/8  C_abs 30.8  C_rr 16.6 | 32/16  C_abs 28.4  C_rr 21.2 | 64/32  C_abs 37.2  C_rr 28.7
+
+32 frames buys 2.4 mm of absolute placement and costs 4.6 mm of articulation; 64 is worse on
+everything, so C_abs has an interior optimum near 32. W/WA barely move, so window length is not a
+trajectory lever. Keep 16/8 as the LOCK.
+
+### Infrastructure fixed (three silent-failure classes)
+
+- `solve_similarity` dropped a whole run on ONE non-finite joint (SVD raise -> all 157 sequences
+  skipped, 1h37m of GPU wasted). Now drops non-finite rows; verified a NaN row still recovers the
+  exact scale (258fa01).
+- Eval configs inherited `enable_gs: false` from training, silently making every W/WA non-metric
+  while exiting 0. `_make_eval_cfg.py` now forces it on, with `--keep_gs_off` for hand-only models
+  that never had the branch (8df4d17).
+- `build_feature_cache` ignored `min_labelled_frames`. On Ego-Exo4D that was the difference between
+  **6,124 clips / 100.5 GB and 88,807 clips / 1457 GB**, against 1.15 TB of scratch headroom
+  (0c356e5). Cache built and verified at 96 GB / 6,124 files.
+
 ## 2026-08-03 HYGIENE PASS - retractions, and one confounded causal control
 
 ### 1. ❌ RETRACTED: the `ctxgate` clip-length sweep
