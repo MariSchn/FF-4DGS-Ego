@@ -988,6 +988,19 @@ def main():
                 # is also not the locked protocol. Keep both facts: matches_locked_protocol stays
                 # honestly false, and the reason this run is legitimate is recorded next to it.
                 "declared_protocol": args.declare_protocol,
+                # MEASURED training stores, next to the DECLARED ones. --declare_protocol is typed
+                # by hand into an sbatch script and drifts the moment the mix changes: the varlen
+                # arms were submitted declaring "ARCTIC+OakInk2+HOT3D" and then had HOT3D removed
+                # from data_roots, so the string alone would have asserted a training set the run
+                # never saw. A zero-shot claim rests entirely on which stores trained the model, so
+                # it is read from the config the checkpoint was actually produced with instead of
+                # being trusted. Compare the two fields before quoting any cross-dataset number.
+                "train_stores_measured": sorted(
+                    r.get("name", r.get("root", "?")) for r in
+                    (cfg.get("data", {}).get("data_roots")
+                     or ([{"root": cfg["data"]["data_root"]}]
+                         if cfg.get("data", {}).get("data_root") else []))),
+                "train_random_frames": cfg.get("data", {}).get("random_frames"),
                 # The mismatch that actually invalidates numbers is inference != training, not
                 # inference != 16. Record it explicitly so an audit needs no other file.
                 "train_inference_match": (args.clip_len == _tf_stamp),
