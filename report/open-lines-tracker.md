@@ -1,5 +1,65 @@
 # Open Lines Tracker
 
+## 2026-08-06 (late) - task #68 resolved: "detbox" means a different detector per method
+
+### The answer was already in this file
+
+D2-10, recorded 2026-07-19, states it outright:
+
+> "Ours det-box rows (49.8 / 35.6) use detbox v3 ... HaMeR fu/fj/mt det-box rows (44.0 / 41.6 /
+> 68.7) use **WiLoR-detector boxes**"
+
+and the fix D2-10 built was the `--box file` driver that produced the **v3box** variant:
+
+> "fj2 on the exact v3 boxes = **C_abs 23.4** / wrist 22.3 / C_rr 13.2"
+
+with sanity anchors "fj2 GT 19.0 vs orig fj 20.8; own-det 38.6 vs 41.6".
+
+| directory | boxes | C-abs |
+|---|---|---|
+| `hamer_fj2_gtbox_preds` | GT | 19.01 |
+| `hamer_fj2_v3box_preds` | **our detbox v3** | **23.41** |
+| `hamer_fj2_detbox_preds` | **WiLoR's detector** | 38.55 |
+
+So "detbox" means our v3 for OUR rows and WiLoR's detector for HaMeR's rows. Same word, different
+detector, no marker anywhere except a per-method convention nobody wrote down.
+
+### Consequence 1: the abstract is right
+
+"23.4 mm on identical boxes against our 35.8" traces to `hamer_fj2_v3box_eval` (23.41), which is
+the locked detbox v3. Nothing to change.
+
+### Consequence 2: two world-table rows are not input-matched, and I certified them this morning
+
+`fj2_slam_detbox_preds` and `mt_slam_detbox_preds` are composed from the WiLoR-detector caches, so
+HaMeR$_{ft}$+SLAM (37.4 / 36.8 / 53.6) and HaMeR$_{mt}$+SLAM (67.3 / 41.8 / 66.8) sit on a third
+detector that is neither ours nor their own. **I marked both as SHARED earlier today by trusting
+the `detbox` substring** - the exact failure I had flagged an hour before, in the commit that added
+provenance stamping specifically because directory names are not provenance.
+
+**Direction: it understates HaMeR_ft.** Input-matched it is 23.4 camera-frame against the 37.4
+printed. The comparison that already goes against us goes against us harder.
+
+### What was done, and what is deliberately not
+
+Both rows now carry a footnote saying plainly that they are not on our boxes, naming WiLoR's
+detector, giving the input-matched 23.4, and explaining why the world cells cannot be corrected the
+same way. **Marked, not moved**: they belong in neither the shared nor the native column.
+
+An input-matched HaMeR_ft+SLAM **world** row needs `hamer_fj2_v3box_preds` composed with the shared
+trajectory. That directory was purged from Euler scratch (1 of 157 files) **and** the fine-tuned
+checkpoint `ckpts/fj2_tuned.pt` went with it, so completing the row means **repeating the
+fine-tune**, not running an eval. That is a decision, not an errand: repeat the fine-tune, or keep
+the footnote and let the abstract carry the input-matched comparison. The footnote is honest either
+way.
+
+### Still unverified
+
+`wilor_slam_detbox_preds` comes from `wilor_detbox_truefocal_preds`. WiLoR has BOTH a `native` and
+a `detbox` variant, which suggests `detbox` = ours there - but that is an inference from naming,
+and naming is precisely what failed here. Confirm before the table is final (folded into #69).
+
+
 ## 2026-08-06 (evening) - the scale is 42% too small, and the cause is one-sided
 
 ### The measurement that reframes task #63
