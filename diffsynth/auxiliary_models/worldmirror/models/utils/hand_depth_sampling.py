@@ -186,19 +186,43 @@ def project_joints_to_norm_pixels(
 def sample_depth_at_joints(
     gs_depth: torch.Tensor,
     grid_xy: torch.Tensor,
+    window: int = 1,
+    reduce: str = "bilinear",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Bilinear-sample ``gs_depth`` at normalised joint pixel locations.
+    """Sample ``gs_depth`` at normalised joint pixel locations.
 
     Resolution-independent: ``grid_xy`` is normalised, so the result does not
     depend on ``gs_depth``'s (Hd, Wd).
 
+    WHY THERE IS A NON-BILINEAR OPTION (task #63). The scene scale is solved as
+    ``s = med(z_hand / d_scene)`` with ``d_scene`` read here, and s comes out systematically LOW:
+    measured against the GT camera scale over 1884 segments, ``s_hand`` 0.6208 against ``s_gt``
+    1.0230, a ratio of 0.578. The hand depth itself is not the problem (C-MPJPE absolute is ~36mm
+    at ~0.7m, about 5%), so ``d_scene`` at these pixels is reading roughly 1.7x too far.
+
+    That has a one-sided cause. At a hand joint's pixel the nearest visible surface IS the hand,
+    so ANY misregistration - sub-pixel error, the residual frame-width error of task #64, or
+    simply the predicted depth being blurred across the hand's silhouette - blends in BACKGROUND,
+    which is strictly FARTHER. Contamination can push ``d_scene`` up and essentially never down,
+    and ``s = z/d`` is therefore biased down.
+
+    Under one-sided contamination a low-order statistic over a small neighbourhood is the correct
+    robust estimator, not the mean-like bilinear blend. ``reduce="min"`` or ``"q10"`` with
+    ``window=3`` implements that. It stays OFF by default: this is a hypothesis with a mechanism,
+    and it is adopted only if it moves ``scale_ratio_med`` toward 1.0 in the A/B.
+
     Args:
         gs_depth: [B, S, 1, Hd, Wd] or [B, S, Hd, Wd], positive depth.
         grid_xy:  [B, S, H, J, 2] normalised (x=width, y=height) in [0, 1].
+        window:   odd neighbourhood size in DEPTH-MAP pixels. 1 keeps the single-point read.
+        reduce:   "bilinear" (single point), "min", or "qNN" (e.g. "q10") for a low quantile over
+                  the window. "mean" is deliberately absent: averaging re-introduces exactly the
+                  background blend this exists to remove.
 
     Returns:
         sampled:  [B, S, H, J] sampled depth.
-        in_frame: [B, S, H, J] bool, True where the joint projects inside [0, 1]^2.
+        in_frame: [B, S, H, J] bool, True where the joint CENTRE projects inside [0, 1]^2
+                  (unchanged by the window, so validity does not depend on the estimator).
     """
     if gs_depth.dim() == 5:
         if gs_depth.shape[2] == 1:
@@ -217,10 +241,45 @@ def sample_depth_at_joints(
     y = grid_xy[..., 1]
     in_frame = (x >= 0) & (x <= 1) & (y >= 0) & (y <= 1)
 
-    grid = torch.stack([x * 2.0 - 1.0, y * 2.0 - 1.0], dim=-1)  # [-1, 1]
     inp = gs_depth.reshape(B * S, 1, Hd, Wd)
+
+    if window <= 1 and reduce == "bilinear":
+        grid = torch.stack([x * 2.0 - 1.0, y * 2.0 - 1.0], dim=-1)  # [-1, 1]
+        samp = F.grid_sample(
+            inp, grid.reshape(B * S, H * J, 1, 2),
+            mode="bilinear", align_corners=False, padding_mode="border",
+        )
+        return samp.reshape(B, S, H, J), in_frame
+
+    if window % 2 == 0 or window < 1:
+        raise ValueError(f"window must be a positive odd number of pixels, got {window}")
+    if reduce == "bilinear":
+        raise ValueError("window > 1 needs a reduce other than 'bilinear'; use 'min' or 'qNN'")
+
+    # Offsets in NORMALISED units: one depth-map pixel is 1/Wd in x and 1/Hd in y. Sampling the
+    # window in normalised space keeps this resolution-independent, matching the rest of the
+    # module's contract.
+    r = (window - 1) // 2
+    offs = torch.arange(-r, r + 1, device=gs_depth.device, dtype=x.dtype)
+    dx = (offs / float(Wd)).view(-1, 1).expand(window, window).reshape(-1)   # [K*K]
+    dy = (offs / float(Hd)).view(1, -1).expand(window, window).reshape(-1)   # [K*K]
+
+    xs = x.unsqueeze(-1) + dx            # [B,S,H,J,K*K]
+    ys = y.unsqueeze(-1) + dy
+    grid = torch.stack([xs * 2.0 - 1.0, ys * 2.0 - 1.0], dim=-1)             # [B,S,H,J,K*K,2]
     samp = F.grid_sample(
-        inp, grid.reshape(B * S, H * J, 1, 2),
+        inp, grid.reshape(B * S, H * J * window * window, 1, 2),
         mode="bilinear", align_corners=False, padding_mode="border",
-    )
-    return samp.reshape(B, S, H, J), in_frame
+    ).reshape(B, S, H, J, window * window)
+
+    if reduce == "min":
+        return samp.min(dim=-1).values, in_frame
+    if reduce.startswith("q"):
+        try:
+            q = float(reduce[1:]) / 100.0
+        except ValueError as exc:
+            raise ValueError(f"reduce quantile must look like 'q10', got {reduce!r}") from exc
+        if not 0.0 <= q <= 1.0:
+            raise ValueError(f"reduce quantile out of range: {reduce!r}")
+        return samp.quantile(q, dim=-1), in_frame
+    raise ValueError(f"unknown reduce {reduce!r}; expected 'bilinear', 'min' or 'qNN'")

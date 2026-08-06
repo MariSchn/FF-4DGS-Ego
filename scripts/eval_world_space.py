@@ -138,7 +138,8 @@ def ratio_validity_mask(z, sampled, in_frame, require_positive_z=False):
 
 
 def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=None, contact_mask=None,
-                 ref_d_scene=None, depth_out=None, steps_out=None, require_positive_z=False):
+                 ref_d_scene=None, depth_out=None, steps_out=None, require_positive_z=False,
+                 scene_depth_window=1, scene_depth_reduce="bilinear"):
     """Run the hand head for one clip and gather its metric-scale correspondences.
 
     Returns ``(pj_cam, c2w, s_clip, ratios)``: ``pj_cam`` [S,H,J,3] metric camera-frame joints
@@ -195,7 +196,8 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
     s_failed = False
     if gs_depth is not None and cam_intr is not None:
         grid_xy, z = project_joints_to_norm_pixels(pred_joints, cam_intr.to(device))
-        sampled, in_frame = sample_depth_at_joints(gs_depth, grid_xy)
+        sampled, in_frame = sample_depth_at_joints(
+            gs_depth, grid_xy, window=scene_depth_window, reduce=scene_depth_reduce)
         # MEASURED FIRST, gated second (task #63): the diagnostic is always recorded so the
         # prevalence of behind-camera joints is a number rather than a story, while the mask
         # change stays behind require_positive_z until the A/B says it helps.
@@ -355,7 +357,8 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                   da3_wrist_cache_dir=None, contact_cache_dir=None, contact_gate="off",
                   oracle_depth=False, dense_link=False,
                   gravity_oracle=False, gravity_axis=(0.0, 1.0, 0.0), dump_cam_dir=None,
-                  diag_cam=False, require_positive_z=False):
+                  diag_cam=False, require_positive_z=False,
+                  scene_depth_window=1, scene_depth_reduce="bilinear"):
     """Eval all `segment_len` segments of one sequence; return list of per-segment metrics.
 
     ``feed_intrinsics``: condition the backbone on the *known* camera intrinsics (ray prior,
@@ -468,7 +471,9 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             _steps: dict = {}
             cc = predict_clip(preds, mano_model, device, cam_intr, model=model, anchor_log=anchor_log,
                               ref_d_scene=_ref, contact_mask=_con, depth_out=clip_depths,
-                              steps_out=_steps, require_positive_z=require_positive_z)
+                              steps_out=_steps, require_positive_z=require_positive_z,
+                              scene_depth_window=scene_depth_window,
+                              scene_depth_reduce=scene_depth_reduce)
             clip_cams.append(cc)
             # Task #63 diagnostic: what fraction of the correspondences the UNGUARDED mask
             # accepts are behind-camera joints. Recorded whether or not the guard is on, so the
@@ -923,6 +928,15 @@ def main():
                          "median: a candidate cause of the segments that solve onto the 0.1 "
                          "clamp floor (task #63). OFF by default until the A/B measures it; the "
                          "behind-camera RATE is reported under both settings.")
+    ap.add_argument("--scene_depth_window", type=int, default=1,
+                    help="odd neighbourhood (in depth-map pixels) to read scene depth over "
+                         "when solving the scene scale. 1 = the historical single-point read.")
+    ap.add_argument("--scene_depth_reduce", default="bilinear",
+                    help="how to reduce that neighbourhood: bilinear (single point), min, or "
+                         "qNN such as q10. Contamination at a hand pixel is ONE-SIDED (any "
+                         "misregistration blends in BACKGROUND, which is farther), so a "
+                         "low-order statistic is the right robust estimator. Measured bias: "
+                         "s_hand 0.6208 vs s_gt 1.0230, ratio 0.578 (task #63).")
     ap.add_argument("--robust_scale", action="store_true",
                     help="MAD-reject z_hand/scene_depth outliers before the per-seq pooled scale median")
     ap.add_argument("--da3_wrist_cache_dir", default=None,
@@ -1069,7 +1083,9 @@ def main():
                                      gravity_axis=tuple(float(x) for x in args.gravity_axis.split(",")),
                                      dump_cam_dir=(args.dump_cam_preds or None),
                                      diag_cam=args.diag_cam,
-                                     require_positive_z=args.require_positive_z)
+                                     require_positive_z=args.require_positive_z,
+                                     scene_depth_window=args.scene_depth_window,
+                                     scene_depth_reduce=args.scene_depth_reduce)
         except Exception as e:
             print(f"[skip {os.path.basename(sq)}] {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
