@@ -325,25 +325,74 @@ def _tracked_loss_terms() -> set[str]:
     return set(re.findall(r'accum_terms\["([a-z0-9_]+)"\]', src))
 
 
-def test_bug5_loss_effect_guard_silently_skips_the_root_anchor_loss():
+def test_bug5_root_anchor_is_now_accumulated_into_avg_terms():
+    """REGRESSION for the BUG 5 fix: root_anchor is a weighted loss, so it must be tracked.
+
+    Originally this test proved the hole (root_anchor was weighted but never accumulated, so
+    `if name not in avg_terms: continue` skipped it and a run declaring root_anchor: 1.0 could
+    train with the term at an exact 0.0 for every step and exit clean). The fix added it to both
+    accum_terms initialisers and to the accumulation. Asserting the fixed state is what keeps it
+    from regressing.
+    """
     import re
+    src = (ROOT / "scripts" / "train_hand_head.py").read_text()
+    tracked = _tracked_loss_terms()
+
+    assert 'w.get("root_anchor", 0.0)' in src, "root_anchor really is a weighted loss term"
+    assert re.search(r"loss_root_anchor = torch\.zeros", src), \
+        "the term is still initialised to an exact zero that can survive a whole run"
+    assert "root_anchor" in tracked, (
+        "root_anchor is weighted into the loss but is NOT accumulated into avg_terms, so "
+        "_check_loss_effect's `if name not in avg_terms: continue` skips it entirely "
+        f"(tracked terms: {sorted(tracked)})")
+
+
+def test_loss_effect_guard_fires_on_a_weighted_term_that_never_moves(capsys):
+    """The guard must reject a run where a weighted, tracked term stayed at exactly 0.0.
+
+    The SystemExit message is deliberately generic (it explains the failure class); the offending
+    term is named on stdout, so that is where the name is asserted.
+    """
     check = _load_check_loss_effect()
     tracked = _tracked_loss_terms()
-    src = (ROOT / "scripts" / "train_hand_head.py").read_text()
 
-    # Ground the premise in the real code, not in an invented scenario:
-    assert 'w.get("root_anchor", 0.0)' in src, "root_anchor really is a weighted loss term"
-    assert "root_anchor" not in tracked, (
-        "premise: loss_root_anchor is never accumulated into avg_terms "
-        f"(tracked terms: {sorted(tracked)})")
-    assert re.search(r"loss_root_anchor = torch\.zeros", src), \
-        "premise: the term is initialised to an exact zero that can survive a whole run"
-
-    # A run declaring root_anchor: 1.0 (configs/exp_p4_contact.yaml et al.) whose
-    # anchor never fires: the term contributes exactly 0.0 for every step.
     loss_weights = {"kp3d_abs": 1.0, "transl": 1.0, "root_anchor": 1.0}
-    avg_terms = {k: 0.37 for k in tracked}          # every TRACKED term is healthy
+    avg_terms = {k: 0.37 for k in tracked}          # every other term is healthy
+    avg_terms["root_anchor"] = 0.0                  # ...this one never fired
 
-    with pytest.raises(SystemExit) as excinfo:
+    with pytest.raises(SystemExit):
         check(loss_weights, avg_terms, 50, strict=True)
-    assert "root_anchor" in str(excinfo.value)
+    out = capsys.readouterr().out
+    assert "root_anchor" in out and "EXACTLY 0.0" in out
+
+
+def test_loss_effect_guard_fires_on_a_weighted_term_that_is_not_tracked_at_all(capsys):
+    """The deeper fix: an UNTRACKED weighted term must be an error, not a silent skip.
+
+    This is the failure class the original bug belonged to. Tracking root_anchor fixes today's
+    instance; failing loudly on any untracked weighted term is what stops the next one.
+    """
+    check = _load_check_loss_effect()
+    tracked = _tracked_loss_terms()
+
+    loss_weights = {"kp3d_abs": 1.0, "a_term_nobody_accumulates": 1.0}
+    avg_terms = {k: 0.37 for k in tracked}
+
+    with pytest.raises(SystemExit):
+        check(loss_weights, avg_terms, 50, strict=True)
+    out = capsys.readouterr().out
+    assert "a_term_nobody_accumulates" in out and "NEVER ACCUMULATED" in out
+
+
+def test_loss_effect_guard_passes_a_healthy_recipe():
+    """Guards the two above: the check must NOT fire when every weighted term is alive.
+
+    Without this, a change that made _check_loss_effect raise unconditionally would leave both
+    failure tests passing while breaking every training run.
+    """
+    check = _load_check_loss_effect()
+    tracked = _tracked_loss_terms()
+
+    loss_weights = {"kp3d_abs": 1.0, "root_anchor": 1.0}
+    avg_terms = {k: 0.37 for k in tracked}
+    check(loss_weights, avg_terms, 50, strict=True)      # must not raise

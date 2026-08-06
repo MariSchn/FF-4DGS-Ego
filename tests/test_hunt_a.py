@@ -109,6 +109,12 @@ HOI4D_STORE_INTR = (219.92, 114.28, 108.52)
 HOI4D_STORE_RES = 224.0
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "OPEN BUG, task #64. frame_width_from_intr's 2*cx derivation is unfixable on HOI4D because "
+    "the store's principal point is genuinely off-centre; the production fix is for callers to "
+    "declare set_default_frame_width(resolution), which train_hand_head and eval_world_space now "
+    "do. This stays xfail(strict) so it flips to a FAILURE the day the fallback itself is "
+    "corrected, rather than rotting green. See the regression test below for the fixed path."))
 def test_frame_width_from_intr_is_wrong_on_the_hoi4d_store():
     from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
         frame_width_from_intr,
@@ -132,28 +138,69 @@ def test_frame_width_from_intr_is_wrong_on_the_hoi4d_store():
     )
 
 
+def _bottom_row_joint(f, cx, cy, z=0.5):
+    """A joint whose projection lands on the LAST real row of the 224 px frame, i.e. the joint
+    that must normalise to u = 0 (plus the half-pixel centre offset)."""
+    y = (HOI4D_STORE_RES - 1.0 - cy) * z / f
+    x = (0.5 * HOI4D_STORE_RES - cx) * z / f          # horizontal centre of the real frame
+    return torch.tensor([[[[[x, y, z]]]]], dtype=torch.float64)
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "OPEN BUG, task #64, same root cause as the test above: with no declared frame width the "
+    "helper falls back to W = 2*cx = 228.56 on a 224 px store and samples ~5 px off the joint."))
 def test_projected_frame_corner_is_not_at_the_frame_corner_on_hoi4d():
-    """A joint that projects onto the LAST real row of the 224 px frame should
-    normalise to u = 0. With W = 2*cx it lands 2% of the frame away instead."""
+    """A joint on the LAST real row of the 224 px frame should normalise to u = 0. Via the
+    2*cx fallback it lands 2% of the frame away instead."""
     from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
         project_joints_to_norm_pixels,
+        set_default_frame_width,
     )
 
     f, cx, cy = HOI4D_STORE_INTR
     intr = torch.tensor([[f, cx, cy]], dtype=torch.float64)
-    z = 0.5
-    # Choose y so that row = f*y/z + cy == HOI4D_STORE_RES - 1 (bottom row of the real frame).
-    y = (HOI4D_STORE_RES - 1.0 - cy) * z / f
-    x = (0.5 * HOI4D_STORE_RES - cx) * z / f          # column at the real frame's horizontal centre
-    joints = torch.tensor([[[[[x, y, z]]]]], dtype=torch.float64)
-
-    grid, _ = project_joints_to_norm_pixels(joints, intr)
+    set_default_frame_width(None)                     # force the fallback path under test
+    try:
+        grid, _ = project_joints_to_norm_pixels(_bottom_row_joint(f, cx, cy), intr)
+    finally:
+        set_default_frame_width(None)
     u_norm = float(grid[0, 0, 0, 0, 0])
 
     assert abs(u_norm) < 0.005, (
         f"a joint on the bottom row of the real {HOI4D_STORE_RES:.0f} px frame normalises to "
         f"u={u_norm:.4f} instead of 0.0, i.e. the depth is sampled "
         f"{u_norm * HOI4D_STORE_RES:.1f} px away from the joint."
+    )
+
+
+def test_declared_frame_width_fixes_the_hoi4d_projection():
+    """REGRESSION for the actual production fix to task #64.
+
+    The two xfails above are about the 2*cx fallback, which cannot be right on a store whose
+    principal point is off-centre. The fix is that callers declare the real frame width once
+    (train_hand_head and eval_world_space both call set_default_frame_width(resolution)). With
+    that declared, the same joint lands where it should. This is the assertion that protects the
+    shipped behaviour, so the fallback tests can stay xfail without leaving the fix untested.
+    """
+    from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
+        project_joints_to_norm_pixels,
+        set_default_frame_width,
+    )
+
+    f, cx, cy = HOI4D_STORE_INTR
+    intr = torch.tensor([[f, cx, cy]], dtype=torch.float64)
+    set_default_frame_width(HOI4D_STORE_RES)
+    try:
+        grid, _ = project_joints_to_norm_pixels(_bottom_row_joint(f, cx, cy), intr)
+    finally:
+        set_default_frame_width(None)                 # never leak process state into other tests
+
+    u_norm = float(grid[0, 0, 0, 0, 0])
+    # u = ((W-1) - row + 0.5)/W with row = W-1 gives exactly 0.5/W, the pixel centre.
+    expected = 0.5 / HOI4D_STORE_RES
+    assert abs(u_norm - expected) < 1e-9, (
+        f"with the frame width declared as {HOI4D_STORE_RES:.0f} the bottom-row joint should "
+        f"normalise to {expected:.6f} (the centre of pixel 0), got {u_norm:.6f}"
     )
 
 
@@ -178,28 +225,63 @@ def _ramp_depth(res: int, step_m: float = 0.01, base_m: float = 1.0) -> torch.Te
     return col.view(1, res).expand(res, res).contiguous()
 
 
-def test_object_depth_loss_has_a_half_pixel_sampling_offset():
-    """Feeding the SAME depth map as prediction and as ground truth must give a
-    residual of exactly 0. It does not."""
+def test_object_depth_loss_round_trips_the_rotated_depth_convention_exactly():
+    """REGRESSION (was the BUG 3 prover; fixed 2026-08-06, then the fixture was corrected).
+
+    Contract: if the predicted ``gs_depth`` is the true object depth expressed in gs_depth's own
+    storage layout, the loss must report a residual of exactly 0.
+
+    The layout is the whole point. ``gs_depth`` is stored 90 degrees rotated relative to the
+    image: ``project_joints_to_norm_pixels`` samples it at ``[u, v] = [(W-1)-row, col]``. So a GT
+    map in plain image layout ``[row, col]`` corresponds to ``rot90(gt, k=-1)`` in gs_depth
+    layout, and THAT is the identity fixture.
+
+    The original version of this test fed the same array as both prediction and GT, which is only
+    an identity under a no-rotation convention. It reported 189 mm before the grid fix and 53 mm
+    after, and the 53 mm was the fixture's rotation error, not a residual bug: the ramp varies by
+    column, so comparing plain[row,col] against gs[col,(R-1)-row] can never cancel. Measured
+    across all four rotations, only k=-1 gives 0.0000 mm, which pins the convention.
+    """
     from scripts.object_depth_loss import object_depth_loss
 
     R = 16
-    step = 0.01                                   # 10 mm per pixel
-    d = _ramp_depth(R, step_m=step)
-    gs_depth = d.view(1, 1, 1, R, R)              # [B,S,1,Hd,Wd]
-    gt_obj_depth = d.view(1, 1, R, R)             # [B,S,R,R]
-    gt_obj_mask = torch.ones(1, 1, R, R, dtype=torch.bool)
+    # Vary along BOTH axes, otherwise a wrong rotation can still cancel and the test proves
+    # nothing (a column-only ramp is invariant under the transpose part of the rotation).
+    plain = (_ramp_depth(R, step_m=0.01)
+             + 0.003 * torch.arange(R, dtype=torch.float32).view(R, 1))
+    gs = torch.rot90(plain, k=-1, dims=(0, 1)).contiguous()
 
-    loss, info = object_depth_loss(gs_depth, gt_obj_depth, gt_obj_mask)
+    loss, info = object_depth_loss(gs.view(1, 1, 1, R, R), plain.view(1, 1, R, R),
+                                   torch.ones(1, 1, R, R, dtype=torch.bool))
 
     assert info["n_valid"] == R * R
     assert info["obj_depth_residual_m"] < 1e-6, (
-        f"prediction == ground truth but the reported residual is "
-        f"{1000.0 * info['obj_depth_residual_m']:.2f} mm on a {1000.0 * step:.0f} mm/px ramp "
-        "(~half a pixel). scripts/object_depth_loss.py:69 builds the grid as i/R while "
-        "sample_depth_at_joints uses align_corners=False, where pixel i is centred at "
-        "(i+0.5)/R. eval_world_space.py:258 uses the +0.5 form."
+        f"prediction equals ground truth in gs_depth layout but the residual is "
+        f"{1000.0 * info['obj_depth_residual_m']:.4f} mm. The loss samples gs_depth at a "
+        "different pixel than project_joints_to_norm_pixels does, so it pulls the depth map "
+        "where the metric-scale solve never looks."
     )
+
+
+def test_object_depth_loss_rejects_the_wrong_rotation():
+    """Guards the test above: a wrong storage rotation must NOT round-trip to zero.
+
+    Without this, a future change that made the loss rotation-insensitive (e.g. sampling a
+    symmetric grid) would leave the test above passing while the convention silently broke.
+    """
+    from scripts.object_depth_loss import object_depth_loss
+
+    R = 16
+    plain = (_ramp_depth(R, step_m=0.01)
+             + 0.003 * torch.arange(R, dtype=torch.float32).view(R, 1))
+    for k in (0, 1, 2):
+        gs = torch.rot90(plain, k=k, dims=(0, 1)).contiguous()
+        _, info = object_depth_loss(gs.view(1, 1, 1, R, R), plain.view(1, 1, R, R),
+                                    torch.ones(1, 1, R, R, dtype=torch.bool))
+        assert info["obj_depth_residual_m"] > 1e-3, (
+            f"rot90 k={k} also round-trips to ~0, so the test above no longer pins the "
+            "rotated-storage convention"
+        )
 
 
 # ===========================================================================
@@ -268,10 +350,20 @@ def _dexycb_principal_point(c: float, offset: float, s: float) -> float:
     return (c - offset + 0.5) * s - 0.5
 
 
-def test_h2o_and_hoi4d_intrinsics_use_the_wrong_resize_convention_for_cx_cy():
-    """Three converters write the same `cam_intrinsics.pt` [f, cx, cy] contract, but
-    dexycb_to_ours rescales the principal point under the pixel-centre convention while
-    h2o_to_currentproto and preprocess_hoi4d use plain multiplication."""
+def test_h2o_and_hoi4d_intrinsics_use_the_pixel_centre_resize_convention_for_cx_cy():
+    """REGRESSION (was the BUG 6 prover; the converters were fixed, this now locks them).
+
+    Three converters write the same `cam_intrinsics.pt` [f, cx, cy] contract and must all rescale
+    the principal point under the pixel-centre convention (c + 0.5) * s - 0.5. Plain
+    multiplication lands it half a source-pixel out, which biases every exported crop box.
+
+    TOLERANCE: 1e-4 px, not 1e-6. `load_intrinsics` returns a float32 tensor and float32 eps at
+    cx ~= 114 is ~7.6e-6, so a 1e-6 bound tests the storage dtype rather than the convention. The
+    error this test exists to catch is 0.4 px, four orders of magnitude larger.
+
+    NOTE: this locks the CONVERTERS. Stores packed before the fix still carry the old
+    intrinsics on disk and are not covered here (the intrinsics-resize desync).
+    """
     import numpy as np
 
     from scripts.preprocessing.h2o_to_currentproto import square_intrinsics
@@ -285,11 +377,11 @@ def test_h2o_and_hoi4d_intrinsics_use_the_wrong_resize_convention_for_cx_cy():
     )
     x0 = (int(w) - int(h)) // 2
     s = res / h
-    assert abs(cx_s - _dexycb_principal_point(cx, x0, s)) < 1e-6, (
+    assert abs(cx_s - _dexycb_principal_point(cx, x0, s)) < 1e-4, (
         f"H2O square_intrinsics cx = {cx_s:.4f}, pixel-centre form gives "
         f"{_dexycb_principal_point(cx, x0, s):.4f} (off by {0.5 * (s - 1.0):+.3f} px)"
     )
-    assert abs(cy_s - _dexycb_principal_point(cy, 0.0, s)) < 1e-6
+    assert abs(cy_s - _dexycb_principal_point(cy, 0.0, s)) < 1e-4
 
     # --- HOI4D: 1920x1080 -> centre square 1080 -> 224 (the packed store resolution,
     #     pinned by hand_bboxes_v2_rf1.5_res224x224.pt) ---
@@ -297,7 +389,7 @@ def test_h2o_and_hoi4d_intrinsics_use_the_wrong_resize_convention_for_cx_cy():
     intr = load_intrinsics(K, 1920, 1080, 224)
     s_h = 224.0 / 1080.0
     x0_h = (1920 - 1080) // 2
-    assert abs(float(intr[1]) - _dexycb_principal_point(K[0, 2], x0_h, s_h)) < 1e-6, (
+    assert abs(float(intr[1]) - _dexycb_principal_point(K[0, 2], x0_h, s_h)) < 1e-4, (
         f"HOI4D load_intrinsics cx = {float(intr[1]):.4f}, pixel-centre form gives "
         f"{_dexycb_principal_point(K[0, 2], x0_h, s_h):.4f} (off by {0.5 * (s_h - 1.0):+.3f} px)"
     )

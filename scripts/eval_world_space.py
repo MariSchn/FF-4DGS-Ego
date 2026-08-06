@@ -116,8 +116,29 @@ def _world_from_cam(pj, c2w, s):
     return world
 
 
+def ratio_validity_mask(z, sampled, in_frame, require_positive_z=False):
+    """Which joint/scene-depth correspondences may feed the scene-scale median.
+
+    ``z`` is the metric camera-frame hand depth, ``sampled`` the predicted scene depth read at
+    the joint's projected pixel, ``in_frame`` whether that pixel landed inside the image.
+
+    ``require_positive_z`` closes a hole that the other three terms do not cover. A joint behind
+    the camera (z < 0) is projected by ``project_joints_to_norm_pixels`` with its depth clamped to
+    ``Z_MIN`` = 5 cm, so it lands at a plausible in-frame pixel, while the depth returned for the
+    ratio is the raw negative value. The result is a negative ratio that the median consumes,
+    which is a candidate cause of the segments that solve exactly onto the 0.1 clamp floor
+    (task #63). Kept behind a flag until the A/B measures it, so the change is evidence-led.
+
+    Pulled out of ``predict_clip`` purely so this rule is testable without a GPU forward pass.
+    """
+    valid = in_frame & (sampled > 0.01) & torch.isfinite(z) & torch.isfinite(sampled)
+    if require_positive_z:
+        valid = valid & (z > 0)
+    return valid
+
+
 def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=None, contact_mask=None,
-                 ref_d_scene=None, depth_out=None):
+                 ref_d_scene=None, depth_out=None, steps_out=None, require_positive_z=False):
     """Run the hand head for one clip and gather its metric-scale correspondences.
 
     Returns ``(pj_cam, c2w, s_clip, ratios)``: ``pj_cam`` [S,H,J,3] metric camera-frame joints
@@ -175,7 +196,18 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
     if gs_depth is not None and cam_intr is not None:
         grid_xy, z = project_joints_to_norm_pixels(pred_joints, cam_intr.to(device))
         sampled, in_frame = sample_depth_at_joints(gs_depth, grid_xy)
-        valid = in_frame & (sampled > 0.01) & torch.isfinite(z) & torch.isfinite(sampled)
+        # MEASURED FIRST, gated second (task #63): the diagnostic is always recorded so the
+        # prevalence of behind-camera joints is a number rather than a story, while the mask
+        # change stays behind require_positive_z until the A/B says it helps.
+        valid_unguarded = ratio_validity_mask(z, sampled, in_frame, require_positive_z=False)
+        valid = ratio_validity_mask(z, sampled, in_frame, require_positive_z=require_positive_z)
+        _nonpos = (~torch.isfinite(z)) | (z <= 0)
+        _n_tot = int(valid_unguarded.numel())
+        _frac_nonpos_valid = (float((valid_unguarded & _nonpos).sum())
+                              / max(int(valid_unguarded.sum()), 1))
+        if steps_out is not None:
+            steps_out["frac_nonpos_z_of_valid"] = _frac_nonpos_valid
+            steps_out["n_joints_total"] = _n_tot
         if bool(valid.any()):
             ratios = (z / sampled)[valid].detach().float().cpu()    # [n_valid] z_hand/scene_depth
             _s_raw = float(ratios.median())
@@ -186,6 +218,26 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
             # in the median case with EVERY clip of the segment at the bound and zero variance.
             # Record it so the caller can decide, instead of returning the bound as a number.
             s_failed = (_s_raw < 0.1) or (_s_raw > 10.0)
+        # Registration-panel intermediates (supervisor request 2026-08-06: "visual intermediate
+        # results for the registration steps"). Emitted from INSIDE the eval's own solve rather
+        # than recomputed by the plotting script: an earlier standalone dumper re-implemented the
+        # load-and-forward path, silently diverged from this one (no bf16 autocast, no cond_flags),
+        # and produced a constant hand depth of -0.0205 m on every sequence. The figure has to show
+        # what the eval does, so it is fed by the eval.
+        if steps_out is not None:
+            _d = gs_depth[0].float()
+            if _d.dim() == 4:
+                _d = _d[:, 0] if _d.shape[1] == 1 else _d[..., 0]
+            steps_out.update({
+                "gs_depth": _d.half().cpu(),                  # [S,Hd,Wd] R1: the scene depth map
+                "grid_xy": grid_xy[0].float().cpu(),          # [S,H,J,2] R1: where joints project
+                "hand_z": z[0].float().cpu(),                 # [S,H,J] R2: metric hand depth
+                "scene_at_hand": sampled[0].float().cpu(),    # [S,H,J] R2: scene depth there
+                "valid": valid[0].cpu(),
+                "ratios": ratios,                             # R2: the population medianed
+                "s": s, "s_raw": _s_raw, "s_failed": s_failed,
+                "c2w": c2w.cpu(),                             # [S,4,4] R3: up-to-scale trajectory
+            })
 
     # Contact Phase 1: post-hoc root-depth correction. Applied AFTER the scene-scale
     # solve (so the scene scale stays an independent property, no anchor->scale
