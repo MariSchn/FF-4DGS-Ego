@@ -19,6 +19,12 @@ import traceback
 import torch
 import yaml
 
+# Module-level, NOT function-local. _dense_scene_points (the --dense_link path) referenced this
+# name while the only import sat inside predict_clip, so that path raised NameError the moment it
+# ran. Caught by pyflakes 2026-08-06.
+from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
+    frame_width_from_intr,
+)
 from scripts.world_space_metrics import (
     apply_similarity,
     c_mpjpe,
@@ -155,7 +161,7 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
     """
     from scripts.train_hand_head import compute_joints_from_batch
     from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
-        project_joints_to_norm_pixels, sample_depth_at_joints, frame_width_from_intr)
+        project_joints_to_norm_pixels, sample_depth_at_joints)
 
     pred_joints = compute_joints_from_batch(preds["hand_joints"], mano_model, device)  # [1,S,H,J,3] cam (m)
     # cam->world (clip-local, up-to-scale). Only the world-space eval uses it; the
@@ -348,7 +354,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                   da3_wrist_cache_dir=None, contact_cache_dir=None, contact_gate="off",
                   oracle_depth=False, dense_link=False,
                   gravity_oracle=False, gravity_axis=(0.0, 1.0, 0.0), dump_cam_dir=None,
-                  diag_cam=False):
+                  diag_cam=False, require_positive_z=False):
     """Eval all `segment_len` segments of one sequence; return list of per-segment metrics.
 
     ``feed_intrinsics``: condition the backbone on the *known* camera intrinsics (ray prior,
@@ -413,6 +419,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         clip_depths = [] if dump_list is not None else None  # per-clip 32x32 gs_depth (dump only)
         s_pairs = []     # (s_gt, s_hand) per clip: GT camera-trajectory scale vs our hand scale (b)
         anchor_log = []  # per-clip {gate_rate, dz_gated_m, dz_max_m} when the root anchor is active
+        nonpos_log = []  # per-clip fraction of accepted correspondences that are behind-camera (#63)
         for c in range(clips_per_seg):
             print(f"  [clip seg{seg} {c + 1}/{clips_per_seg}] fwd+lift", flush=True)
             batch = ds[base + c]
@@ -457,9 +464,16 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                 _sl = seq_contact[_cf:_cf + clip_len]
                 if _sl.shape[0] == clip_len:
                     _con = _sl.unsqueeze(0).to(device)                  # [1,S,2] contact gate
+            _steps: dict = {}
             cc = predict_clip(preds, mano_model, device, cam_intr, model=model, anchor_log=anchor_log,
-                              ref_d_scene=_ref, contact_mask=_con, depth_out=clip_depths)
+                              ref_d_scene=_ref, contact_mask=_con, depth_out=clip_depths,
+                              steps_out=_steps, require_positive_z=require_positive_z)
             clip_cams.append(cc)
+            # Task #63 diagnostic: what fraction of the correspondences the UNGUARDED mask
+            # accepts are behind-camera joints. Recorded whether or not the guard is on, so the
+            # two arms of the A/B are directly comparable.
+            if "frac_nonpos_z_of_valid" in _steps:
+                nonpos_log.append(_steps["frac_nonpos_z_of_valid"])
 
             if diag_cam:
                 # The scene scale multiplies ONLY the camera translation, so its effect on the
@@ -580,8 +594,8 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             # for every clip, so the up-to-scale camera translation is never converted to metric
             # and every world/W metric is inflated. Almost always a config error (enable_gs=False
             # => no gs_depth). Shout: this used to pass silently as a plausible-looking W.
-            print(f"  !! SCALE DEGENERATE (s=1.0, no gs_depth correspondences) - world/W metrics "
-                  f"are NOT metric. Set model.enable_gs=True in the eval config.", flush=True)
+            print("  !! SCALE DEGENERATE (s=1.0, no gs_depth correspondences) - world/W metrics "
+                  "are NOT metric. Set model.enable_gs=True in the eval config.", flush=True)
 
         # --- SCALE-SOLVE FALLBACK (task #63) ---------------------------------------------
         # 15.7% of segments have a per-clip solve that lands exactly on a clamp bound, which is
@@ -594,11 +608,14 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         if scale_fallback == "pooled" and n_failed:
             clip_cams = [(pj, c2w, (s_pool if f else s), r, f)
                          for (pj, c2w, s, r, f) in clip_cams]
-        if n_failed:
+        frac_nonpos = (sum(nonpos_log) / len(nonpos_log)) if nonpos_log else 0.0
+        if n_failed or frac_nonpos > 0:
             print(f"  [scale] {n_failed}/{len(clip_cams)} clips FAILED the solve "
                   f"({100*frac_failed:.1f}%), policy={scale_fallback}"
                   + (f" -> substituted s_pool={s_pool:.4f}" if scale_fallback == "pooled" else
-                     " -> kept at the clamp bound"), flush=True)
+                     " -> kept at the clamp bound")
+                  + f" | behind-camera joints {100*frac_nonpos:.1f}% of accepted"
+                  + (" (EXCLUDED)" if require_positive_z else " (INCLUDED)"), flush=True)
 
         worlds_pc = [_world_from_cam(pj, c2w, s) for (pj, c2w, s, _, _) in clip_cams]       # per-clip
         worlds_md = [_world_from_cam(pj, c2w, s_med) for (pj, c2w, _, _, _) in clip_cams]   # per-seq median
@@ -898,6 +915,13 @@ def main():
                          "'clamp' keeps the bound (historical behaviour); 'pooled' substitutes the "
                          "sequence-pooled scale for those clips only. The failure RATE is reported "
                          "under both policies.")
+    ap.add_argument("--require_positive_z", action="store_true",
+                    help="exclude behind-camera joints (z<=0) from the scene-scale solve. The "
+                         "projection clamps depth to Z_MIN=5cm, so such a joint lands at a "
+                         "plausible in-frame pixel while contributing a NEGATIVE ratio to the "
+                         "median: a candidate cause of the segments that solve onto the 0.1 "
+                         "clamp floor (task #63). OFF by default until the A/B measures it; the "
+                         "behind-camera RATE is reported under both settings.")
     ap.add_argument("--robust_scale", action="store_true",
                     help="MAD-reject z_hand/scene_depth outliers before the per-seq pooled scale median")
     ap.add_argument("--da3_wrist_cache_dir", default=None,
@@ -1043,7 +1067,8 @@ def main():
                                      gravity_oracle=args.gravity_oracle,
                                      gravity_axis=tuple(float(x) for x in args.gravity_axis.split(",")),
                                      dump_cam_dir=(args.dump_cam_preds or None),
-                                     diag_cam=args.diag_cam)
+                                     diag_cam=args.diag_cam,
+                                     require_positive_z=args.require_positive_z)
         except Exception as e:
             print(f"[skip {os.path.basename(sq)}] {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
