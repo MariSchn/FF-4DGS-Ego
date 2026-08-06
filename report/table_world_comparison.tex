@@ -17,98 +17,101 @@
 %             Ours-detbox 36.2 / 33.2 / 37.3 = C_abs 36.204 / WA_short 33.163 / W 37.333
 %             (gb10 job 103354, ours_detbox_157.json, 1825 segs, C_rr 26.191, s_med 0.707).
 %             Ours FPS 6.59 (fps_probe cl16), offline FPS 2.47 (measured).
-%             WiLoR+SLAM re-scored (eval_worldspace_baseline seg30/wa30, wilor_slam_preds):
-%             83.42 / 33.44 / 40.37 = reproduces the verified post-framefix 83.4/33.4/40.4
-%             (2026-07-24) -> the old WA 47.0 in this table was STALE, corrected to 33.4.
-%             HaPTIC+SLAM (2026-07-24): composed HaPTIC per-frame cam hands with the SHARED
-%             HaWoR SLAM trajectory (build_slam_baseline, SE3 residual 0.000mm), scored
-%             identically -> W 42.53 / WA 35.71 / C_rr 29.21 / C_abs 157.7 (haptic_slam_world.json).
-%   NOTE: "best" bolding intentionally held until all +SLAM detbox rows are re-verified.
+%   BOX-SOURCE AUDIT 2026-08-06. The WA column was mixing native and shared-box numbers, which
+%   is exactly what this table's premise forbids. Audited every row against its pred dir:
+%             HaWoR            WA 40.06  hawor_detbox_world.json          SHARED  ok
+%             HaMeR_mt+SLAM    WA 41.81  audit_mt_slam_detbox_preds       SHARED  ok
+%             HaMeR_ft+SLAM    WA 36.83  audit_fj2_slam_detbox_preds      SHARED  ok
+%             Ours             WA 33.16  ours_detbox_157.json             SHARED  ok
+%             WiLoR+SLAM       WA 33.44  audit_wilor_slam_preds           NATIVE  <-- WRONG COLUMN
+%             HaPTIC+SLAM      WA 35.71  audit_haptic_slam_preds          NATIVE  <-- WRONG COLUMN
+%   wilor_slam_preds is built (Euler slam_baselines.sbatch) from wilor_native_truefocal_preds,
+%   i.e. WiLoR's OWN detector. The shared-box dir is wilor_slam_detbox_preds, which additionally
+%   had PERMUTED FINGER BLOCKS; job 9899520 re-permuted and rescored the same 157 sequences:
+%             WA 46.97 -> 43.70, C_rr 55.81 -> 32.60, W 128.96 -> 123.5, C_abs ~1074 (unchanged).
+%   So WiLoR+SLAM shared-box WA = 43.7, and that is what this table now prints.
+%   HaPTIC+SLAM has NO shared-box composition at all (no haptic_slam_detbox_preds exists), so its
+%   cell is \tbd rather than its native 35.7. OWED: compose haptic on detbox v3 and score it.
+%   NOTE: best-in-column bolding. On a now box-consistent WA column ours 33.2 leads by 3.6mm
+%   (next: HaMeR_ft 36.8), where the old mixed column made it a 0.2mm tie with a native number.
 % =========================================================================
 \begin{document}
 \begin{minipage}{17.4cm}
 \centering
 {\large\textbf{World-space hand comparison on HOI4D: every method on OUR detector boxes}}\\[2pt]
-{\small All metrics in mm, lower is better. \emph{Every} learned row uses our predictive detection
-boxes (detbox v3), the same 157-sequence held-out set, and a 30-frame WA window, scored with our
+{\small All metrics in mm, lower is better. \emph{Every} learned row uses our detector boxes,
+the same 157-sequence held-out set, and a 30-frame WA window, scored with our
 global metrics. C-MPJPE = \emph{absolute} camera-frame joint error; WA-MPJPE = trajectory error after
 per-window alignment; W-MPJPE = global trajectory error. FPS is inference throughput (higher is
-better). \textcolor{red}{TBD} = recompute on detbox v3 in progress.}\\[8pt]
+better).}\\[8pt]
 \begin{tabular}{@{}llcccc@{}}
 \toprule
 Method & Protocol & C-MPJPE $\downarrow$ & WA-MPJPE $\downarrow$ & W-MPJPE $\downarrow$ & FPS $\uparrow$ \\
 \midrule
-\multicolumn{6}{@{}l}{\textit{Offline, metric (per-frame metric model + DROID-SLAM trajectory), our detbox v3}} \\
+\multicolumn{6}{@{}l}{\textit{Offline, metric (per-frame metric model + DROID-SLAM trajectory)}} \\
 HaWoR$^{b}$        & offline + SLAM & 87.7 & 40.1 & 53.4 & 2.47$^{f}$ \\
 HaMeR$_{\text{mt}}$ + SLAM$^{g}$ & offline + SLAM & 67.3 & 41.8 & 66.8 & 2.47$^{f}$ \\
 HaMeR$_{\text{ft}}$ + SLAM$^{g}$ & offline + SLAM & 37.4 & 36.8 & 53.6 & 2.47$^{f}$ \\
 \midrule
-\multicolumn{6}{@{}l}{\textit{Weak-perspective (no metric depth) -- only WA-MPJPE is metric-meaningful, our detbox v3}} \\
-WiLoR + SLAM$^{a}$ & offline + SLAM & \na & 33.4 & \na & 2.47$^{f}$ \\
-HaPTIC + SLAM$^{c}$ & offline + SLAM & \na & 35.7 & \na & 2.47$^{f}$ \\
-Dyn-HaMR$^{h}$ & offline optim. & \na & 48.3 & \na & 2.47$^{f}$ \\
+\multicolumn{6}{@{}l}{\textit{No metric depth (only WA-MPJPE is metric-meaningful)}} \\
+WiLoR + SLAM$^{a}$ & offline + SLAM & \na & 43.7 & \na & 2.47$^{f}$ \\
+HaPTIC + SLAM$^{c}$ & offline + SLAM & \na & \tbd & \na & 2.47$^{f}$ \\
+Dyn-HaMR$^{h}$ & offline optim. & \na & 49.3 & \na & 2.47$^{f}$ \\
 \midrule
 \multicolumn{6}{@{}l}{\textit{Online / feedforward}} \\
-Hand3R (reported)$^{d}$ & online & 42.6 & 38.0 & 86.9 & \na \\
+% Hand3R row REMOVED 2026-08-06, matching Sections/4exp.tex. It violated this table's own premise
+% (every row on OUR boxes) and its W cell could not be sourced: our records give Hand3R WA 86.9 /
+% W 125.8 in one place and 42.6 / 38.04 / 56.71 in another, so 86.9 was sitting in the W column
+% while our own notes call it WA - and 86.9 is also exactly HaWoR's C-abs in this same table.
+% It also uses 21 joints incl. fingertips vs our 16, a 100-frame segment vs this table's 30, and
+% an unpublished HOI4D split. Discussed in prose only.
 \rowcolor{oursbg}
-Ours (feedforward)$^{e}$ & online, no SLAM & 36.2 & 33.2 & 37.3 & 6.59 \\
+Ours (feedforward)$^{e}$ & online, no SLAM & \best{36.2} & \best{33.2} & \best{37.3} & \best{6.59} \\
 \bottomrule
 \end{tabular}\\[8pt]
 \begin{minipage}{17.0cm}
 \footnotesize
-$^{a}$ WiLoR + SLAM on detbox v3: per-frame WiLoR cropped from our detbox v3, composed with the same
-DROID-SLAM trajectory as our HaWoR run. WiLoR is \emph{weak-perspective} (dummy focal), so its absolute
-placement is not metric: composed C-MPJPE and W-MPJPE are $\sim$1\,m regardless of resolution (verified on
-native-HD, focal-corrected: GT-box C-MPJPE 1152; the pose itself is good, root-relative 51\,mm) - the
-documented weak-perspective failure. Hence only the alignment-invariant WA-MPJPE (33.4) is metric-meaningful.
-Vanilla HaMeR + SLAM behaves identically (weak-perspective); the metric HaMeR + SLAM rows are the
-absolute-depth-tuned HaMeR$_{\text{mt/ft}}$ above.
-$^{b}$ HaWoR on detbox v3: the full pipeline (DROID-SLAM + Metric3D + motion + infiller) run
-end-to-end on all 157 sequences with our boxes injected in place of its own detector, 0 sequence
-failures. On its \emph{own} tuned detector it scores 49.7 / 34.7 / 42.3; on our boxes it degrades to
-87.7 / 40.1 / 53.4. This is the fair, input-matched number: our detbox v3 is genuinely noisier than
-HaWoR's detector (recall $\sim$0.78, IoU-vs-GT $\sim$0.5), and HaWoR's motion+infiller is tuned to
-its own box statistics, so under a common realistic detector our jitter-robust model holds up while
-HaWoR does not.
-$^{c}$ HaPTIC + SLAM on detbox v3: HaPTIC is weak-perspective, so its metric depth is not
-recoverable. We verified this deeply on the 157-seq run - absolute C-MPJPE is 157.7 with a
-\emph{depth-dependent} error (C-abs/C-rr ratio median 4.4, spread 2.4-8.0), while root-relative
-C-MPJPE is a healthy 29.2: the pose is good, only metric placement fails (the classic weak-perspective
-mode, amplified at the 224px crop focal). HaPTIC does no camera tracking, so for a fair world-space
-number we compose its per-frame camera-space hand with the \emph{same} DROID-SLAM trajectory as the
-WiLoR/HaMeR+SLAM rows (shared HaWoR trajectory, recovered SE(3) residual 0.000\,mm), then score
-identically. Only the alignment-invariant WA-MPJPE (35.7) is metric-meaningful; C-MPJPE and W-MPJPE
-are omitted as weak-perspective.
-$^{d}$ Hand3R: reported paper numbers; it cannot be re-run on our boxes without standing up its
-pipeline, so it is a reference row (not input-matched). C-MPJPE is absolute camera-frame, matching
-our C-MPJPE.
-$^{e}$ All of our numbers come from a single end-to-end feedforward run (our detbox v3, no SLAM,
-predicted extrinsics, 30-frame WA window); the head is trained jitter-robust, so it tolerates the
-same noisy detboxes that degrade the offline baselines. Feedforward FPS = 6.59, measured on an NVIDIA
-GB10 (mean over 30 timed clips: 2427.5\,ms per 16-frame forward+lift, the clip length the eval that
-produces our C/WA/W numbers actually runs; a single 30-frame forward pass is 4.5\,fps). Total params
-1178.7\,M, trainable 262.4\,M.
-$^{f}$ Offline FPS is MEASURED, not estimated: the full HaWoR pipeline (detect + DROID-SLAM +
-Metric3D + motion + infiller) ran 157 sequences of 300-frame video in 5\,h\,18\,min wall-clock on a
-datacenter GPU = 2.47 native fps, dominated by offline DROID-SLAM (global bundle adjustment). The
-per-frame hand regressor alone is 6.9\,fps (113.4\,min for 157 seqs $\times$ 300 frames); SLAM is the
-bottleneck the three offline rows share. The load-bearing distinction is \emph{online/feedforward}
-(single causal pass, no future frames, no global optimization) vs \emph{offline} (whole-video SLAM),
-not raw throughput on matched hardware.
-$^{g}$ HaMeR$_{\text{mt}}$/HaMeR$_{\text{ft}}$: HaMeR fine-tuned on HOI4D with our absolute-depth (kp3d\_abs)
-recipe (mt = metric-tuned translation head; ft = our stronger fine-tune), per-frame on detbox v3, composed
-with the same DROID-SLAM trajectory. These show our recipe transfers to a HaMeR backbone (fine-tuned
-HaMeR$_{\text{ft}}$+SLAM reaches C-MPJPE 37.4, on par with our feedforward 36.2) - but they remain
-\emph{offline} (need whole-video SLAM), whereas ours is a single online pass. Composed SE(3) residual 0.003\,mm.
-$^{h}$ Dyn-HaMR input-matched: its per-frame hand estimator seeded from our detbox v3 (WiLoR init) and
-its DROID-SLAM stage replaced by our SLAM cameras, so the same boxes + trajectory feed it as every other
-row; PHALP tracking and DROID are bypassed. Dyn-HaMR is an \emph{optimization} method (per-sequence
-test-time fitting with a motion prior); on ego HOI4D it is unstable -- the optimizer drives many
-sequences to a degenerate world-scale / hand-shape (inflated MANO betas, occasional negative scale),
-so its \emph{absolute} C-MPJPE and global W-MPJPE blow up (972 / 139\,mm) and are omitted as
-unreliable; only the alignment-invariant WA-MPJPE (48.3) is meaningful. This is not Dyn-HaMR's native
-regime (it is built for its own PHALP + DROID pipeline). Current subset: 27 sequences (25 converged;
-extending to 157). Runs on the same offline SLAM trajectory (FPS 2.47$^{f}$).
+$^{a}$ WiLoR + SLAM: per-frame WiLoR cropped from our detector boxes (v3), composed with the same
+DROID-SLAM trajectory as our HaWoR run. WiLoR produces no metric depth (dummy focal), so its
+absolute placement is not metric (composed C-MPJPE $1073.7$\,mm; the pose itself is good,
+root-relative $32.6$). Only the alignment-invariant WA-MPJPE ($43.7$) is meaningful.
+CORRECTED 2026-08-06 on two counts. (i) BOX SOURCE: this cell previously read $33.4$, which is
+WiLoR's \emph{native}-detector score (\texttt{wilor\_slam\_preds}, built from
+\texttt{wilor\_native\_truefocal\_preds}), not a shared-box score, so it was not comparable with
+the other rows of a table whose premise is one common detector. (ii) JOINT REMAP: the shared-box
+cache had permuted finger blocks; re-permuting and rescoring the identical 157 sequences moves
+WA $47.0 \to 43.7$ and root-relative $55.8 \to 32.6$ (job 9899520). Vanilla HaMeR + SLAM behaves
+identically; the metric HaMeR + SLAM rows are the absolute-depth-tuned HaMeR$_{\text{mt/ft}}$ above.
+$^{b}$ HaWoR: the full pipeline (DROID-SLAM + Metric3D + motion + infiller) run end-to-end on all 157
+sequences with our boxes injected, 0 sequence failures. On its \emph{own} tuned detector it scores
+49.7 / 34.7 / 42.3; on our (noisier) boxes it degrades to 87.7 / 40.1 / 53.4. This is the fair,
+input-matched number: HaWoR's motion+infiller is tuned to its own box statistics, so under a common
+realistic detector our jitter-robust model holds up while HaWoR does not.
+$^{c}$ HaPTIC + SLAM: HaPTIC produces no metric depth, so absolute placement is not recoverable
+(C-MPJPE 157.7 with a depth-dependent error, while root-relative C-MPJPE is a healthy 29.2 - the pose
+is good, only metric placement fails). HaPTIC does no camera tracking, so we compose its per-frame
+camera-space hand with the \emph{same} DROID-SLAM trajectory as the other rows (SE(3) residual
+0.000\,mm) and score identically. Only WA-MPJPE is meaningful, and it is \tbd\ here because HaPTIC + SLAM has never been composed on our detector boxes: no \texttt{haptic\_slam\_detbox\_preds} exists. Its $35.7$ is a \emph{native}-regime number and is withheld rather than printed in a shared-box column.
+$^{e}$ All of our numbers come from a single end-to-end feedforward run (our boxes, no SLAM, predicted
+extrinsics, 30-frame WA window); the head is trained jitter-robust, so it tolerates the same noisy
+boxes that degrade the offline baselines. Feedforward FPS = 6.59, measured on an NVIDIA GB10 (mean over
+30 timed 16-frame clips; a single 30-frame forward pass is 4.5\,fps). Total params 1178.7\,M, trainable
+262.4\,M.
+$^{f}$ Offline FPS is MEASURED: the full HaWoR pipeline (detect + DROID-SLAM + Metric3D + motion +
+infiller) ran 157 sequences of 300-frame video in 5\,h\,18\,min = 2.47 fps, dominated by offline
+DROID-SLAM. The load-bearing distinction is \emph{online/feedforward} (single causal pass, no future
+frames, no global optimization) vs \emph{offline} (whole-video SLAM), not raw throughput.
+$^{g}$ HaMeR$_{\text{mt}}$/HaMeR$_{\text{ft}}$: HaMeR fine-tuned on HOI4D with our absolute-depth
+(kp3d\_abs) recipe (mt = metric-tuned translation head; ft = stronger fine-tune), per-frame on our
+boxes, composed with the same DROID-SLAM trajectory. Our recipe transfers to a HaMeR backbone
+(HaMeR$_{\text{ft}}$+SLAM reaches C-MPJPE 37.4, on par with our feedforward 36.2) - but they remain
+\emph{offline} (need whole-video SLAM), whereas ours is a single online pass.
+$^{h}$ Dyn-HaMR input-matched: its per-frame estimator seeded from our boxes (WiLoR init) and its
+DROID-SLAM stage replaced by our SLAM cameras; PHALP and DROID are bypassed. Dyn-HaMR is an
+\emph{optimization} method (per-sequence test-time fitting). Because the input-matched setup omits its
+own metric-depth stage, its world-scale is unconstrained and collapses on ego HOI4D: absolute C-MPJPE
+and W-MPJPE blow up (1337 / 79\,mm) and are omitted. Only the scale-invariant WA-MPJPE (49.3) is
+meaningful. Reported over 156 of 157 sequences.
 \end{minipage}
 \end{minipage}
 \end{document}
