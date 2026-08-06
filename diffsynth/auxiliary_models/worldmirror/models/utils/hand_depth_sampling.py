@@ -27,30 +27,63 @@ F.grid_sample: grid[..., 0] (x) = u / W, grid[..., 1] (y) = v / W.
 gs_depth shape is [B, S, 1, Hd, Wd] (DPTHead is_gsdpt, output_dim=2, 'exp'
 activation -> positive depth), worldmirror.py:434-440.
 
-Assumption (verified in design Phase 2): `imgs`/`gs_depth` are a full-frame
-resize/center-crop of the square 1408x1408 Aria frame, so normalised [0,1] pixel
-coordinates transfer directly into the depth map regardless of its (Hd, Wd).
+Normalisation width (FIXED 2026-08-06, was a correctness bug)
+-------------------------------------------------------------
+`col`/`row` above are in the pixel frame that ``cam_intr`` is expressed in, so the
+normalisation constant must be THAT frame's width, not a fixed one. This module
+previously hardcoded 1408 (the square Aria frame it was written for) and took it as a
+default, while HOI4D and H2O stores carry intrinsics rescaled to the packing
+resolution: `preprocess_hoi4d.load_intrinsics` applies `s = res / crop`, and H2O is
+packed at `--res 224`. On a 224 store a joint at the image centre normalised to
+(0.9197, 0.0795) instead of (0.5, 0.5), i.e. the depth was sampled in the frame corner,
+and `in_frame` still returned True so nothing shouted.
+
+We now derive the width from the intrinsics as ``W = 2 * cx``, which is the same
+invariant `eval_world_space._intr_3x3` already documents ("principal point cx~W/2 lets
+us rescale to res"). This is store-agnostic and needs no caller changes. Pass
+``image_width`` explicitly only to override.
+
+The u/v swap above is NOT Aria-specific and is deliberately preserved: the hand-bbox
+pipeline sets bbox x<-u, y<-v and the injection indexes [..., y1:y2, x1:x2], so the
+rotation is a pipeline-wide locked convention rather than a sensor property.
 """
 from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
 
-IMAGE_WIDTH: float = 1408.0  # square Aria RGB frame; see train_hand_head.py:1307
+IMAGE_WIDTH: float = 1408.0  # square Aria RGB frame; ONLY a fallback, see note above
 Z_MIN: float = 0.05          # 5 cm clamp on projection depth; train_hand_head.py:1304
+
+
+def frame_width_from_intr(cam_intr: torch.Tensor) -> torch.Tensor:
+    """Recover the pixel-frame width that ``cam_intr`` is expressed in, as ``2 * cx``.
+
+    The pipeline's intrinsics are square-pinhole with the principal point at the frame
+    centre (`preprocess_hoi4d.load_intrinsics`, `eval_world_space._intr_3x3`), so the
+    width is recoverable from the intrinsics themselves and never has to be assumed.
+
+    Args:
+        cam_intr: [B, 3] = [focal, cx, cy].
+    Returns:
+        [B] frame widths in pixels.
+    """
+    return 2.0 * cam_intr[:, 1]
 
 
 def project_joints_to_norm_pixels(
     pred_joints: torch.Tensor,
     cam_intr: torch.Tensor,
-    image_width: float = IMAGE_WIDTH,
+    image_width: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Project camera-frame joints to normalised (x=width, y=height) pixels.
 
     Args:
         pred_joints: [B, S, H, J, 3] camera-frame metric joints (metres).
-        cam_intr:    [B, 3] = [focal, cx, cy] in the ``image_width`` pixel frame.
-        image_width: square frame size used for normalisation.
+        cam_intr:    [B, 3] = [focal, cx, cy] in some square pixel frame.
+        image_width: square frame size used for normalisation. ``None`` (the default and
+            the correct choice for every store) derives it per batch element from the
+            intrinsics as ``2 * cx``. Pass a float only to override deliberately.
 
     Returns:
         grid_xy:  [B, S, H, J, 2] normalised pixel coords (x=width, y=height) in [0, 1].
@@ -66,16 +99,27 @@ def project_joints_to_norm_pixels(
     cx = cam_intr[:, 1].view(B, 1, 1, 1)
     cy = cam_intr[:, 2].view(B, 1, 1, 1)
 
+    if image_width is None:
+        W = frame_width_from_intr(cam_intr).view(B, 1, 1, 1)
+    else:
+        W = torch.full_like(cx, float(image_width))
+    if not bool((W > 1.0).all()):
+        raise ValueError(
+            f"degenerate frame width from intrinsics: cx={cam_intr[:, 1].tolist()}. "
+            "cam_intr must be [focal, cx, cy] in pixels with the principal point near the "
+            "frame centre."
+        )
+
     x = pred_joints[..., 0]
     y = pred_joints[..., 1]
     z = pred_joints[..., 2].clamp_min(Z_MIN)
 
     col = f * x / z + cx
     row = f * y / z + cy
-    u = (image_width - 1.0) - row  # width axis
-    v = col                        # height axis
+    u = (W - 1.0) - row  # width axis
+    v = col              # height axis
 
-    grid_xy = torch.stack([u, v], dim=-1) / image_width  # [B, S, H, J, 2] in [0, 1]
+    grid_xy = torch.stack([u, v], dim=-1) / W.unsqueeze(-1)  # [B, S, H, J, 2] in [0, 1]
     return grid_xy, pred_joints[..., 2]
 
 

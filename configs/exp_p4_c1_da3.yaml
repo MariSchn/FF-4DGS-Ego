@@ -57,7 +57,7 @@ model:
 loss_weights:
   kp3d:          0.05
   kp3d_abs:      0.5
-  kp2d:          0.05
+  kp2d:          0.0    # DISABLED 2026-08-06: Aria-hardcoded (1408 px + 90deg rotation) vs unrotated res-pixel GT; see task #62
   global_orient: 0.01
   hand_pose:     0.01
   betas:         0.01

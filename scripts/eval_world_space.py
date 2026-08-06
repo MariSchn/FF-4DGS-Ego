@@ -134,7 +134,7 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
     """
     from scripts.train_hand_head import compute_joints_from_batch
     from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
-        project_joints_to_norm_pixels, sample_depth_at_joints)
+        project_joints_to_norm_pixels, sample_depth_at_joints, frame_width_from_intr)
 
     pred_joints = compute_joints_from_batch(preds["hand_joints"], mano_model, device)  # [1,S,H,J,3] cam (m)
     # cam->world (clip-local, up-to-scale). Only the world-space eval uses it; the
@@ -224,7 +224,10 @@ def _dense_scene_points(preds, cam_intr, pj_cam, s_clip, grid=24, hand_radius_m=
 
     Inverts the EXACT projection ``project_joints_to_norm_pixels`` uses to sample this depth map
     (hand_depth_sampling.py: col=f*x/z+cx, row=f*y/z+cy, u=(W-1)-row, v=col, normalized by
-    W=1408) so the unprojection is self-consistent with the scale/anchor pipeline. Hand masking
+    W = 2*cx derived from the intrinsics) so the unprojection is self-consistent with the
+    scale/anchor pipeline. W was hardcoded to 1408 here and in the forward projection until
+    2026-08-06; on the 224-px HOI4D/H2O stores that sampled the frame corner instead of the
+    hand. Both sides now derive W the same way. Hand masking
     is done by 3D distance (scene points scaled to metric via the clip scale) rather than 2D
     boxes - rotation-convention-free and it removes the held object's contact region too.
     Returns ``(pts [S,P,3] scene-units cam-frame CPU, valid [S,P] bool CPU)`` or ``None``.
@@ -232,7 +235,8 @@ def _dense_scene_points(preds, cam_intr, pj_cam, s_clip, grid=24, hand_radius_m=
     gs_depth = preds.get("gs_depth")
     if gs_depth is None or cam_intr is None:
         return None
-    W_NORM = 1408.0                                  # hand_depth_sampling.IMAGE_WIDTH
+    # Must match the forward projection exactly: derived from the intrinsics, not hardcoded.
+    W_NORM = float(frame_width_from_intr(cam_intr.view(1, 3))[0])
     # gs_depth is [B,S,1,Hd,Wd] (channel-first) or [B,S,Hd,Wd,1] (channel-last), per
     # hand_depth_sampling.py. Drop the batch, then the singleton channel from EITHER position ->
     # [S,Hd,Wd]. (A `while d.dim()>3: d=d.squeeze(1)` spins forever on the channel-last layout,

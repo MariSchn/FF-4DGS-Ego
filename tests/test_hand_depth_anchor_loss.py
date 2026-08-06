@@ -13,19 +13,34 @@ from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling imp
 from scripts.hand_depth_anchor_loss import hand_depth_anchor_loss
 
 
+# Physical principal point at the centre of a square W x W frame. The fixture previously used
+# cx = cy = 0, which is not a realisable camera; the helper now derives the frame width from the
+# intrinsics as 2*cx, so an origin principal point cannot express a width at all. See the note in
+# test_hand_depth_sampling.py.
 def _cam_intr() -> torch.Tensor:
-    return torch.tensor([[IMAGE_WIDTH, 0.0, 0.0]], dtype=torch.float64)
+    return torch.tensor(
+        [[IMAGE_WIDTH, IMAGE_WIDTH / 2.0, IMAGE_WIDTH / 2.0]], dtype=torch.float64
+    )
+
+
+def _xy_for_norm(u_norm: float, v_norm: float, z):
+    """Camera-frame (x, y) placing a joint at normalised (u_norm, v_norm) at depth z.
+
+    Inverts col = f*x/z + cx -> v = col, and row = f*y/z + cy -> u = (W-1) - row.
+    ``z`` may be a float or a tensor; the return follows it.
+    """
+    W = IMAGE_WIDTH
+    f, cx, cy = W, W / 2.0, W / 2.0
+    col = v_norm * W
+    row = (W - 1.0) - u_norm * W
+    return (col - cx) * z / f, (row - cy) * z / f
 
 
 def _joints_at_center(z_values: torch.Tensor) -> torch.Tensor:
     """Build [B,S,H,J,3] joints all projecting to the frame center (u=v=0.5)
     with the given per-joint metric depth ``z_values`` ([B,S,H,J])."""
-    W = IMAGE_WIDTH
-    f = W
     z = z_values
-    u_norm = v_norm = 0.5
-    x = v_norm * z                       # v_norm = x / z
-    y = z * ((W - 1.0) - u_norm * W) / f  # from u_norm inverse
+    x, y = _xy_for_norm(0.5, 0.5, z)
     return torch.stack([x, y, z], dim=-1)
 
 
@@ -83,16 +98,13 @@ def test_out_of_frame_joints_are_masked():
     frame (huge offset). The out-of-frame joint must be excluded, so residual=0."""
     z_const = 0.5
     B, S, H = 1, 1, 1
-    W = IMAGE_WIDTH
-    f = W
     # in-frame joint at center, sampled == z.
     z = z_const
-    in_x = 0.5 * z
-    in_y = z * ((W - 1.0) - 0.5 * W) / f
+    in_x, in_y = _xy_for_norm(0.5, 0.5, z)
     in_joint = torch.tensor([in_x, in_y, z], dtype=torch.float64)
     # out-of-frame joint: u_norm = 1.5 -> outside.
-    out_y = z * ((W - 1.0) - 1.5 * W) / f
-    out_joint = torch.tensor([0.5 * z, out_y, z], dtype=torch.float64)
+    out_x, out_y = _xy_for_norm(1.5, 0.5, z)
+    out_joint = torch.tensor([out_x, out_y, z], dtype=torch.float64)
     joints = torch.stack([in_joint, out_joint]).view(B, S, H, 2, 3)
 
     has_hand = torch.ones((B, S, H), dtype=torch.float64)

@@ -23,7 +23,9 @@ import yaml
 from decord import VideoReader
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import (
+    BatchSampler, DataLoader, Dataset, RandomSampler, Sampler, WeightedRandomSampler,
+)
 from torchvision.transforms import functional as TVF
 from tqdm import tqdm
 
@@ -71,6 +73,29 @@ def _hand_region_mask(hand_bboxes, hand_valid, H, W):
 HAND_PARAM_DIM = 32  # per hand: pos(3) + rot(4) + pose(15) + betas(10)
 NUM_HANDS = 2
 
+# Every key HOT3DHandDataset.__getitem__ emits whose FIRST axis is the clip frame axis.
+# Variable-length training (data.random_frames) slices all of them with ONE shared index
+# vector; the split into per-frame vs not is spelled out here rather than inferred from
+# shapes so that adding a key later is a decision someone has to make explicitly.
+PER_FRAME_CLIP_KEYS = (
+    "img",             # [S, 3, H, W]
+    "gt",              # [S, 64]  MANO params, both hands
+    "gt_joints",       # [S, 2, 16, 3]
+    "hand_bboxes",     # [S, 2, 4]
+    "hand_valid",      # [S, 2]
+    "gt_joints_2d",    # [S, 2, 16, 3]
+    "cam_extrinsics",  # [S, 4, 4]
+    "contact",         # [S, 2] bool
+    "da3_wrist",       # [S, 2] m
+    "cached_tokens",   # [S, P, C] bf16 frozen backbone tokens (frame axis FIRST)
+    "gt_obj_depth",    # [S, R, R]
+    "gt_obj_mask",     # [S, R, R] bool
+)
+# Per-CLIP (not per-frame) keys: listed so the "did you forget to slice this?" guard in
+# __getitem__ does not fire on them. cam_intrinsics is [3] and would otherwise trip the
+# shape heuristic on a hypothetical 3-frame window.
+NON_FRAME_CLIP_KEYS = ("cam_intrinsics", "has_mano", "cache_key", "frame_index")
+
 
 def mixed_collate(batch):
     """Collate that tolerates heterogeneous OPTIONAL keys across mixed datasets. Different data
@@ -91,6 +116,86 @@ def mixed_collate(batch):
             print(f"[mixed_collate] non-universal keys dropped this batch: {sorted(new)}")
             mixed_collate._warned = seen | new
     return default_collate([{k: b[k] for k in common} for b in batch])
+
+
+class RandomFrameCountBatchSampler(Sampler):
+    """Batch sampler for variable-length training: one frame count n per BATCH.
+
+    Yields lists of ``(clip_idx, n_frames, subset_seed)`` tuples instead of bare ints.
+    HOT3DHandDataset.__getitem__ treats a tuple index as "give me n randomly chosen frames
+    of this clip" and a bare int as "give me the whole cached window", so nothing that
+    indexes with ints (validation, visualisation, every config without data.random_frames)
+    changes at all.
+
+    WHY n is decided per batch and not per sample: collate stacks the clip tensors, so two
+    samples with different n in the same batch make default_collate raise. Three options were
+    on the table and two were rejected:
+      1. per-sample n with padding + a length mask. Rejected: it changes the number of tokens
+         the head actually attends over versus what the mask says, which is precisely the
+         quantity this experiment is trying to vary. A padded 7-frame clip is not a 7-frame
+         clip to the transformer.
+      2. a worker-shared, epoch-seeded counter. Rejected: with num_workers>0 each worker holds
+         its OWN copy of the dataset, so the counter desynchronises and the n a given sample
+         receives depends on which worker happened to pick it up. Not reproducible, and the
+         irreproducibility would only show up as unexplained run-to-run variance.
+      3. this one. The batch sampler is iterated in the MAIN process (DataLoader pulls indices
+         there and ships them to workers), so a single seeded RNG stream drives the whole run
+         for any num_workers, and the per-item seed makes each sample's frame subset
+         reproducible too.
+    The RNG is built once and deliberately NOT reset per epoch, so successive epochs see
+    different lengths and subsets while the run as a whole stays a pure function of `seed`.
+    """
+
+    def __init__(self, batch_sampler, min_frames, max_frames, seed=42):
+        self.batch_sampler = batch_sampler
+        self.min_frames = int(min_frames)
+        self.max_frames = int(max_frames)
+        # Own RNG instance, NOT the global `random` stream: the train/val sequence split at
+        # random.seed(training_cfg.seed) further down must stay bit-identical to a fixed-length
+        # run, and it would not if we consumed draws from the same stream.
+        self._rng = random.Random(int(seed))
+
+    def __iter__(self):
+        for batch in self.batch_sampler:
+            n = self._rng.randint(self.min_frames, self.max_frames)  # inclusive both ends
+            yield [(int(i), n, self._rng.getrandbits(62)) for i in batch]
+
+    def __len__(self):
+        # steps_per_epoch = len(train_loader) // grad_accum_steps depends on this, and
+        # len(DataLoader) forwards to the batch sampler. drop_last lives in the wrapped
+        # BatchSampler, so this matches the fixed-length step count exactly.
+        return len(self.batch_sampler)
+
+
+def parse_random_frames(spec, num_frames):
+    """Validate ``data.random_frames`` -> (min_frames, max_frames), or None when absent.
+
+    Absent key = today's fixed-length behaviour, bit for bit. Present-but-malformed is a HARD
+    failure rather than a silent fallback, for the same reason _check_loss_recipe exists: a
+    config key that is quietly ignored produces a run whose log claims one recipe and whose
+    weights were trained under another. Two full training runs were lost to exactly that
+    (kp3d_abs defaulting to 0.0), and a silently-ignored random_frames would be worse because
+    the resulting model looks completely healthy - it is just a plain fixed-length run.
+
+    The bounds: min < 2 leaves no temporal context for a video head; min == max is a
+    fixed-length run and should be expressed as num_frames; max > num_frames cannot be served
+    at all because the frozen-feature cache stores exactly num_frames tokens per clip.
+    """
+    if spec is None:
+        return None
+    if not isinstance(spec, (list, tuple)) or len(spec) != 2:
+        raise SystemExit(
+            f"data.random_frames must be a 2-element [min, max] list, got {spec!r}. "
+            "Remove the key entirely for fixed-length training.")
+    try:
+        lo, hi = int(spec[0]), int(spec[1])
+    except (TypeError, ValueError):
+        raise SystemExit(f"data.random_frames entries must be integers, got {spec!r}.")
+    if not (2 <= lo < hi <= int(num_frames)):
+        raise SystemExit(
+            f"data.random_frames={spec!r} is out of range: need 2 <= min < max <= "
+            f"data.num_frames ({num_frames}). Got min={lo}, max={hi}.")
+    return lo, hi
 
 
 # ------------------------------------------------------------------
@@ -479,6 +584,22 @@ class HOT3DHandDataset(Dataset):
         return len(self.clips)
 
     def __getitem__(self, idx):
+        # VARIABLE-LENGTH TRAINING (data.random_frames), opt-in and off by default.
+        # RandomFrameCountBatchSampler hands us a (clip_idx, n_frames, subset_seed) tuple; a
+        # bare int keeps the whole cached window, so validation, visualisation and every
+        # config without the key run down the untouched path below.
+        # The frame SUBSET is drawn here, per sample, rather than shared across the batch:
+        # Fast3R (arXiv 2501.13928) gets its length extrapolation from randomising WHICH
+        # frames are drawn out of a larger pool, not merely how many - "to the transformer,
+        # the strategy looks indistinguishable from masking out images". Only the COUNT has to
+        # agree across a batch (collate stacks); the indices are free to differ, and differing
+        # is the point. The subset is sorted so temporal order is preserved.
+        frame_index = None
+        if isinstance(idx, tuple):
+            idx, n_frames, subset_seed = idx
+            g = torch.Generator().manual_seed(int(subset_seed))
+            frame_index = torch.randperm(self.num_frames, generator=g)[: int(n_frames)]
+            frame_index = frame_index.sort().values
         clip = self.clips[idx]
         video_path = clip["video_path"]
         video_reader = VideoReader(video_path)
@@ -575,6 +696,34 @@ class HOT3DHandDataset(Dataset):
             od_maps, od_masks = self._render_clip_obj_depth(clip)
             out["gt_obj_depth"] = od_maps   # [S, R, R] metres (0 where no object)
             out["gt_obj_mask"]  = od_masks  # [S, R, R] bool
+
+        # VARIABLE-LENGTH TRAINING: everything above was built at the full cached window
+        # length; keep only the sampled frames. ONE index vector for ALL per-frame tensors -
+        # slicing image frames with one subset and GT with another is the exact failure class
+        # as the HaWoR [::2] frame-map bug, which silently inflated C_abs 2.5x and read as a
+        # merely-bad number rather than a wrong one for weeks. Doing the slice here, after
+        # every branch above has run, means an optional key (contact, da3_wrist, obj depth)
+        # cannot be missed by being added to a branch that some earlier slice site predates.
+        if frame_index is not None:
+            for k in PER_FRAME_CLIP_KEYS:
+                if k in out:
+                    out[k] = out[k][frame_index]
+            # Loud guard against the one failure mode that would be invisible: a per-frame key
+            # added to `out` later and not registered in PER_FRAME_CLIP_KEYS would keep its
+            # full window length and misalign against everything else.
+            for k, v in out.items():
+                if k in PER_FRAME_CLIP_KEYS or k in NON_FRAME_CLIP_KEYS:
+                    continue
+                if torch.is_tensor(v) and v.dim() >= 1 and v.shape[0] == self.num_frames:
+                    raise RuntimeError(
+                        f"__getitem__ emits '{k}' with a leading axis of {self.num_frames} "
+                        "(the clip length) but it is registered in neither "
+                        "PER_FRAME_CLIP_KEYS nor NON_FRAME_CLIP_KEYS. Add it to one of them: "
+                        "under data.random_frames an unsliced per-frame tensor misaligns "
+                        "supervision silently.")
+            # TRUE indices into the cached window, not 0..n-1. build_views feeds these to
+            # `timestamp` so the head sees the real temporal spacing of the sampled frames.
+            out["frame_index"] = frame_index
 
         return out
 
@@ -1005,6 +1154,13 @@ class MixedHandDataset(Dataset):
         return len(self._owner)
 
     def __getitem__(self, idx):
+        # Variable-length training hands us a (clip_idx, n_frames, subset_seed) tuple; the
+        # owner/local lookup keys on the clip index only, and the rest of the payload is
+        # forwarded untouched so the owning part draws the subset exactly as it would if it
+        # had been indexed directly.
+        if isinstance(idx, tuple):
+            clip_idx, payload = idx[0], idx[1:]
+            return self.parts[self._owner[clip_idx]][(self._local[clip_idx],) + payload]
         return self.parts[self._owner[idx]][self._local[idx]]
 
     def sample_weights(self):
@@ -1050,17 +1206,34 @@ def discover_sequences(data_root):
 # ------------------------------------------------------------------
 
 def build_views(imgs, num_frames, device, hand_bboxes=None, hand_valid=None,
-                 crop_local_output=False, hand_crops=None):
-    B, _, _, H, W = imgs.shape
+                 crop_local_output=False, hand_crops=None, frame_index=None):
+    # VARIABLE-LENGTH TRAINING: every per-frame view tensor is built from the batch's ACTUAL
+    # frame count S = imgs.shape[1], never from the config's num_frames. A batch subsampled to
+    # n=7 would otherwise get 16-long timestamp / valid_mask / camera_poses and the head would
+    # read them off by up to 9 frames. Identical to the previous code whenever S == num_frames,
+    # which is every fixed-length call site (validation, visualisation).
+    B, S, _, H, W = imgs.shape
+    if int(num_frames) != S:
+        raise RuntimeError(
+            f"build_views: num_frames={num_frames} but imgs carries S={S} frames. Under "
+            "data.random_frames the caller must pass the batch's actual n (imgs.shape[1]); a "
+            "mismatch means the per-frame views are misaligned with the clip.")
+    # `frame_index` [B, S] holds the TRUE indices the frames were drawn from inside the cached
+    # window. Feeding 0..S-1 instead would erase the real temporal spacing and hand the model a
+    # uniformly-sampled short clip, which is what the Fast3R (arXiv 2501.13928) index
+    # randomisation is specifically not: the gaps are the signal that makes the sampling read
+    # as masked-out images rather than as a shorter video.
+    timestamp = (frame_index.to(device=device, dtype=torch.long) if frame_index is not None
+                 else torch.arange(S, device=device).unsqueeze(0).expand(B, -1))
     views = {
         "img":          imgs,
-        "is_target":    torch.zeros((B, num_frames), dtype=torch.bool, device=device),
-        "timestamp":    torch.arange(num_frames, device=device).unsqueeze(0).expand(B, -1),
-        "is_static":    torch.zeros((B, num_frames), dtype=torch.bool, device=device),
-        "valid_mask":   torch.ones((B, num_frames, H, W), dtype=torch.bool, device=device),
-        "camera_poses": torch.eye(4, device=device).view(1, 1, 4, 4).expand(B, num_frames, 4, 4),
-        "camera_intrs": torch.eye(3, device=device).view(1, 1, 3, 3).expand(B, num_frames, 3, 3),
-        "depthmap":     torch.ones((B, num_frames, H, W), device=device),
+        "is_target":    torch.zeros((B, S), dtype=torch.bool, device=device),
+        "timestamp":    timestamp,
+        "is_static":    torch.zeros((B, S), dtype=torch.bool, device=device),
+        "valid_mask":   torch.ones((B, S, H, W), dtype=torch.bool, device=device),
+        "camera_poses": torch.eye(4, device=device).view(1, 1, 4, 4).expand(B, S, 4, 4),
+        "camera_intrs": torch.eye(3, device=device).view(1, 1, 3, 3).expand(B, S, 3, 3),
+        "depthmap":     torch.ones((B, S, H, W), device=device),
     }
     if hand_bboxes is not None:
         views["hand_bboxes"] = hand_bboxes
@@ -1280,7 +1453,12 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             loss_kp3d_abs = criterion_kp3d(pred_flat, gt_flat, pelvis_id=0, align_root=False)
 
             loss_kp2d = torch.zeros((), device=device)
-            if "gt_joints_2d" in vbatch:
+            # kp2d is weighted 0.0 everywhere (Aria-hardcoded 1408 px + a 90-degree rotation against
+            # unrotated res-pixel GT; see PROVEN_LOSS_RECIPE). Skip the whole block when the
+            # weight is zero: it cost nothing but compute, and its per-store intrinsics
+            # broadcasting kept crashing multi-dataset runs. Do not re-enable without fixing
+            # the rotation per store first.
+            if "gt_joints_2d" in vbatch and float(loss_weights.get("kp2d", 0.0)) > 0.0:
                 cam_intr = vbatch["cam_intrinsics"].to(device)            # [B, 3]
                 N = B * S
                 pred_j  = pred_joints.view(N, H, J, 3)
@@ -1293,16 +1471,27 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 z = pred_j[..., 2].clamp_min(0.05)
                 col = focal * pred_j[..., 0] / z + cx
                 row = focal * pred_j[..., 1] / z + cy
-                IMAGE_WIDTH = 1408.0
-                # 90° CW to match project_vertices: (col, row) → (W-1-row, col)
+                # Frame width derived from the intrinsics (principal point at the frame
+                # centre), NOT hardcoded. Was `IMAGE_WIDTH = 1408.0` until 2026-08-06, which
+                # is the Aria frame; HOI4D/H2O stores carry intrinsics rescaled to their
+                # packing resolution, so the normalisation below was wrong by ~6x on them.
+                IMAGE_WIDTH = 2.0 * cx
+                # 90° CW to match project_vertices: (col, row) → (W-1-row, col).
+                # WARNING, UNRESOLVED PER-STORE CONVENTION: HOI4D's cached GT 2D is written
+                # UNROTATED as (col, row) in res-pixels (preprocess_hoi4d.py:438-443), so on
+                # that store this rotation puts pred and GT in different frames on top of the
+                # width error. This is why `kp2d` is now 0.0 everywhere (see LOSS_WEIGHTS) and
+                # why the diagnostic below exists: do not re-enable this term until the
+                # residual it prints is small on every store in the mixture.
                 u = (IMAGE_WIDTH - 1.0) - row
                 v = col
                 pred_2d = torch.stack([u, v], dim=-1)
 
-                pred_2d_norm = pred_2d / IMAGE_WIDTH - 0.5
+                _W_DIV = IMAGE_WIDTH.unsqueeze(-1) if torch.is_tensor(IMAGE_WIDTH) else IMAGE_WIDTH
+                pred_2d_norm = pred_2d / _W_DIV - 0.5
                 gt_2d        = vbatch["gt_joints_2d"].to(device)
                 gt_2d_norm   = gt_2d.clone()
-                gt_2d_norm[..., :2] = gt_2d[..., :2] / IMAGE_WIDTH - 0.5
+                gt_2d_norm[..., :2] = gt_2d[..., :2] / _W_DIV - 0.5
                 gt_2d_norm[..., 2]  = gt_2d_norm[..., 2] * has_hand.unsqueeze(-1)
 
                 pred_2d_flat = pred_2d_norm.view(N * H, 1, J, 2)
@@ -1525,7 +1714,11 @@ def _apply_overrides(cfg, overrides):
 # keypoint loss and it is CAUSALLY NECESSARY for absolute placement: the ablation that zeroes it
 # gives C_abs 725 vs C_rr 131.
 PROVEN_LOSS_RECIPE = {
-    "kp3d_abs": 1.0, "transl": 1.0, "kp3d": 0.05, "kp2d": 0.05,
+    # kp2d is 0.0 as of 2026-08-06. Its implementation hardcodes the Aria 1408 px frame and a
+    # 90-degree rotation, while HOI4D/H2O cache GT 2D UNROTATED in res-pixel units, so the term
+    # compared two different frames at two different scales. It is disabled rather than repaired
+    # because the correct rotation is per-store and unverified for HOT3D. See task #62.
+    "kp3d_abs": 1.0, "transl": 1.0, "kp3d": 0.05, "kp2d": 0.0,
     "betas": 0.01, "global_orient": 0.01, "hand_pose": 0.01,
 }
 
@@ -1722,11 +1915,29 @@ def train():
     )
     # Scale-head route (Cyrus direction b): keep the GS frozen, learn only the
     # global scale (+ the hand head). Drop gs_head + injection from training.
+    # `freeze_gs_head` alone freezes the GS head AND the injection convs (the scale-head route).
+    # `train_gs_injection: true` alongside it freezes ONLY the head and keeps the injection
+    # trainable, which is the configuration the method section describes for the hand->scene
+    # contribution: a frozen pretrained Gaussian head given a better input. Until 2026-08-06 that
+    # configuration was not expressible, so the contribution had never been trained.
     freeze_gs_head = bool(training_cfg.get("freeze_gs_head", False))
+    train_gs_injection = bool(training_cfg.get("train_gs_injection", False))
     if freeze_gs_head:
-        for p in gs_head_params + injection_params:
+        for p in gs_head_params:
             p.requires_grad = False
-        gs_head_params, injection_params = [], []
+        gs_head_params = []
+        if train_gs_injection:
+            if not injection_params:
+                raise ValueError(
+                    "train_gs_injection: true but no hand_to_gs_injection module was built. "
+                    "It requires enable_hand and enable_gs both true and hand_head_type 'hamer'."
+                )
+            print(f"[gs] head FROZEN, injection TRAINABLE "
+                  f"({sum(p.numel() for p in injection_params) / 1e6:.2f}M params)")
+        else:
+            for p in injection_params:
+                p.requires_grad = False
+            injection_params = []
 
     # Support freezing the hand head to use it as a stable metric depth anchor
     freeze_hand = bool(training_cfg.get("freeze_hand", False))
@@ -1777,6 +1988,29 @@ def train():
         f"total={sum(p.numel() for p in trainable_params):,}"
     )
 
+    # GUARD: unfreezing backbone blocks is a NO-OP when features are cached.
+    # Cached tokens ARE the frozen backbone's output, so with a cache the backbone forward
+    # never runs and the "unfrozen" parameters receive no gradient. Job 9674186 burned ~9 GPU
+    # hours per arm this way: arm 1 reported backbone(unfrozen)=25,197,056 alongside
+    # "[feature-cache] 6480/6480 clips have cached tokens", so arms 0 and 1 trained the
+    # identical model and their 1 mm difference was seed noise presented as an ablation result.
+    def _any_feature_cache(dcfg):
+        if dcfg.get("feature_cache_dir"):
+            return True
+        for spec in (dcfg.get("data_roots") or []):
+            if isinstance(spec, dict) and spec.get("feature_cache_dir"):
+                return True
+        return False
+
+    if n_backbone > 0 and _any_feature_cache(data_cfg):
+        raise RuntimeError(
+            f"Refusing to train: unfreeze_last_n_blocks marks {n_backbone:,} backbone parameters "
+            "trainable, but a feature_cache_dir is configured. Cached tokens are the FROZEN "
+            "backbone's output, so the backbone forward never runs and those parameters would "
+            "receive no gradient - the run would silently reproduce the frozen baseline. "
+            "Unset feature_cache_dir for any arm that unfreezes the backbone."
+        )
+
     # --- Data ---
     # Multi-dataset mixing: data.data_roots = list of roots (path strings or dicts
     # {root, name, weight, max_sequences, val_split, feature_cache_dir}). A single
@@ -1811,6 +2045,13 @@ def train():
     num_frames       = data_cfg["num_frames"]
     res              = tuple(data_cfg["resolution"])
     clip_stride      = data_cfg.get("clip_stride", num_frames)
+    # VARIABLE-LENGTH TRAINING (opt-in via data.random_frames: [min, max]). The frozen VGGT
+    # backbone was itself trained on "2-24 frames randomly sampled from a random training
+    # scene", so length randomisation is native to the encoder; it is our head and dataloader
+    # that are hard-wired to num_frames. Cheap to try because the feature cache stores tokens
+    # as [S, P, C] with the frame axis FIRST, so a subset is a slice and the backbone never
+    # re-runs. None (key absent) = the fixed-length path, unchanged.
+    random_frames    = parse_random_frames(data_cfg.get("random_frames"), num_frames)
     batch_size       = training_cfg.get("batch_size", 2)
     grad_accum_steps = training_cfg.get("grad_accum_steps", 1)
     num_workers      = data_cfg.get("num_workers", 4)
@@ -1923,9 +2164,31 @@ def train():
         if val_set is None:
             print("[WARN] No validation sequences — validation disabled, no best checkpoint will be saved")
 
+    sampler = None
     if isinstance(train_set, MixedHandDataset) and train_set.weights is not None:
         sampler = WeightedRandomSampler(train_set.sample_weights(),
                                         num_samples=len(train_set), replacement=True)
+
+    if random_frames is not None:
+        # Wrap whichever item sampler we would have used in a BatchSampler and let
+        # RandomFrameCountBatchSampler stamp one frame count onto each batch. The wrapped
+        # BatchSampler carries drop_last=True, so len(train_loader) and therefore
+        # steps_per_epoch are unchanged versus the fixed-length loaders below.
+        # Validation is deliberately NOT wrapped: val must stay at num_frames or val_loss
+        # stops being comparable across epochs, runs and the best-checkpoint criterion.
+        base_sampler = sampler if sampler is not None else RandomSampler(train_set)
+        train_loader = DataLoader(
+            train_set,
+            batch_sampler=RandomFrameCountBatchSampler(
+                BatchSampler(base_sampler, batch_size, drop_last=True),
+                random_frames[0], random_frames[1],
+                seed=int(training_cfg.get("seed", 42))),
+            num_workers=num_workers, pin_memory=True, collate_fn=mixed_collate)
+        print(f"[data] variable-length training ON: n ~ U[{random_frames[0]}, "
+              f"{random_frames[1]}] frames per batch, drawn as a random sorted subset of the "
+              f"{num_frames}-frame cached window (subset differs per sample, count is shared "
+              f"per batch). Validation stays at {num_frames}.", flush=True)
+    elif sampler is not None:
         train_loader = DataLoader(train_set, batch_size=batch_size, sampler=sampler,
                                   num_workers=num_workers, pin_memory=True, drop_last=True,
                                   collate_fn=mixed_collate)
@@ -2204,6 +2467,17 @@ def train():
 
     # --- Training loop ---
     stop_training = False
+    # A stale checkpoint in output_dir sets start_epoch from it (see the resume path above). If
+    # that value is already past `epochs` the loop body never runs, the job exits "successfully"
+    # having trained nothing, and the final save below dies on an unbound `epoch`. Job 9834714
+    # arms 0-1 lost ~19 min each this way, resuming from the voided 9674186 checkpoints. Fail loud.
+    if start_epoch > epochs:
+        raise RuntimeError(
+            f"Refusing to train: resumed start_epoch={start_epoch} is already past epochs={epochs}, "
+            f"so no epoch would run. output_dir={output_dir!r} contains a checkpoint from a longer "
+            "or previous run. Clear it, point elsewhere, or raise training.epochs."
+        )
+    epoch = start_epoch  # bind before the loop so the final save cannot raise UnboundLocalError
     for epoch in tqdm(range(start_epoch, epochs + 1), desc="Epochs"):
         model.train()
         optimizer.zero_grad()
@@ -2239,7 +2513,11 @@ def train():
                 return 0.0
             _t0 = _lap()
 
-            views_train = build_views(imgs, num_frames, device, hb, hv)
+            # imgs.shape[1] (not the config num_frames) is the batch's real length under
+            # data.random_frames; "frame_index" is absent on the fixed-length path, where this
+            # call is identical to the previous build_views(imgs, num_frames, ...).
+            views_train = build_views(imgs, imgs.shape[1], device, hb, hv,
+                                      frame_index=batch.get("frame_index"))
 
             # PROFILE_TORCH=1 (with PROFILE_STEPS>0): op-level breakdown of ONE
             # forward to find what the flat-under-bf16 20s actually is. Prints
@@ -2378,7 +2656,12 @@ def train():
 
             # 2D reprojection loss. pred_joints are camera-frame (post-transform),
             # so skip the world→camera extrinsic and project with intrinsics only.
-            if "gt_joints_2d" in batch:
+            # kp2d is weighted 0.0 everywhere (Aria-hardcoded 1408 px + a 90-degree rotation against
+            # unrotated res-pixel GT; see PROVEN_LOSS_RECIPE). Skip the whole block when the
+            # weight is zero: it cost nothing but compute, and its per-store intrinsics
+            # broadcasting kept crashing multi-dataset runs. Do not re-enable without fixing
+            # the rotation per store first.
+            if "gt_joints_2d" in batch and float(cfg["loss_weights"].get("kp2d", 0.0)) > 0.0:
                 cam_intr = batch["cam_intrinsics"].to(device)              # [B, 3]
                 N = B * S
                 pred_j  = pred_joints.view(N, H, J, 3)                     # [N, H, J, 3]
@@ -2391,17 +2674,28 @@ def train():
                 z = pred_j[..., 2].clamp_min(0.05)
                 col = focal * pred_j[..., 0] / z + cx
                 row = focal * pred_j[..., 1] / z + cy
-                IMAGE_WIDTH = 1408.0
-                # 90° CW to match project_vertices: (col, row) → (W-1-row, col)
+                # Frame width derived from the intrinsics (principal point at the frame
+                # centre), NOT hardcoded. Was `IMAGE_WIDTH = 1408.0` until 2026-08-06, which
+                # is the Aria frame; HOI4D/H2O stores carry intrinsics rescaled to their
+                # packing resolution, so the normalisation below was wrong by ~6x on them.
+                IMAGE_WIDTH = 2.0 * cx
+                # 90° CW to match project_vertices: (col, row) → (W-1-row, col).
+                # WARNING, UNRESOLVED PER-STORE CONVENTION: HOI4D's cached GT 2D is written
+                # UNROTATED as (col, row) in res-pixels (preprocess_hoi4d.py:438-443), so on
+                # that store this rotation puts pred and GT in different frames on top of the
+                # width error. This is why `kp2d` is now 0.0 everywhere (see LOSS_WEIGHTS) and
+                # why the diagnostic below exists: do not re-enable this term until the
+                # residual it prints is small on every store in the mixture.
                 u = (IMAGE_WIDTH - 1.0) - row
                 v = col
                 pred_2d = torch.stack([u, v], dim=-1)                      # [N, H, J, 2]
 
                 # Normalize to [-0.5, 0.5] so residuals match HaMeR's convention.
-                pred_2d_norm = pred_2d / IMAGE_WIDTH - 0.5
+                _W_DIV = IMAGE_WIDTH.unsqueeze(-1) if torch.is_tensor(IMAGE_WIDTH) else IMAGE_WIDTH
+                pred_2d_norm = pred_2d / _W_DIV - 0.5
                 gt_2d        = batch["gt_joints_2d"].to(device)            # [B, S, H, J, 3]
                 gt_2d_norm   = gt_2d.clone()
-                gt_2d_norm[..., :2] = gt_2d[..., :2] / IMAGE_WIDTH - 0.5
+                gt_2d_norm[..., :2] = gt_2d[..., :2] / _W_DIV - 0.5
                 gt_2d_norm[..., 2]  = gt_2d_norm[..., 2] * has_hand.unsqueeze(-1)
 
                 pred_2d_flat = pred_2d_norm.view(N * H, 1, J, 2)

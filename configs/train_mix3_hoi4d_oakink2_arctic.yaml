@@ -59,7 +59,7 @@ loss_weights:
   betas:              0.01
   global_orient:      0.01
   hand_pose:          0.01
-  kp2d:               0.05
+  kp2d:               0.0    # DISABLED 2026-08-06: Aria-hardcoded (1408 px + 90deg rotation) vs unrotated res-pixel GT; see task #62
   kp3d:               0.05
   kp3d_abs:           1.0   # winner10ep value (23.6 canonical). 0.5 was the older 24.9-era
                              # setting kept in exp_p4_jitterrob; 1.0 is the one with the headline.

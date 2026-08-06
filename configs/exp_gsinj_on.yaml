@@ -1,10 +1,17 @@
+# CONTRIBUTION-2 RUN, arm 'gsinj_on' (created 2026-08-06).
+# The hand->Gaussian injection had NEVER been trained: every reported config set
+# enable_gs:false, and freeze_gs_head froze the injection convs along with the head,
+# so 'frozen head + trained injection' was not expressible. train_gs_injection now
+# separates them. Primary metric: hand-region-MASKED PSNR/LPIPS (trainer line 1407),
+# NOT full frame - a hand-conditioned module judged on full-frame reconstruction
+# invites the obvious objection.
 # ------------------------------------------------------------------
 # Data
 # ------------------------------------------------------------------
 data:
   # Root folder containing one subdir per sequence. Each sequence must have
   # video_main_rgb.mp4 and hand_data/mano_hand_pose_trajectory.jsonl
-  data_root: "/work/courses/3dv/team25/data/hot3d_aria/sequences"
+  data_root: "/cluster/scratch/dmonopoli/hoi4d_train"
   # Number of frames per clip (sliding window over video). Full video is too long to fit in memory.
   num_frames: 16
   # [height, width] to which video frames are resized
@@ -12,7 +19,7 @@ data:
   # Step between consecutive clips when sliding over a video (stride=num_frames -> non-overlapping)
   clip_stride: 16
   # Fraction of sequences used for validation (0.0 = no validation; 0.1 = 10% held out)
-  val_split: 0.01
+  val_split: 0.1
   # DataLoader workers for loading video clips
   num_workers: 4
 # ------------------------------------------------------------------
@@ -40,7 +47,7 @@ model:
   enable_motion: false
   enable_gs: true
   hand_to_gs_injection:
-    enabled: true            # master toggle for the new module
+    enabled: true
     use_hand_valid_mask: true
 
   # HaMeR head architecture (only used when hand_head_type == "hamer")
@@ -62,13 +69,13 @@ model:
 # ------------------------------------------------------------------
 loss_weights:
   kp3d:          0.05
-  kp3d_abs:      0.05    # absolute (non-root) 3D loss; 0 = off (baseline). >0
+  kp3d_abs:      1.0     # PROVEN recipe; was 0.0 in the old GS template -> guard refused to train
                          # directly supervises global hand placement / metric depth.
   kp2d:          0.0    # DISABLED 2026-08-06: Aria-hardcoded (1408 px + 90deg rotation) vs unrotated res-pixel GT; see task #62
   global_orient: 0.01    # bumped 10x — rotmat MSE on a single 3x3
   hand_pose:     0.01    # bumped 10x — MSE on 15 PCA coeffs
   betas:         0.01    # bumped 20x — hand-size was converging too slowly
-  transl:        0.1     # 100x bump — meter-scale; needs real weight for depth
+  transl:        1.0        # PROVEN recipe (was 0.1)
   gs_l1:         0.1     # GS reconstruction L1 — drives the GS branch
   gs_lpips:      0.1     # GS reconstruction LPIPS — drives the GS branch
   hand_depth_anchor: 1.0 # L1 HDGLA — pulls gs_depth toward metric hand depth
@@ -95,20 +102,22 @@ metric_scale:
 training:
   lr: 1e-4
   min_lr: 1e-7           # Minimum LR for cosine annealing scheduler
-  epochs: 1
+  epochs: 3
   batch_size: 4
   grad_accum_steps: 8    # Effective batch = batch_size * grad_accum_steps
   use_amp: true         # bf16 autocast on the (frozen) backbone forward (~2-3x)
   log_every: 50
-  val_every: 50
-  val_max_batches: 12   # Cap val to N batches (~12*bs clips); null = full set.
+  val_every: 250
+  val_max_batches: null
                         # A full pass renders thousands of frames (hours); a few
                         # dozen clips track PSNR/MPJPE fine. Use null for final eval.
   save_every: 100       # Steps between checkpoint saves
   grad_clip_norm: 10.0  # finite gradient clipping (was effectively off -> NaN divergence)
-  kp3d_abs_warmup_steps: 200  # ramp the absolute-3D loss in over N steps
-  seed: 42               # Random seed
-  output_dir: "checkpoints/p1a_abs3d"
+  kp3d_abs_warmup_steps: 0  # ramp the absolute-3D loss in over N steps
+  seed: 42
+  freeze_gs_head: true
+  train_gs_injection: true
+  output_dir: "/cluster/scratch/dmonopoli/checkpoints/gsinj_on"
 
 # ------------------------------------------------------------------
 # Visualization
@@ -142,6 +151,6 @@ wandb:
   enabled: true
   project: "hand-head-training"
   entity: 3DV-Project
-  run_name: "P1a: abs3d loss (scene_follows_hand)"
+  run_name: "Ablation: hand to gs injection (v2)"
   tags: []
   notes: null
