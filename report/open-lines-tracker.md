@@ -62,6 +62,34 @@ depend on the scene scale, so if they shift the arm is void and the readout prin
 automatically. A lower clamp rate alone is not success: excluding joints shrinks the population.
 **If nothing moves W**, the scale is not the binding term and the camera head (#38/#39) is next.
 
+### The GT-scale check was starved by an unrelated cache (fixed, commit e55c3b4)
+
+I reported the 0.578 ratio with a caveat: only 12 of 1884 segments carried GT extrinsics, so it
+was directional rather than tight. That caveat was wrong about the cause, and the cause was
+fixable.
+
+    157/157 sequences have cam_extrinsics_cache.pt
+      1/157 sequences have gt_joints_2d_cache.pt
+
+Two couplings turned that into 1/157 coverage. The cache block loads from disk only when ALL THREE
+of {gt_joints_2d, cam_extrinsics, cam_intrinsics} exist, so a missing 2D cache sends the sequence
+to a recompute path that returns `None` for a store without calibration - discarding extrinsics
+that are sitting on disk. And both `clip["cam_extrinsics"]` and `out["cam_extrinsics"]` were
+assigned inside the `gt_joints_2d` branches.
+
+No consumer of extrinsics needs 2D joints. `cam_intrinsics` had already been decoupled for exactly
+this reason, with a comment saying so, which is what makes the extrinsics coupling an oversight
+rather than a design choice.
+
+The fix is additive and **no metric can move**: `cam_extrinsics` is never fed to the model, and in
+`eval_world_space` it is read only by the `s_gt` pair, the `diag_cam` print and `eval_oracle_cam`.
+The GT-scale measurement now spans all 157 sequences instead of one, which turns 0.578 from
+directional into quotable and makes the `scale_ratio_med` column of the 2x2 meaningful.
+
+Also confirmed while here, from the registration dumps: the predicted camera centres are **not**
+degenerate (per-clip spread 0.003-0.007 scene units over 16 frames, comfortably past the 1e-4
+gate). So the low scale is not a collapsed trajectory.
+
 ### Settled on the side: the Fast3R index pool is NOT needed
 
 `visual_transformer.py:505-524` - `cam_token`/`reg_token` have shape `(1, 2, X, C)`: position 0
