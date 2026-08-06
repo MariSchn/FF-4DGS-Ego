@@ -1,5 +1,180 @@
 # Open Lines Tracker
 
+## 2026-08-06 - an adversarial bug hunt found 11 defects; 9 fixed; TWO producers now disagree with data on disk
+
+Two agents were run against the tree with one rule: a bug counts only with a test that FAILS on
+current code. They returned 11 findings and INDEPENDENTLY converged on the joint permutation.
+Commits: 2eed3b8, 8fa7d44. Proof tests live in `tests/test_hunt_a.py` and `tests/test_hunt_b.py`.
+
+### 🔴 WHAT IS OWED, and it is a DATA problem not a code problem (task #65)
+
+Two fixes changed what PRODUCERS emit without regenerating what already exists:
+
+  (A) INTRINSICS RESIZE. `h2o_to_currentproto.py:178` and `preprocess_hoi4d.py:97` rescaled the
+      principal point as `c*s`; correct is `(c+0.5)*s - 0.5`. `dexycb_to_ours.py:409` was ALREADY
+      correct and documented why. So a mixed-store run right now spans TWO conventions ~0.34 px
+      apart. Stores on disk still carry the old form. DECIDE: rebuild H2O+HOI4D, or pin the old
+      convention. Do not silently mix.
+  (B) NATIVE BASELINE PREDS. Every `<seq>.pt` from `build_native_baseline_preds.py` written before
+      2026-08-06 has PERMUTED FINGER BLOCKS. Those dirs feed build_slam_baseline ->
+      eval_worldspace_baseline, i.e. the WiLoR+SLAM / HaMeR+SLAM rows.
+      LIKELY NOT IN THE PAPER: a perfect prediction scores ~53mm root-relative through the bad
+      map, and every reported baseline root-relative number is BELOW that floor (WiLoR 27.2,
+      HaMeR 30.3, WiLoR+SLAM 33.4, HaMeR+SLAM 34.7). CONFIRM per pred-dir by rescoring one
+      sequence both ways. Do not close this on the inference alone.
+
+### ✅ The 9 fixed, most severe first
+
+  1. joint permutation, `build_native_baseline_preds.py:50` - source order, not smplx-16. Same
+     index SET so no shape/range check saw it. Now canonical + an import-time tripwire against
+     the REAL constant (a local copy cannot detect drift in the original).
+  2. `frame_width_from_intr` = 2*cx - MY OWN 38a5803 FIX, half wrong. HOI4D's principal point is
+     NOT centred: 2*cx=228.56, 2*cy=217.05, true frame 224. 2.0% error. Now documented as a last
+     resort and warns; callers should pass `image_width`. NOT fully closed - see task #64.
+  3. half-pixel offset in `project_joints_to_norm_pixels`. grid_sample(align_corners=False) reads
+     pixel `x*W - 0.5`, so pixel centre k needs `(k+0.5)/W`. `eval_world_space` already INVERTED
+     with the +0.5 and claimed to invert "the EXACT projection", so the round trip was provably
+     inconsistent. Verified from first principles after the fix: a joint on pixel-centre u samples
+     that pixel exactly (31.0000 / 53.0000 / 58.0000 / 63.0000).
+  4. `object_depth_loss.py:69` built (col,row) while every other gs_depth consumer uses
+     [(W-1)-row, col]: same tensor read 189mm apart. Now identical; verified independently with a
+     constant map and a ramp, residual 0.000e+00 over 147 points.
+  5. `contact_mask.py:35` sampled GT depth (plain image layout) with the ROTATED grid: 438mm of
+     error against a 50mm threshold, i.e. the gate was noise. `rotated=False` flag added.
+  6. `hand_to_gs_injection.py:105` clamped the destination but not the source crop, so a
+     half-off-frame box injected byte-identical content to a box half its width. Partially
+     out-of-frame hands are the COMMON case in egocentric video.
+  7. the loss-effect guard (built after C-abs-725) silently skipped any weighted-but-untracked
+     loss and printed PASSED. `root_anchor` was never accumulated and 5 shipped configs set it to
+     1.0. Untracked + weighted is now a FAILURE.
+  8. `dexycb_to_ours.py` drift tripwire compared a local literal to an identical local literal, so
+     it could never fire, while its docstring claimed it pinned against H2O's constant.
+  9. `extract_h2o_clips_mp4.py:22` applied the H2O remap TWICE, putting fingertips in kinematic
+     base slots. Still a permutation of 0..20, so the paired PA check could not see it.
+
+### 🟢 IMPACT ON THE PAPER: the headline numbers are UNTOUCHED
+
+`exp_p4_jitterrob.yaml` - the config behind every reported number - has `obj_depth` absent,
+`root_anchor: 0.0`, `hand_depth_anchor: 0.0`, `use_contact_gate: false`, `contact_cache_dir: null`.
+Those paths never ran. C-MPJPE absolute (35.8) and root-relative (26.6) do not route through depth
+sampling or the scale solve, so they cannot move - the same reason the 1408 fix left them
+bit-identical. W-MPJPE and WA-MPJPE carry the 2% width error plus the half pixel and MUST be
+re-run (task #65).
+
+### 🔵 THE METHODOLOGICAL LESSON, which is the transferable part
+
+Four tests I added in 38a5803 were WRONG in two ways: they inverted the projection without the
+pixel-centre offset, and used `cx=cy=W/2` fixtures that satisfy the very assumption under test.
+Both are the same error - **a test written to match current behaviour instead of derived from the
+contract**. That is exactly why bug 2 survived the fix for bug 1. Rule: when replacing a hardcoded
+constant with a derived one, test the derivation against the REAL stores, never against a fixture
+built from the derivation.
+
+Also: the two hunters encoded CONTRADICTORY assumptions about axis order. Agent findings are
+leads, not verdicts - verify independently before acting.
+
+
+## 2026-08-05 - haptic_detbox_preds is NOT a box variant, do not use it
+
+Attempting to raise the long-window table from 3-of-6 to 4-of-6 box-consistent rows, I reached for
+`haptic_detbox_preds` (157 seqs, has `world_joints`) in place of `haptic_slam_preds`. Its seg100
+numbers looked like a large win: **W 81.5 / WA30 21.6 / WA100 31.4** against the own-detector
+dir's **W 143.4 / WA30 36.3**. C_abs barely moved (158.6 vs 157.7), which is the wrong signature
+for a box change and is what triggered the check.
+
+DIRECT COMPARISON of the two dirs on the same sequence:
+
+  cam_joints    meanAbsDiff = 0.0000 m   **BIT-IDENTICAL**
+  world_joints  meanAbsDiff = 0.1797 m   different
+
+**The boxes are the same.** Identical camera-frame joints prove it. The two dirs differ only in the
+camera trajectory used for the world lift, so the 62 mm W "improvement" is a trajectory swap, not a
+box fix. `ours_gttraj` (GT trajectory) sits at W 41.3, and 81.5 lies between that and the SLAM
+number, so the detbox variant plausibly carries an oracle or otherwise privileged track.
+
+**VERDICT: do not put `haptic_detbox_preds` in any table.** The long-window table stays at 3-of-6
+box-consistent. HaWoR and Dyn-HaMR genuinely need detbox v3 runs (tasks #30, #31), and HaPTIC now
+does too - the dir whose name implied it already had one does not.
+
+This is the second time a `+SLAM`-style pred dir has silently encoded a different trajectory. Any
+row swap must compare `cam_joints` first: if they are identical, the dirs differ in the LIFT, not
+the input, and the world metrics are not comparable.
+
+### seg100 rebuild, all rows on matched flags (--drop_partial_tail ON, --hands both, wa_short 30)
+
+  row              W      WA30   WA100   C_rr    C_abs    nseg   box
+  ours_gttraj     41.3    18.0    22.9   24.8     33.3    180*   detbox v3, ONLY 60 of 157 seqs
+  haptic_slam     81.5**  21.6    31.4   29.7    158.6    471    see above, NOT a box variant
+  hawor          133.6    40.3    61.0   32.6     87.7    468    OWN detector
+  hamer_fj2      150.1    36.8    57.8   14.5     37.4    468    detbox v3
+  hamer_mt       166.4    41.3    63.2   39.7     67.3    468    detbox v3
+  dynhamr        195.4    49.0    69.0   59.9   1336.7    468    OWN detector
+  wilor          292.4    46.4    64.8   55.8   1074.6    468    detbox v3
+
+  * ours is NOT comparable to the rest at 180 vs 468 segments; it needs a full 157-seq re-run.
+  ** this row was scored from haptic_detbox_preds and is therefore trajectory-confounded; rescore
+     from haptic_slam_preds before use.
+
+Note `--drop_partial_tail` was OFF in the earlier tables_regen build even though the paper claims
+it is used "throughout". It is ON here, so these numbers are NOT comparable to that build.
+
+
+## 2026-08-04 EVENING - dataset pool relocked, and the 725 causal claim cut down to 4mm
+
+### 🔵 abs2x2: absolute supervision is worth ~4mm, NOT ~700mm
+
+Matched 2x2, HOI4D-only so it isolates the loss and not the data, kp2d zeroed in every arm,
+n=314 segments each. Two of four cells in:
+
+  arm                                       C_abs    C_rr
+  kp3d_abs ON,  transl ON  (full recipe)     22.8    17.7
+  kp3d_abs OFF, transl ON                    27.1    15.3
+
+Dropping kp3d_abs while keeping the direct translation L1 costs **4.3mm** of absolute placement
+and **improves** articulation by 2.4mm. The archived control that read **725 is dead** - that was
+an untrained checkpoint, and an abs-unsupervised model and an untrained one both emit a constant.
+Any sentence of the form "without absolute supervision the model collapses" must be rewritten as
+"absolute joint supervision is worth about 4mm". Recorded into `3method.tex` at the CRITICAL todo.
+Arms `absON_trOFF` (running) and `absOFF_trOFF` (queued) anchor the floor; hold final wording.
+NOTE the arms run `--keep_gs_off`, so their W/WA are non-metric and must never be quoted.
+
+### ✅ FINAL POOL LOCKED (Dario): 5 train, 2 eval, both eval sets fully held out
+
+TRAIN: HOT3D 0.339 | OakInk2 0.386 | ARCTIC 0.474 | DexYCB (new) | Re:InterHand ego (new)
+EVAL:  H2O 0.503 | HOI4D 0.677 - **neither is ever trained on**, so every number is zero-shot.
+
+Ego-Exo4D REMOVED and deleted from disk: it ships only triangulated joints, never MANO (verified
+against all 351 annotation files and the official schema), and was the shallowest store at 0.313.
+
+**CASCADE: every mixture recipe built so far is void.** mix3/mix4/mix5/shallowmix each contain
+HOI4D or Ego-Exo4D. So does the unfreeze sweep now running, which trains on mix3 - it is a
+DIAGNOSTIC of layer depth only and none of its absolute numbers may be reported as the recipe.
+Every headline we own (23.6, 35.6, mix3's 66.2, both world tables) was trained on HOI4D and is
+now provisional pending a retrain on the locked pool.
+
+### ✅ DexYCB depth gate PASSED before committing 119GB
+
+Downloaded `calibration.tar.gz` (14KB) first and measured the rig from the extrinsics: 9 cameras
+per session across 10 sessions, camera centre to camera-ring centroid **median 0.877m**, 10/90
+percentile 0.597/1.276. That is DEEPER than HOI4D's 0.677, which is exactly the coverage the
+mixture lost. Caveat: this is a rig-geometry proxy, not a hand-depth measurement; confirm against
+the MANO annotations once a subject tarball lands.
+
+### ⚠️ DexYCB download is Google-Drive QUOTA blocked, not credential blocked
+
+All 10 subject tarballs return "Too many users have viewed or downloaded this file recently",
+documented to clear in up to 24h. The 14KB calibration file downloads fine, so it is purely a
+large-file quota. A detached retry loop (`dl_retry.sh`, one pass per 45 min, skips what is on
+disk) is running on the login node. Re:InterHand is unaffected - it serves from a public S3
+bucket over plain wget at ~90MB/s.
+
+### Disk: 1.85 TB -> 1.43 TB
+
+Freed ~420GB: Ego-Exo4D raw+converted+featcache (180GB) and the `hoi4d_32f`/`hoi4d_64f` feature
+caches (196GB) from the CLOSED window-length sweep, which are derived and regenerable. Headroom
+to the 2.5TB soft quota is now 1.07TB against ~353GB of incoming data.
+
+
 Every parallel line of investigation, its status, and **what "validated / closed" means** — so no line is
 abandoned without an explicit verdict. Update the Status + Verdict columns as results land.
 
