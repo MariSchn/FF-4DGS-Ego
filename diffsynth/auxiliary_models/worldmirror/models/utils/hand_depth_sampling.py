@@ -58,6 +58,26 @@ IMAGE_WIDTH: float = 1408.0  # square Aria RGB frame; ONLY a fallback, see note 
 _OFFCENTRE_TOL_PX: float = 1.0   # how far 2*cx and 2*cy may disagree before the
                                  # centred-principal-point assumption is unsafe
 _warned: dict[str, bool] = {"offcentre": False}
+
+# The TRUE pixel-frame width the intrinsics are expressed in. It cannot be derived from the
+# intrinsics when the principal point is off-centre (HOI4D: cx=114.28, cy=108.52, frame 224),
+# so the process sets it ONCE from data.resolution and every consumer picks it up. This is a
+# deliberate process-level constant, not shared mutable state: one store resolution per run.
+_default_frame_width: float | None = None
+
+
+def set_default_frame_width(width: float | None) -> None:
+    """Declare the true frame width the intrinsics refer to, e.g. data.resolution.
+
+    Every call to project_joints_to_norm_pixels that does not pass ``image_width`` explicitly
+    will use this instead of the unsafe ``2 * cx`` estimate. Call once at start-up.
+    """
+    global _default_frame_width
+    _default_frame_width = None if width is None else float(width)
+
+
+def get_default_frame_width() -> float | None:
+    return _default_frame_width
 Z_MIN: float = 0.05          # 5 cm clamp on projection depth; train_hand_head.py:1304
 
 
@@ -120,10 +140,14 @@ def project_joints_to_norm_pixels(
     cx = cam_intr[:, 1].view(B, 1, 1, 1)
     cy = cam_intr[:, 2].view(B, 1, 1, 1)
 
-    if image_width is None:
-        W = frame_width_from_intr(cam_intr).view(B, 1, 1, 1)
-    else:
+    if image_width is not None:
         W = torch.full_like(cx, float(image_width))
+    elif _default_frame_width is not None:
+        # Declared once by the caller from data.resolution: correct even when the principal
+        # point is off-centre, which 2*cx is not.
+        W = torch.full_like(cx, _default_frame_width)
+    else:
+        W = frame_width_from_intr(cam_intr).view(B, 1, 1, 1)   # last resort; warns if unsafe
     if not bool((W > 1.0).all()):
         raise ValueError(
             f"degenerate frame width from intrinsics: cx={cam_intr[:, 1].tolist()}. "

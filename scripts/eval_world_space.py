@@ -850,6 +850,22 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    # Declare the TRUE pixel-frame width once, from the store resolution, so the depth-sampling
+    # projection stops estimating it as 2*cx. That estimate assumes a centred principal point and
+    # HOI4D violates it (cx=114.28, cy=108.52 for a 224x224 frame -> 2*cx overestimates by 2.0%),
+    # which put every sampled depth ~4.5 px off at the frame edge. See task #64.
+    from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
+        set_default_frame_width)
+    _res = cfg.get("data", {}).get("resolution")
+    if _res:
+        _w = int(_res[0]) if isinstance(_res, (list, tuple)) else int(_res)
+        set_default_frame_width(_w)
+        print(f"[frame width] declared {_w} px from data.resolution "
+              f"(NOT estimated as 2*cx)", flush=True)
+    else:
+        print("[frame width] data.resolution absent; falling back to the 2*cx estimate, which is "
+              "WRONG on stores with an off-centre principal point", flush=True)
+
     # PROTOCOL GUARD. The head is trained on 16-frame clips (data.num_frames), and the locked
     # paper protocol is 16-frame chunks with an overlap of 8, i.e. --clip_len 16 --stride 8
     # (which are also the argparse defaults). Evaluating at any other clip length runs the model

@@ -128,7 +128,13 @@ def main() -> None:
             grid_xy, z = project_joints_to_norm_pixels(pj, cam_intr)
             sampled, in_frame = sample_depth_at_joints(gs_depth, grid_xy)
             valid = in_frame & (sampled > DEPTH_MIN) & torch.isfinite(z) & torch.isfinite(sampled)
-            if not bool(valid.any()):
+            n_valid = int(valid.sum())
+            # Print BEFORE the early-continue. Without this a clip with no visible hands
+            # (hand_valid all zero, which clip 0 of the first test sequence genuinely is)
+            # skips in total silence, and the job looks hung when it is working fine.
+            print(f"  [clip {i}] {n_valid} valid joint samples"
+                  f"{' - no hands, skipping' if n_valid == 0 else ''}", flush=True)
+            if n_valid == 0:
                 continue
             all_ratios.append((z / sampled)[valid].float().cpu())
 
@@ -137,9 +143,21 @@ def main() -> None:
                 if c2w_raw is None:
                     raise SystemExit("no rendered_extrinsics: world lift would be identity, "
                                      "the R3 panel would be meaningless")
-                d = gs_depth[0].float()
-                while d.dim() > 3:
-                    d = d.squeeze(1)                          # [S,Hd,Wd]
+                # INFINITE LOOP FIX 2026-08-06. This was `while d.dim() > 3: d = d.squeeze(1)`.
+                # gs_depth here is [B,S,Hd,Wd,1], so gs_depth[0] is [S,Hd,Wd,1] and the singleton
+                # is the LAST dim: squeeze(1) tries to drop a size-224 axis, does nothing, and the
+                # loop spins forever. This is what actually hung regviz three times. Handle both
+                # layouts explicitly, exactly as sample_depth_at_joints does.
+                d = gs_depth[0].float()                       # [S,1,Hd,Wd] or [S,Hd,Wd,1] or [S,Hd,Wd]
+                if d.dim() == 4:
+                    if d.shape[1] == 1:
+                        d = d[:, 0]
+                    elif d.shape[-1] == 1:
+                        d = d[..., 0]
+                    else:
+                        raise ValueError(f"unexpected gs_depth layout {tuple(gs_depth.shape)}")
+                if d.dim() != 3:
+                    raise ValueError(f"gs_depth -> {tuple(d.shape)}, expected [S,Hd,Wd]")
                 panel = {
                     "rgb": (imgs[0].clamp(0, 1) * 255).round().to(torch.uint8).cpu(),  # [S,3,H,W]
                     "gs_depth": d.half().cpu(),                                        # [S,Hd,Wd]

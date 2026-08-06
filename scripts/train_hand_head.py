@@ -2049,6 +2049,12 @@ def train():
 
     num_frames       = data_cfg["num_frames"]
     res              = tuple(data_cfg["resolution"])
+    # Declare the true frame width for the depth-sampling projection (task #64): 2*cx assumes a
+    # centred principal point and HOI4D does not have one.
+    from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
+        set_default_frame_width)
+    set_default_frame_width(int(res[0]))
+    print(f"[frame width] declared {int(res[0])} px from data.resolution", flush=True)
     clip_stride      = data_cfg.get("clip_stride", num_frames)
     # VARIABLE-LENGTH TRAINING (opt-in via data.random_frames: [min, max]). The frozen VGGT
     # backbone was itself trained on "2-24 frames randomly sampled from a random training
