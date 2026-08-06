@@ -398,6 +398,24 @@ class HOT3DHandDataset(Dataset):
                 else:
                     print(f"No calibration for {seq_path} — 2D loss unavailable for this sequence.")
 
+                # ADDITIVE RECOVERY (task #63, 2026-08-06). The block above is all-or-nothing: it
+                # only loads from disk when ALL THREE caches exist, so a missing
+                # gt_joints_2d_cache.pt sends the sequence down the recompute path, which returns
+                # None for a store without calibration - and an EXISTING cam_extrinsics_cache.pt
+                # is then thrown away. Measured on hoi4d_test157: 157/157 sequences have
+                # cam_extrinsics_cache.pt, but only 1/157 has gt_joints_2d_cache.pt. So the
+                # GT-scale diagnostic (s_gt vs our solved s, the check that showed our scale is
+                # 42% too small) was running at 1/157 coverage for want of an unrelated file.
+                #
+                # Purely additive: nothing that already had extrinsics loses them. It only fills
+                # in the case where the cache is on disk and was being ignored.
+                if seq_cam_extrinsics is None and os.path.exists(cam_extr_cache_path):
+                    seq_cam_extrinsics = torch.load(cam_extr_cache_path, weights_only=True)
+                    print(f"Recovered cam_extrinsics cache for {seq_path} "
+                          f"(2D GT still unavailable).")
+                if seq_cam_intrinsics is None and os.path.exists(cam_intr_cache_path):
+                    seq_cam_intrinsics = torch.load(cam_intr_cache_path, weights_only=True)
+
             # cam_intrinsics is needed by the root anchor + metric/2D-reproj losses and
             # is written by EVERY preprocessor (incl. the HOI4D cam-only path) even when
             # the 2D / extrinsics caches are absent. The branches above only load it on a
@@ -520,6 +538,11 @@ class HOT3DHandDataset(Dataset):
                                                           _lab_density)
                 if seq_gt_joints_2d is not None:
                     clip["gt_joints_2d"]   = seq_gt_joints_2d[start : end].clone()    # [S, 2, 16, 3]
+                # Attached INDEPENDENTLY of the 2D cache, for the same reason cam_intrinsics is
+                # (see the note below): the GT-scale check, the oracle-camera diagnostic and the
+                # gravity oracle all need extrinsics and none of them need 2D joints. Coupling the
+                # two is what limited the GT-scale measurement to 1 of 157 sequences (task #63).
+                if seq_cam_extrinsics is not None:
                     clip["cam_extrinsics"] = seq_cam_extrinsics[start : end].clone()  # [S, 4, 4]
                 # cam_intrinsics is attached independently of the 2D/extrinsics caches:
                 # the root anchor + metric losses need it even when there is no 2D GT.
@@ -671,6 +694,10 @@ class HOT3DHandDataset(Dataset):
 
         if "gt_joints_2d" in clip:
             out["gt_joints_2d"]   = clip["gt_joints_2d"]    # [S, 2, 16, 3]
+        # Emitted independently of the 2D cache, like cam_intrinsics below. The consumers of
+        # extrinsics (GT-scale check, oracle-camera diagnostic, gravity oracle) need no 2D joints,
+        # and the coupling silently limited the GT-scale measurement to 1 of 157 HOI4D sequences.
+        if "cam_extrinsics" in clip:
             out["cam_extrinsics"] = clip["cam_extrinsics"]  # [S, 4, 4]
         # Emitted independently of the 2D cache so HOI4D (cam-only) batches still carry
         # intrinsics for the root anchor + metric losses.
