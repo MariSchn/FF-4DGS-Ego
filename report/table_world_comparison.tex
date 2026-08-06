@@ -55,7 +55,7 @@ HaMeR$_{\text{ft}}$ + SLAM$^{g}$ & offline + SLAM & 37.4 & 36.8 & 53.6 & 2.47$^{
 \midrule
 \multicolumn{6}{@{}l}{\textit{No metric depth (only WA-MPJPE is metric-meaningful)}} \\
 WiLoR + SLAM$^{a}$ & offline + SLAM & \na & 43.7 & \na & 2.47$^{f}$ \\
-HaPTIC + SLAM$^{c}$ & offline + SLAM & \na & \tbd & \na & 2.47$^{f}$ \\
+HaPTIC + SLAM$^{c}$ & offline + SLAM & \na & 36.7 & \na & 2.47$^{f}$ \\
 Dyn-HaMR$^{h}$ & offline optim. & \na & 49.3 & \na & 2.47$^{f}$ \\
 \midrule
 \multicolumn{6}{@{}l}{\textit{Online / feedforward}} \\
@@ -91,7 +91,7 @@ $^{c}$ HaPTIC + SLAM: HaPTIC produces no metric depth, so absolute placement is 
 (C-MPJPE 157.7 with a depth-dependent error, while root-relative C-MPJPE is a healthy 29.2 - the pose
 is good, only metric placement fails). HaPTIC does no camera tracking, so we compose its per-frame
 camera-space hand with the \emph{same} DROID-SLAM trajectory as the other rows (SE(3) residual
-0.000\,mm) and score identically. Only WA-MPJPE is meaningful, and it is \tbd\ here because HaPTIC + SLAM has never been composed on our detector boxes: no \texttt{haptic\_slam\_detbox\_preds} exists. Its $35.7$ is a \emph{native}-regime number and is withheld rather than printed in a shared-box column.
+0.000\,mm) and score identically. Only WA-MPJPE is meaningful: $36.7$ on our detector boxes. BUILT 2026-08-06 (Euler 9906263): this cell previously carried $35.7$, which is HaPTIC's \emph{native}-regime score, because no shared-box composition existed. It does now (\texttt{haptic\_slam\_detbox\_preds}), and the two agree to $1.0$\,mm, as expected for a method whose world error is dominated by the shared trajectory rather than by the boxes. A third variant on disk, \texttt{haptic\_detbox\_preds}, scores $23.3$ and must NOT be used: its world track is lifted with ground-truth extrinsics, so it is an oracle.
 $^{e}$ All of our numbers come from a single end-to-end feedforward run (our boxes, no SLAM, predicted
 extrinsics, 30-frame WA window); the head is trained jitter-robust, so it tolerates the same noisy
 boxes that degrade the offline baselines. Feedforward FPS = 6.59, measured on an NVIDIA GB10 (mean over

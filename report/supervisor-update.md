@@ -1,88 +1,62 @@
-# Progress update since the report — and a request for a GPU
+Hey Chenyangguang, quick update on where I got since the report/poster.
 
-*(Draft to send to the supervisor. Honest status + concrete ask.)*
+I kept pushing on the metric side. Two things, and the first one I should explain since we didn't
+really discuss it.
 
----
+First, the hand placement. In the report we only looked at PA-MPJPE, which lines the hand up first, so
+it tells you the shape is good but not whether the hand is actually in the right place in 3D. I wanted
+to check the placement itself, so I added a loss on the absolute 3D joint positions (not pelvis aligned)
+and measured the absolute MPJPE. That got it down from 81mm to 53mm on a robust 9 seq split (-35%), with
+the hand depth around 4.5cm. So the hand sits in the right place metrically now, not just the right shape.
 
-Hi [supervisor],
+To check the hand is actually a good metric anchor, I compared it against UniDepth-V2, a current metric
+depth foundation model: at the hand it lands about 15.7cm off, vs 4.5cm for our in-scene metric hand, so
+the hand is roughly 3.5x better as a scale anchor than an off the shelf depth model. That's the justification
+for anchoring the scene scale to the hand in the first place.
 
-Quick update on what I've done since the report/poster, where it landed, and one thing that would
-unblock the next step.
+Second, the scene. I built the region masked object evaluation we said was the next step in the report.
+I render the GT object depth from the HOT3D object meshes, mask out the hand, and compare the predicted
+depth on the objects (sanity checked it: where the hand touches an object the GT render matches the metric
+hand to about 2 to 4cm). The honest result is the scene depth does not become metric on the objects. When
+I push the metric loss the predicted depth on objects is around 135cm off, vs about 62cm without it, so it
+actually gets worse.
 
-## TL;DR
-The report ended by flagging **region-masked / object-region evaluation as "the next step toward a
-conclusive result"** (§4.4, §6). I built exactly that, and pushed the **metric** angle hard
-(absolute hand *placement* + whether the *scene* itself becomes metric). The honest outcome: **the
-hand becomes metric and placement improves a lot, but the scene does NOT become metric on objects** —
-and I now know precisely why, and what it would take to fix. Good news is it's a clean result and a
-clear path; the main blocker to a main-track-grade comparison is **hardware**, not research.
+The earlier "the scale is getting more consistent" signal I had was misleading, because I was measuring it
+at the hand, where the model is trained to match the metric hand, so of course it looks good there. On the
+objects it isn't.
 
-## What I built since the report
-1. **Absolute, metric hand placement** (the report only had PA-MPJPE = relative). I added an
-   absolute-3D placement loss + a hand-depth geometric anchor that ties the predicted scene depth to
-   the metric MANO hand. Result on HOT3D (robust 9-seq split):
-   **absolute MPJPE 81.4mm → 52.9mm (−35%)**, hand depth **4.5cm** at the hand, PA-MPJPE preserved
-   (~7.9mm). So the hand is now placed metrically, not just up-to-scale.
-2. **A non-circular scene-metric evaluation** — the "next step" from the report. I render
-   **ground-truth object depth** from the HOT3D object meshes + per-frame 6-DoF poses, exclude the
-   hand region, and compare the predicted scene depth against it in *object* regions (validated: at
-   hand–object contact my GT render agrees with the metric hand to 1.6–4.2cm).
+The reason is the frozen backbone. Even with no metric loss its scene depth is already around 62cm off on
+the objects, so the metric hand can only fix the global scale, not the relative structure. Pushing the
+metric loss on top of a frozen backbone just distorts it. The reconstruction quality stays fine btw (PSNR
+within about 0.3dB of the baseline), so we don't lose the rendering gain, it's specifically the metric
+depth that doesn't hold.
 
-## The honest key finding
-- **The scene does not become metric on objects.** With the anchor, object-region depth error is
-  *worse*, not better: **134.7cm vs 61.9cm** for the no-anchor baseline. The earlier "scene becomes
-  metric" signal (scale CV 25→6%) was a **circular artifact** — it was measured *at the hand*, where
-  the anchor trains; non-circularly (objects) it vanishes.
-- **Root cause is fundamental:** even the no-anchor frozen backbone is ~62cm-inaccurate on scene
-  depth, and the hand can only fix the global *scale*, not the *relative* structure. So no anchor
-  weight makes the scene metric — the anchor only adds distortion.
-- **Scene render quality is preserved** at a gentle anchor (PSNR within ~0.3dB of baseline),
-  consistent with the report's PSNR gain; a strong anchor degrades it (−7dB).
-- I also ran the **causal ablation** (control with the new losses zeroed): fine-tuning alone recovers
-  most of the placement gain, so the abs-3D loss is a modest contributor (same-split confirmation
-  running).
+So I think the real next step is what you and Marian suggested, train the Gaussian head and the backbone
+on the metric depth from HOT3D instead of keeping the backbone frozen. I started that, and the early signal
+is encouraging: with the backbone unfrozen the validation C-MPJPE drops from 256mm to about 73mm in the first
+150 steps. The problem is it doesn't survive, training the full backbone at 224x224 on the single consumer
+card runs out of memory and the run dies after a couple of hours, before it converges or reaches the object
+depth eval. So I can't actually finish this run on the current hardware. If the object depth drops below the
+62cm baseline then we have the unified metric model (Gaussians, depth, camera, hand in one pass), which is the
+thing that puts us ahead of the 2 stream setups. The scale head route you mentioned is also on the table as a
+simpler, lighter version that should fit in memory.
 
-This is a *clean, characterized negative* on the scene-metric claim — the kind of thing better found
-now than after submission — plus a *solid positive* on metric hand placement.
+The thing slowing this down a lot is the GPU. I'm on a single consumer card, so I'm stuck at 224x224, batch
+around 2, and it's very slow (a training run is hours, and training the backbone makes it worse, that's the
+run that keeps OOMing). The UniDepth baseline I mentioned also won't run on the Blackwell cards I mostly have
+(too new for its cuda), I had to find an older Turing card just to get that one number. To iterate properly on
+the metric depth training I'd really need a better GPU. Any chance I could get access to an H100 or A100 for a
+bit? Honestly that's the main bottleneck right now between the current results and pushing this towards a
+publication.
 
-## Where this leaves us, and the path to main-track
-The defensible contribution is **feedforward monocular egocentric *metric hand placement*, anchored to
-the hand, no depth-foundation-model needed.** To make it main-track rather than workshop, two things:
+I'm attaching a comparison table that pulls all of this together: the hand-anchor vs depth-FM result, the
+absolute placement gain (81 to 53mm), the HOI4D dense-depth number (scene depth residual 20.5 to 13.4cm with
+no masking), and where the reported world-space methods (HaWoR, Hand3R) sit. The two scale experiments we
+discussed are mid-flight right now: I'm training both the partial-unfreeze with direct GT object-depth
+supervision and the lighter scale head you suggested. The world-space rows fill in as those converge; the one
+thing slowing them is GPU/disk (training a backbone on the single consumer card, plus the scratch quota), so
+converged numbers come a lot faster on a bigger card.
 
-1. **(Running now) "Unfreeze" experiment** — the real shot at a *true* metric scene: instead of a
-   frozen backbone, I let the encoder train so the egocentric video's reconstruction signal + the hand
-   anchor can *teach* the network metric depth. If object-region depth drops below the 62cm baseline,
-   the scene-metric headline is resurrected and this becomes a strong paper.
-2. **External SOTA comparison (the make-or-break)** — we currently only beat our own baseline.
-   Reviewers will require comparison to **HaWoR** and **Hand3R** on a shared benchmark. HaWoR's repo
-   *already ships a HOT3D eval* with sequences that overlap ours, so this is "run their eval," not
-   build one.
-
-## The ask: a GPU (this is the bottleneck)
-The external comparison is blocked **only by hardware**. Our cluster is **Blackwell-only** (the gb10
-nodes and the RTX 5060 Ti partition, sm_120). The SOTA stacks don't run on Blackwell:
-- **HaWoR** needs torch 1.13 / cu117 (≤ Ampere) + DROID-SLAM;
-- **UniDepth** (metric-depth FM baseline) needs torch ≤2.6, but Blackwell requires ≥2.7 — a hard conflict.
-
-They all run fine on **Ampere/Hopper**. **A single H100 (or A100) for a few days would unblock the
-HaWoR-on-HOT3D comparison — the single most important number for a main-track submission** — and would
-also let me run the metric-depth-FM baseline. If the unfreeze experiment also lands, we'd have a real
-main-track story (metric placement + a true metric-scene result + external SOTA).
-
-Could you grant access to an H100/A100? That's the one thing standing between the current honest
-results and a main-track-grade evaluation.
-
-Thanks,
-Dario
-
----
-
-### Backup numbers (if he asks)
-| | hand MPJPE (9-seq) | hand depth @ hand | scene PSNR | object depth err (non-circ) |
-|---|---|---|---|---|
-| baseline (no anchor) | 81.4mm | — | 32.55 dB | 61.9 cm |
-| anchor 0.1 (scene-preserving) | ~55mm | — | 32.81 dB | 134.7 cm |
-| anchor 1.0 (best hand) | 52.9mm | 4.5 cm | 26.78 dB (−7.2) | — |
-| control (no abs-3D) | ~55mm | — | — | — |
-- Falsified: "metric scene on objects." Confirmed: metric hand placement; scene render preserved at low anchor.
-- Full detail: `report/overnight-findings.md`, `report/external-comparison-plan.md`.
+Happy to go through the numbers whenever. I can have the clean ablation (how much the absolute 3D loss adds
+over plain finetuning) shortly; the full backbone training result really depends on getting a card that can
+hold it, otherwise I only get the first few hundred steps before it dies.

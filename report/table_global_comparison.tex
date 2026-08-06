@@ -1,0 +1,68 @@
+\documentclass[border=10pt]{standalone}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage[table]{xcolor}
+\definecolor{oursbg}{RGB}{235,242,250}
+\newcommand{\best}[1]{\textbf{#1}}
+\newcommand{\na}{--}
+
+\begin{document}
+\begin{minipage}{16.4cm}
+\centering
+{\large\textbf{Absolute egocentric 3D hand pose on HOI4D (157 held-out seqs)}}\\[2pt]
+{\small Camera-frame metrics in mm, right hand, 16 joints, true focal, per-sequence aggregation.
+Abs.\ MPJPE = absolute joint position error (no root alignment); Local MPJPE = root-relative.}\\[8pt]
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Method & Abs.\ MPJPE $\downarrow$ & Abs.\ wrist $\downarrow$ & Local MPJPE $\downarrow$ \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Ground-truth hand boxes (matched-input regime)}} \\
+WiLoR (off-the-shelf) & 240.0 & \na & 30.5 \\
+HaMeR (off-the-shelf) & 168.3 & 180.4 & 36.0 \\
+HaMeR, metric-tuned transl.\ head$^{a}$ & 39.8 & 48.6 & 36.0 \\
+HaMeR, decoder fine-tuned$^{a}$ & 26.5 & 26.0 & 17.0 \\
+HaMeR, full fine-tune (632M)$^{a}$ & 21.4 & 24.1 & 11.6 \\
+HaMeR, full fine-tune + jitter aug$^{d}$ & \best{20.8} & \best{21.7} & \best{11.6} \\
+\rowcolor{oursbg}
+Ours (frozen features + light head) & $23.6 \pm 0.8$ & $22.7 \pm 0.2^{b}$ & $17.2 \pm 0.4$ \\
+\rowcolor{oursbg}
+Ours + box-jitter augmentation$^{d}$ & 27.3 & 26.1 & 17.0 \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Detector hand boxes (end-to-end regime)}} \\
+WiLoR, native full-res pipeline & 83.4 & \na & 27.2 \\
+HaMeR, native full-res pipeline$^{c}$ & 88.0 & \na & 30.3 \\
+HaMeR, metric-tuned transl.\ head$^{a}$ & 68.7 & 72.2 & 39.9 \\
+HaMeR, full fine-tune (632M), own detector$^{a}$ & 44.0 & 43.7 & 16.1 \\
+HaMeR, full fine-tune + jitter aug, own detector$^{d}$ & 41.6 & 40.3 & 14.9 \\
+HaMeR, full fine-tune + jitter aug, our detector boxes$^{d}$ & \best{23.4} & \best{22.3} & \best{13.2} \\
+\rowcolor{oursbg}
+Ours (our detector boxes) & 49.8 & 42.9 & 41.0 \\
+\rowcolor{oursbg}
+Ours + box-jitter augmentation (our detector boxes)$^{d}$ & 35.6 & 34.8 & 26.5 \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Global / world-space methods (reference only, not the same protocol)}} \\
+Hand3R$^{e}$ & (42.6) & \na & \na \\
+HaWoR$^{e}$ & (51.8) & \na & \na \\
+HaPTIC (our run on HOI4D)$^{f}$ & n/a & \na & 25.7 \\
+\bottomrule
+\end{tabular}\\[8pt]
+\begin{minipage}{16.0cm}
+\footnotesize
+$^{a}$ Trained by us on the same 367 HOI4D train sequences with the same absolute 3D keypoint loss as ours
+(translation head only / MANO decoder / full 632M network, 3--4 epochs).
+$^{b}$ Mean of 3 seeds (22.9, 22.4, 22.8), std 0.2 mm.
+$^{c}$ HaMeR's own detector is build-incompatible; WiLoR detector with HaMeR-native box rescale substituted.
+$^{d}$ Box-jitter augmentation, identical scheme (amplitude 0.2) for ours and the HaMeR control.
+On \emph{identical} detector boxes (our detector's box set, the same boxes behind the ``Ours'' rows)
+the jitter-matched full fine-tune reaches 23.4\,mm and degrades less from its GT-box score
+(+4.4\,mm) than our head does (+8.3\,mm): an earlier apparent robustness advantage of the frozen
+head came from comparing across different detector-box sources (HaMeR's own detector produces
+harder boxes), not from the head itself. The control was retrained for this eval and reproduces
+the original fine-tune within run-to-run variance (GT-box 19.0 vs 20.8).
+$^{e}$ Numbers as reported in their papers on different datasets and protocols; listed for context only,
+not directly comparable.
+$^{f}$ HaPTIC's published conversion yields non-metric absolute depth on our data (native-resolution rerun);
+its local MPJPE is valid.
+\end{minipage}
+\end{minipage}
+\end{document}

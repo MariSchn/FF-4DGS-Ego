@@ -31,9 +31,13 @@
 # NOT carry the permutation that contaminated the WiLoR cache (task #65). Checked, not assumed.
 set -uo pipefail
 S=/cluster/scratch/dmonopoli
-ENV=$S/hawor_env
+# conda_hp310, NOT hawor_env: Euler's scratch purge removed hawor_env's stdlib, so it now dies
+# with "no codec search functions registered" before importing anything. conda_hp310 is the env
+# audit_table.sh already used for eval_worldspace_baseline. Verified 2026-08-06:
+# python 3.10.20, torch 2.5.1+cu124. This job is pure CPU tensor algebra, so the torch build
+# does not affect the numbers.
+ENV=$S/conda_hp310
 export PATH=$ENV/bin:$PATH
-export LD_LIBRARY_PATH=$ENV/lib/python3.10/site-packages/torch/lib:$ENV/lib:${LD_LIBRARY_PATH:-}
 export TMPDIR=$S/tmp; mkdir -p $TMPDIR $S/results
 cd $S/FF-4DGS-Ego
 touch $S/.project-root 2>/dev/null || true
