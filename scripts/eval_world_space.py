@@ -19,12 +19,6 @@ import traceback
 import torch
 import yaml
 
-# Module-level, NOT function-local. _dense_scene_points (the --dense_link path) referenced this
-# name while the only import sat inside predict_clip, so that path raised NameError the moment it
-# ran. Caught by pyflakes 2026-08-06.
-from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
-    frame_width_from_intr,
-)
 from scripts.world_space_metrics import (
     apply_similarity,
     c_mpjpe,
@@ -298,6 +292,13 @@ def _dense_scene_points(preds, cam_intr, pj_cam, s_clip, grid=24, hand_radius_m=
     boxes - rotation-convention-free and it removes the held object's contact region too.
     Returns ``(pts [S,P,3] scene-units cam-frame CPU, valid [S,P] bool CPU)`` or ``None``.
     """
+    # Function-local by design, matching predict_clip. A module-level import would make the whole
+    # eval depend on the full `diffsynth` package at import time, and the launcher only symlinks
+    # the cluster diffsynth. This name was previously referenced here with NO import in scope at
+    # all, so the --dense_link path raised NameError the moment it ran (pyflakes, 2026-08-06).
+    from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
+        frame_width_from_intr)
+
     gs_depth = preds.get("gs_depth")
     if gs_depth is None or cam_intr is None:
         return None

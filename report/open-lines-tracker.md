@@ -1,5 +1,81 @@
 # Open Lines Tracker
 
+## 2026-08-06 (later) - the #59 geometry fix did NOT close #63; a behind-camera hole in the scale mask is the new suspect
+
+### MEASURED, not inferred
+
+On the in-flight `geo59` run (job 104348, post-#59 depth-sampling fix, HOI4D detbox v3, seg30),
+the first **152 scored segments** give:
+
+| quantity | value |
+|---|---|
+| segments solving exactly onto the `0.1` clamp floor | **28 / 152 = 18.4 %** |
+| `s_med` median | 0.644 |
+| `s_med` p25 / p75 | 0.571 / 0.705 |
+| `s_med` max | 0.982 |
+
+Two readings, both load-bearing:
+
+1. **#63 is NOT a side effect of #59.** The clamp-failure rate was 15.7 % before the geometry fix
+   and is 18.4 % after it, on the same store and protocol. Fixing where the depth is sampled did
+   not fix how often the solve fails.
+2. **The surviving scales are biased LOW.** The true camera-centre scale on this data is ~1.0
+   (see `world-lift-uses-a-hand-derived-scale`), and the *maximum* observed `s_med` across 152
+   segments is 0.982. A median that never reaches the truth from above is a median being pulled
+   down, which is the same direction a negative contaminant would pull it.
+
+### The candidate cause, with the mechanism pinned
+
+`predict_clip`'s validity mask was `in_frame & sampled>0.01 & isfinite(z) & isfinite(sampled)`.
+It never required `z > 0`. That matters because of a clamp that looks harmless:
+
+```python
+z = pred_joints[..., 2].clamp_min(Z_MIN)      # Z_MIN = 0.05 m, projection only
+col = f * x / z + cx ;  row = f * y / z + cy
+return grid_xy, pred_joints[..., 2]           # <- RAW, UNCLAMPED z
+```
+
+A joint 30 cm **behind** the camera is projected *as if it sat 5 cm in front of it*, so for a
+joint near the optical axis it lands at a perfectly plausible in-frame pixel, while the depth
+handed back for the ratio is still `-0.3`. The ratio `z/d_scene` is negative, `in_frame` is True,
+and the median eats it. **The clamp that keeps the projection finite is exactly what hides the
+sign error.** Proven without a GPU in `tests/test_negative_z_scale_solve.py` (5 tests):
+`(0.02, 0.02, -0.3)` with a centred 224-px pinhole projects to grid `[0.141, 0.859]`, in frame.
+
+### Status: instrumented, NOT yet fixed - and deliberately so
+
+`--require_positive_z` exists and is **OFF by default** (commit bf3cd25). The behind-camera rate
+is now recorded under both settings, so the A/B arms are comparable. This ordering is on purpose:
+the same plausible-story-then-fix pattern produced the retracted #59 "material improvement" claim
+earlier the same day. **Validate criterion:** run both arms on a fixed sequence subset; the guard
+is adopted only if it lowers the clamp-failure rate AND moves `s_med` toward 1.0 AND does not
+worsen W/WA. If the behind-camera rate turns out to be ~0 %, this hypothesis is dead and the
+18.4 % has another cause - record that outcome too rather than leaving the flag dangling.
+
+### Also closed on the way
+
+- **The registration-panel dumper was reimplementing the eval.** `dump_registration_steps.py`
+  built its own model-load + forward + projection, and silently diverged: no bfloat16 autocast,
+  no `cond_flags`. It emitted a constant hand depth of `-0.0205 m` on all three sequences (every
+  hand behind the camera), which would have gone in front of the supervisor as Fig. 1's
+  registration panel. It now owns **no forward pass at all**: `predict_clip` gained a `steps_out`
+  hook and emits the intermediates from inside the eval's own solve. A figure meant to show what
+  the eval does is now fed by the eval.
+- **`object_depth_loss` was fine; the TEST was wrong.** Its prover reported 53 mm after the fix.
+  `gs_depth` is stored 90 degrees rotated, so feeding the same array as prediction and GT is not
+  an identity test. Measured all four rotations: only `rot90(k=-1)` round-trips to 0.0000 mm.
+  Test corrected, plus a companion asserting the other three do NOT round-trip.
+- **A latent `NameError` in `--dense_link`.** `_dense_scene_points` referenced
+  `frame_width_from_intr` while the only import sat inside `predict_clip`. That path would have
+  crashed the first time it ran. Found by pyflakes, now a module-level import.
+- **Test-suite hygiene.** All 5 stale bug-prover failures resolved: 2 converted to
+  `xfail(strict)` tracking the still-open #64 (so they flip to FAILURE the day it is fixed rather
+  than rotting green) plus a new regression test for the actual production fix
+  (`set_default_frame_width`); 1 tolerance corrected from 1e-6 to 1e-4 because it was testing
+  float32 eps (7.6e-6 at cx~114) rather than the resize convention it names. **121 passed,
+  2 xfailed.**
+
+
 ## 2026-08-06 - an adversarial bug hunt found 11 defects; 9 fixed; TWO producers now disagree with data on disk
 
 Two agents were run against the tree with one rule: a bug counts only with a test that FAILS on
