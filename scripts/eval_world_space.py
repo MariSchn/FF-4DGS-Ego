@@ -424,6 +424,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         s_pairs = []     # (s_gt, s_hand) per clip: GT camera-trajectory scale vs our hand scale (b)
         anchor_log = []  # per-clip {gate_rate, dz_gated_m, dz_max_m} when the root anchor is active
         nonpos_log = []  # per-clip fraction of accepted correspondences that are behind-camera (#63)
+        s_gt_by_clip = {}  # clip index -> GT camera-trajectory scale, for the GT-scale oracle (#38)
         for c in range(clips_per_seg):
             print(f"  [clip seg{seg} {c + 1}/{clips_per_seg}] fwd+lift", flush=True)
             batch = ds[base + c]
@@ -540,6 +541,8 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                     s_gt, _, _ = solve_similarity(pc, gc)
                     if torch.isfinite(s_gt) and float(s_gt) > 1e-6:
                         s_pairs.append((float(s_gt), float(cc[2])))
+                        # Aligned with clip_cams by index, for the GT-SCALE oracle below.
+                        s_gt_by_clip[len(clip_cams) - 1] = float(s_gt)
 
         seg_start = base * stride
         t_avail = min(segment_len, gt_world.shape[0] - seg_start)
@@ -623,12 +626,22 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                   + f" | behind-camera joints {100*frac_nonpos:.1f}% of accepted"
                   + (" (EXCLUDED)" if require_positive_z else " (INCLUDED)"), flush=True)
 
+        # GT-SCALE ORACLE (task #38). s multiplies ONLY the camera translation, so replacing our
+        # solved s with the GT trajectory scale while keeping our predicted rotation AND
+        # translation DIRECTION isolates how much of the world error is scale MAGNITUDE as
+        # opposed to direction. Without this the translation term (-47.8mm on lw60) cannot be
+        # attributed, and 'fix the scale' stays a story rather than a ranked lever.
+        worlds_gts = None
+        if s_gt_by_clip:
+            worlds_gts = [_world_from_cam(pj, c2w, s_gt_by_clip.get(i, s))
+                          for i, (pj, c2w, s, _, _) in enumerate(clip_cams)]
         worlds_pc = [_world_from_cam(pj, c2w, s) for (pj, c2w, s, _, _) in clip_cams]       # per-clip
         worlds_md = [_world_from_cam(pj, c2w, s_med) for (pj, c2w, _, _, _) in clip_cams]   # per-seq median
         worlds_pl = [_world_from_cam(pj, c2w, s_pool) for (pj, c2w, _, _, _) in clip_cams]  # per-seq pooled
         g_pc = _greedy(worlds_pc)
         gl_pc = _global(worlds_pc)
         g_md = _greedy(worlds_md)
+        g_gts = _greedy(worlds_gts) if worlds_gts is not None else None
         chain_pl = chain_trajectories_by_overlap(worlds_pl, overlap=overlap)  # pooled greedy traj
         g_pl = _metrics(chain_pl)
         if world_buf is not None:
@@ -797,6 +810,12 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             row[k + "_linkrcf"] = gl_linkrcf[k]    # RIGID linker, no centres
         row.update(sm_rows)
         row.update(scale_gt)
+        if g_gts is not None:
+            # Same chaining, same rotations, same translation DIRECTIONS - only the scale
+            # magnitude is replaced by the GT one. W_MPJPE_gtscale vs W_MPJPE therefore
+            # attributes the translation term to magnitude vs direction (task #38).
+            for k in ("W_MPJPE", "WA_MPJPE_short", "WA_MPJPE_long"):
+                row[k + "_gtscale"] = g_gts[k]
         anchor_str = ""
         if anchor_log:
             g = sum(a["gate_rate"] for a in anchor_log) / len(anchor_log)
@@ -1103,7 +1122,12 @@ def main():
         keys = ("W_MPJPE", "WA_MPJPE_short", "WA_MPJPE_long")
         agg = {}
         for k in keys:
-            for suf in ("", "_global", "_smed", "_spool", "_link", "_linkcf", "_linkr", "_linkrcf"):
+            # "_gtscale" is the task #38 oracle: our rotations and translation DIRECTIONS with
+            # the GT scale magnitude substituted. Comparing it against the bare key attributes
+            # the translation term to magnitude vs direction, which is what decides whether
+            # "fix the scale" is the top W lever or a minor one.
+            for suf in ("", "_global", "_smed", "_spool", "_link", "_linkcf", "_linkr",
+                        "_linkrcf", "_gtscale"):
                 agg[k + suf] = _mean(k + suf)
         for k in ("C_MPJPE", "C_MPJPE_abs", "s_med", "s_pool", "s_clip_std"):
             agg[k] = _mean(k)
