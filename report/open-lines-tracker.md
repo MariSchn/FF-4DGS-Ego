@@ -53,7 +53,44 @@ fine-tune**, not running an eval. That is a decision, not an errand: repeat the 
 the footnote and let the abstract carry the input-matched comparison. The footnote is honest either
 way.
 
-### Still unverified
+### Still unverified, and three inspection attempts FAILED (2026-08-07)
+
+`wilor_slam_detbox_preds` (the world table's WiLoR+SLAM 43.7) is composed from
+`wilor_detbox_truefocal_preds`, which comes from a **tarball with no producer script on either
+cluster**. Its sibling `wilor_detbox_hd_preds` WAS built with `--box_dir hoi4d_detboxes_v3`, but
+that directory is empty and its result json never existed, so it is not the one in the table.
+
+Three attempts to settle it by inspection, all inconclusive, recorded so nobody repeats them:
+
+1. **Validity-mask agreement with the v3 store.** VOID: scored the known NEGATIVE
+   (`hamer_fj2_detbox_preds`) at 100% and the known POSITIVE (`haptic_detbox_preds`) at 79.5% -
+   backwards. It measured "is this dir fully populated", not box source.
+2. **2D IoU, first pass.** VOID, all zeros: the store holds `bboxes [N,2,4]` **normalised** per
+   hand, and they were being compared against pixel coordinates.
+3. **2D IoU with the correct layout**, calibrated on a matched known pair:
+
+   | dir | median IoU vs v3 box |
+   |---|---|
+   | `hamer_fj2_v3box_preds` (known POSITIVE) | 0.2632 |
+   | `hamer_fj2_detbox_preds` (known NEGATIVE) | 0.1817 |
+   | `wilor_detbox_truefocal_preds` | 0.0345 |
+   | `wilor_native_truefocal_preds` | 0.1752 |
+
+   Separates in the right direction but by only 0.08, and the positive's own IoU is low. The
+   WiLoR outlier at 0.0345 is very likely a **confound**: the "truefocal" rescaling changes
+   predicted depth and hence projected extent, so IoU is not comparable across truefocal and
+   non-truefocal dirs.
+
+**Not determinable by inspection.** Resolve by regenerating the row from a known box source
+(`build_native_baseline_preds --box_dir hoi4d_detboxes_v3` -> compose -> score 30/30), which now
+stamps provenance automatically. Until then the 43.7 cell is box-source **unconfirmed**.
+
+**The lesson that generalises:** every one of these tests was only trustworthy because it was run
+on a known positive AND a known negative first. Two of the three were silently backwards and would
+have produced a confident wrong answer without controls.
+
+### Original note, superseded by the above
+
 
 `wilor_slam_detbox_preds` comes from `wilor_detbox_truefocal_preds`. WiLoR has BOTH a `native` and
 a `detbox` variant, which suggests `detbox` = ours there - but that is an inference from naming,
