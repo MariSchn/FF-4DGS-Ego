@@ -145,6 +145,24 @@ def main():
         st = torch.tensor(scales_tr)
         tr = (f" | ORACLE traj rescale applied to {len(scales_tr)} seqs, "
               f"s median {float(st.median()):.4f} min {float(st.min()):.4f} max {float(st.max()):.4f}")
+    # Record what this composition actually is. The output is a SLAM-composed world track, which
+    # is what makes it comparable with the other table rows; the sibling per-frame dirs carry a
+    # GT-extrinsics lift instead and are oracles. Those two were indistinguishable except by
+    # directory name until 2026-08-06 (task #67). Box source is inherited from the cam preds when
+    # they carry their own record, since this script never sees the boxes.
+    from scripts.pred_provenance import TRAJ_SLAM, read_provenance, write_provenance
+    _cam_prov = read_provenance(a.cam_pred_dir) or {}
+    write_provenance(
+        a.out_dir,
+        box_source=_cam_prov.get("box_source", f"INHERITED_UNRECORDED_FROM:{a.cam_pred_dir}"),
+        trajectory_source=TRAJ_SLAM,
+        produced_by="scripts/build_slam_baseline.py",
+        n_seqs=n_ok,
+        cam_pred_dir=a.cam_pred_dir,
+        slam_pred_dir=a.slam_pred_dir,
+        max_se3_residual_mm=round(worst_res * 1000.0, 4),
+        oracle_traj_rescale=bool(scales_tr),
+    )
     print(f"BUILD_SLAM_BASELINE_DONE wrote {n_ok}/{len(common)} seqs -> {a.out_dir} "
           f"(max SE3 residual {worst_res*1000:.3f} mm){tr}", flush=True)
 

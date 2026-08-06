@@ -109,6 +109,24 @@ def main():
         torch.save(pred, os.path.join(args.pred_dir, seq + ".pt"))
         n_seq += 1
         print(f"[{n_seq}] {seq}: {n_hit}/{n_frames} frames converted", flush=True)
+    # THE world_joints HERE ARE AN ORACLE, and that must be recorded as data, not left implied by
+    # a docstring. hoi4d_to_haptic.py injects HOI4D GT extrinsics as cTw, so wJoints is a
+    # GT-camera lift, not a tracked trajectory. The resulting dir scores BETTER on W/WA than the
+    # honest SLAM composition of the same hands (measured 2026-08-06: 27.1/23.3 here vs 42.5/35.7
+    # composed), and it was already wired into a seg100 table under a "+SLAM" label because
+    # nothing in the artifact said otherwise (task #67).
+    from scripts.pred_provenance import TRAJ_GT_ORACLE, write_provenance
+    write_provenance(
+        args.pred_dir,
+        box_source=f"SET_BY_hoi4d_to_haptic.py_--box_dir (not visible here); haptic_out={args.haptic_out}",
+        trajectory_source=TRAJ_GT_ORACLE,
+        produced_by="scripts/haptic_to_worldeval.py",
+        n_seqs=n_seq,
+        warning=("world_joints use HOI4D GROUND-TRUTH extrinsics injected by hoi4d_to_haptic.py. "
+                 "Camera-frame metrics (C_MPJPE, C_MPJPE_abs) are honest; W-MPJPE and WA-MPJPE "
+                 "from this directory are ORACLE numbers. To get a comparable world row, compose "
+                 "these cam preds with a real trajectory via scripts/build_slam_baseline.py."),
+    )
     print(f"HAPTIC_CONVERT_DONE seqs={n_seq} -> {args.pred_dir}")
     if n_seq == 0:
         print("WARN: no sequences matched; check --haptic_out layout (use --dump_keys)")

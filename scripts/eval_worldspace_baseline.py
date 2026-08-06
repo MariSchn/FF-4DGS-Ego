@@ -219,9 +219,15 @@ def main():
     # Stamp the protocol so the artifact records its own hand set and window. The hand set in
     # particular was previously implicit (world = both hands, C = right only) and that asymmetry
     # went unnoticed for a long time.
+    # pred_dir alone is only a NAME. It cannot say which box store the crops came from or which
+    # trajectory was composed in, and those are exactly the two axes that produced three separate
+    # defects on 2026-08-06 (tasks #65/#67/#68). Copy the producer's own record in, and shout when
+    # it is absent or marks a GT-oracle trajectory.
+    from scripts.pred_provenance import describe_or_warn
     protocol = {"segment_len": args.segment_len, "wa_short": args.wa_short,
                 "hands": args.hands, "drop_partial_tail": bool(args.drop_partial_tail),
-                "pred_dir": args.pred_dir, "data_root": args.data_root}
+                "pred_dir": args.pred_dir, "data_root": args.data_root,
+                "pred_provenance": describe_or_warn(args.pred_dir)}
     json.dump({"protocol": protocol, "aggregate": agg, "per_segment": results,
                "per_seq_c": seq_c_rows},
               open(args.out, "w"), indent=2)
