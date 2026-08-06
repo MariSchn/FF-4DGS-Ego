@@ -44,10 +44,30 @@ import torch
 RH = 1   # right hand slot (HOI4D convention, matches hand_data caches + eval_worldspace_baseline)
 J = 16   # smplx kinematic joints per hand
 
-# WiLoR/HaMeR emit MANO-21 (native order, tips interleaved 4,8,12,16,20). The eval + our GT
-# use the 16 smplx kinematic joints. This subset is copied VERBATIM from run_wilor_h2o.py /
-# eval_cmpjpe.py so the joint correspondence is identical to every other row.
-MANO21_TO_16 = [0, 1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15, 17, 18, 19]
+# WiLoR/HaMeR emit MANO-21 (native order, tips interleaved 4,8,12,16,20). Tips at 4/8/12/16/20
+# means five 4-slot finger blocks in source order thumb, index, middle, ring, pinky. Our GT and
+# every other row are smplx-16: wrist, index, middle, pinky, ring, thumb. The reorder is therefore
+# NOT the identity on the non-tip slots.
+#
+# BUG FIX 2026-08-06. This was [0, 1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15, 17, 18, 19], i.e. the
+# non-tip slots in SOURCE order, while the comment claimed it was "copied VERBATIM from
+# eval_cmpjpe.py". Same index SET, different order, so no shape or range check could catch it: a
+# perfect prediction scored ~53 mm root-relative through it, and the repo's own anatomical
+# bone-length gate flagged 2 of 16 slots. Every <seq>.pt written by this script BEFORE this date
+# has permuted finger blocks and must be rebuilt before its numbers are used.
+MANO21_TO_16 = [0, 5, 6, 7, 9, 10, 11, 17, 18, 19, 13, 14, 15, 1, 2, 3]
+
+# Tripwire against the canonical definition, which consumes the SAME OpenPose-21 layout. A local
+# copy of a constant cannot detect drift in the original, so import the original.
+try:
+    from scripts.haptic_to_worldeval import OP2SMPLX16 as _CANON_OP2SMPLX16
+except ImportError:
+    _CANON_OP2SMPLX16 = None
+if _CANON_OP2SMPLX16 is not None and list(MANO21_TO_16) != list(_CANON_OP2SMPLX16):
+    raise RuntimeError(
+        "native-baseline joint remap drifted from the canonical smplx-16 order:\n"
+        f"  build_native_baseline_preds.MANO21_TO_16 = {list(MANO21_TO_16)}\n"
+        f"  haptic_to_worldeval.OP2SMPLX16           = {list(_CANON_OP2SMPLX16)}")
 
 
 def cam_t_with_focal(pred_cam, box_center, box_size, img_w, img_h, focal):

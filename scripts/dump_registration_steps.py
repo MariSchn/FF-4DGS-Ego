@@ -27,7 +27,6 @@ import argparse
 
 import torch
 import yaml
-from torch.utils.data import DataLoader
 
 from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
 from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
@@ -90,29 +89,40 @@ def main() -> None:
     seq = seqs[args.seq_index]
     print(f"sequence: {seq}")
 
-    ds = HOT3DHandDataset([seq], mano_model, num_frames=num_frames, res=res,
+    # Index the dataset DIRECTLY and unsqueeze, exactly as scripts/eval_world_space.py:742-760
+    # does. An earlier version wrapped this in a DataLoader(num_workers=0) and the job blocked
+    # indefinitely on the first batch with zero CPU time, so the proven access pattern is used
+    # verbatim rather than re-derived.
+    ds = HOT3DHandDataset([seq], mano_model, num_frames=num_frames,
                           clip_stride=data_cfg.get("clip_stride", num_frames),
                           use_hand_crop=model_cfg.get("use_hand_crop", False),
-                          rescale_factor=cfg.get("hand_crop", {}).get("rescale_factor", 2.0))
-    loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0)
+                          rescale_factor=cfg.get("hand_crop", {}).get("rescale_factor", 1.5))
+    if len(ds) == 0:
+        raise SystemExit(f"dataset empty for {seq}")
+    print(f"clips available: {len(ds)}", flush=True)
 
     panel, all_ratios = None, []
     with torch.no_grad():
-        for i, batch in enumerate(loader):
-            if i >= args.n_clips:
-                break
+        for i in range(min(args.n_clips, len(ds))):
+            print(f"  [clip {i}] loading", flush=True)
+            batch = ds[i]
             if "cam_intrinsics" not in batch:
+                print(f"  [clip {i}] no cam_intrinsics, skipping", flush=True)
                 continue
-            imgs = batch["img"].to(device)
-            hb = batch["hand_bboxes"].to(device) if "hand_bboxes" in batch else None
-            hv = batch["hand_valid"].to(device) if "hand_valid" in batch else None
+            imgs = batch["img"].unsqueeze(0).to(device)
+            hb = batch["hand_bboxes"].unsqueeze(0).to(device) if "hand_bboxes" in batch else None
+            hv = batch["hand_valid"].unsqueeze(0).to(device) if "hand_valid" in batch else None
+            print(f"  [clip {i}] forward", flush=True)
+            # is_inference=True, matching eval_world_space.py:762. With False the forward takes
+            # the training path including the Gaussian rasterization, which hangs indefinitely on
+            # the gb10 node (two jobs blocked there with zero CPU time before this was found).
             preds = model(build_views(imgs, num_frames, device, hb, hv),
-                          is_inference=False, use_motion=False)
+                          is_inference=True, use_motion=False)
 
             gs_depth = preds.get("gs_depth")
             if gs_depth is None:
                 raise SystemExit("no gs_depth in preds")
-            cam_intr = batch["cam_intrinsics"].to(device)
+            cam_intr = batch["cam_intrinsics"].unsqueeze(0).to(device)
             pj = compute_joints_from_batch(preds["hand_joints"], mano_model, device)
 
             grid_xy, z = project_joints_to_norm_pixels(pj, cam_intr)

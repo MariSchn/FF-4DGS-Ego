@@ -44,8 +44,13 @@ def _xy_for_norm(u_norm: float, v_norm: float, z: float) -> tuple[float, float]:
     """Camera-frame (x, y) placing a joint at normalised (u_norm, v_norm) at depth z."""
     W = IMAGE_WIDTH
     f, cx, cy = W, W / 2.0, W / 2.0
-    col = v_norm * W                      # v = col
-    row = (W - 1.0) - u_norm * W          # u = (W-1) - row
+    # Inverse of the projection INCLUDING the pixel-centre offset: the forward emits
+    # grid = (pixel + 0.5)/W, because grid_sample(align_corners=False) reads pixel
+    # p = grid*W - 0.5. Inverting without the +0.5 (as this helper did until 2026-08-06)
+    # bakes a half-pixel error into every expectation and makes the tests agree with
+    # whatever the code happens to do rather than with the sampler's contract.
+    col = v_norm * W - 0.5                # v = (col + 0.5)/W
+    row = (W - 1.0) - (u_norm * W - 0.5)  # u = ((W-1) - row + 0.5)/W
     return (col - cx) * z / f, (row - cy) * z / f
 
 
@@ -153,7 +158,11 @@ def test_centre_joint_maps_to_centre_at_any_store_resolution():
         u, v = float(grid_xy[..., 0]), float(grid_xy[..., 1])
         # u = ((W-1) - cy)/W = 0.5 - 1/W, v = cx/W = 0.5
         assert abs(u - 0.5) < 2.0 / res, f"res={res}: u={u:.4f} not centred"
-        assert abs(v - 0.5) < 1e-12, f"res={res}: v={v:.4f} not centred"
+        # NOT exactly 0.5. With cx = res/2 the optical axis sits at the CENTRE OF PIXEL cx
+        # under the integer-centred convention, which is half a pixel right of the frame's
+        # true centre at (res-1)/2. The sampler needs (cx + 0.5)/res to land on it.
+        expect_v = (res / 2.0 + 0.5) / res
+        assert abs(v - expect_v) < 1e-12, f"res={res}: v={v:.6f} != {expect_v:.6f}"
 
 
 def test_normalisation_width_is_derived_not_hardcoded():
@@ -173,7 +182,8 @@ def test_explicit_image_width_still_overrides():
     grid_a, _ = project_joints_to_norm_pixels(joints, _cam_intr_at(224.0), image_width=1408.0)
     grid_b, _ = project_joints_to_norm_pixels(joints, _cam_intr_at(224.0))
     assert not torch.allclose(grid_a, grid_b)
-    assert abs(float(grid_a[..., 1]) - 112.0 / 1408.0) < 1e-12
+    # (col + 0.5)/W, the pixel-centre form the sampler requires; see _xy_for_norm.
+    assert abs(float(grid_a[..., 1]) - (112.0 + 0.5) / 1408.0) < 1e-12
 
 
 def test_degenerate_principal_point_is_rejected_not_silently_defaulted():

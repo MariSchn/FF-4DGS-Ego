@@ -5,11 +5,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torch_scatter import scatter_sum
+try:
+    from torch_scatter import scatter_sum
+except (ImportError, ModuleNotFoundError):
+    scatter_sum = None  # compiled ext; only used by GS rendering (enable_gs). Optional otherwise.
 from einops import rearrange
 
-from gsplat.rendering import rasterization
-from gsplat.strategy import DefaultStrategy
+try:
+    from gsplat.rendering import rasterization
+    from gsplat.strategy import DefaultStrategy
+except (ImportError, ModuleNotFoundError):
+    rasterization = None  # compiled CUDA ext; only used by GS rendering. Optional otherwise.
+    DefaultStrategy = None
 
 from ..utils.frustum import calculate_unprojected_mask
 from ..utils.geometry import depth_to_world_coords_points, closed_form_inverse_se3, project_world_points_to_image

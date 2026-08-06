@@ -1767,7 +1767,12 @@ def _check_loss_effect(loss_weights: dict, avg_terms: dict, step: int,
         if float(weight) == 0.0:
             continue                                  # deliberately disabled, nothing to check
         if name not in avg_terms:
-            continue                                  # term is not tracked in avg_terms at all
+            # NOT a free pass. If a loss carries weight but is never accumulated, the check
+            # cannot see it and silently reports PASSED - which is exactly how root_anchor
+            # stayed unverified in five shipped configs. Treat it as a failure of the guard.
+            dead.append(f"{name} (weight={weight}) is NEVER ACCUMULATED into avg_terms, so "
+                        f"whether it fires is unknowable - add it where the other terms are summed")
+            continue
         if abs(float(avg_terms[name])) <= 0.0:
             dead.append(f"{name} (weight={weight}) contributed EXACTLY 0.0")
 
@@ -2490,6 +2495,7 @@ def train():
             "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
             "scale_head": 0.0, "scale_residual_m": 0.0,
             "hand_scene_registration": 0.0, "registration_residual_m": 0.0,
+            "root_anchor": 0.0,
         }
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
@@ -2856,6 +2862,7 @@ def train():
             accum_terms["scale_residual_m"] += scale_residual_m
             accum_terms["hand_scene_registration"] += loss_hand_scene_reg.item()
             accum_terms["registration_residual_m"] += reg_residual_m
+            accum_terms["root_anchor"] += loss_root_anchor.item()
 
             if (batch_idx + 1) % grad_accum_steps == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=grad_clip_norm)
@@ -2886,6 +2893,7 @@ def train():
                     "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
                     "scale_head": 0.0, "scale_residual_m": 0.0,
                     "hand_scene_registration": 0.0, "registration_residual_m": 0.0,
+                    "root_anchor": 0.0,
                 }
                 global_step += 1
                 if max_steps and global_step >= max_steps:

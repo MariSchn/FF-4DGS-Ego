@@ -66,7 +66,18 @@ def object_depth_loss(
             ys, xs = torch.where(m)
             od = gt_obj_depth[b, s][ys, xs].to(device)
             # Normalized [0,1] grid at the valid object pixels, sampled differentiably.
-            grid = torch.stack([xs.float() / R, ys.float() / R], dim=-1)
+            #
+            # BUG FIX 2026-08-06. This was `stack([xs/R, ys/R])`, i.e. plain (col, row), while
+            # every other consumer of gs_depth goes through project_joints_to_norm_pixels, whose
+            # convention is [u, v] = [(W-1)-row, col] / W. The two read the SAME tensor at
+            # DIFFERENT pixels for the same 3D point - measured 189 mm apart - so this loss pulled
+            # gs_depth where the metric-scale solve never looks. Build the helper's grid instead.
+            # +0.5 is the pixel-centre offset the sampler requires, identical to the form in
+            # project_joints_to_norm_pixels. Both terms must match or the two paths read the
+            # same tensor half a pixel apart.
+            u = (((R - 1.0) - ys.float()) + 0.5) / R  # width axis, matches hand_depth_sampling
+            v = (xs.float() + 0.5) / R                # height axis
+            grid = torch.stack([u, v], dim=-1)
             grid = grid.view(1, 1, 1, -1, 2).to(device)
             gs_at, in_fr = sample_depth_at_joints(gs_depth[b : b + 1, s : s + 1], grid)
             gs_at = gs_at.reshape(-1)

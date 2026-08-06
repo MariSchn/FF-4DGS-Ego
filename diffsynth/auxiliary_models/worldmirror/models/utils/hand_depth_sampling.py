@@ -49,26 +49,46 @@ rotation is a pipeline-wide locked convention rather than a sensor property.
 """
 from __future__ import annotations
 
+import warnings
+
 import torch
 import torch.nn.functional as F
 
 IMAGE_WIDTH: float = 1408.0  # square Aria RGB frame; ONLY a fallback, see note above
+_OFFCENTRE_TOL_PX: float = 1.0   # how far 2*cx and 2*cy may disagree before the
+                                 # centred-principal-point assumption is unsafe
+_warned: dict[str, bool] = {"offcentre": False}
 Z_MIN: float = 0.05          # 5 cm clamp on projection depth; train_hand_head.py:1304
 
 
 def frame_width_from_intr(cam_intr: torch.Tensor) -> torch.Tensor:
-    """Recover the pixel-frame width that ``cam_intr`` is expressed in, as ``2 * cx``.
+    """LAST-RESORT estimate of the pixel-frame width, as ``2 * cx``.
 
-    The pipeline's intrinsics are square-pinhole with the principal point at the frame
-    centre (`preprocess_hoi4d.load_intrinsics`, `eval_world_space._intr_3x3`), so the
-    width is recoverable from the intrinsics themselves and never has to be assumed.
+    This is ONLY valid when the principal point sits at the frame centre, and that is not
+    true of every store we train and evaluate on. HOI4D ships
+    ``[f, cx, cy] = [219.92, 114.28, 108.52]`` for a frame that is really 224x224, so
+    ``2*cx = 228.56`` overestimates the width by 2.0% while ``2*cy = 217.04`` disagrees with
+    it by 11.5 px. The width is then NOT recoverable from the intrinsics alone.
+
+    Prefer passing ``image_width`` explicitly. This function warns once when the intrinsics
+    themselves show the assumption is unsafe.
 
     Args:
         cam_intr: [B, 3] = [focal, cx, cy].
     Returns:
-        [B] frame widths in pixels.
+        [B] frame widths in pixels, estimated as ``2 * cx``.
     """
-    return 2.0 * cam_intr[:, 1]
+    w_x = 2.0 * cam_intr[:, 1]
+    w_y = 2.0 * cam_intr[:, 2]
+    if bool((w_x - w_y).abs().max() > _OFFCENTRE_TOL_PX) and not _warned["offcentre"]:
+        _warned["offcentre"] = True
+        warnings.warn(
+            f"frame_width_from_intr: the principal point is NOT centred "
+            f"(2*cx={float(w_x.reshape(-1)[0]):.2f} vs 2*cy={float(w_y.reshape(-1)[0]):.2f}). "
+            "The frame width cannot be derived from the intrinsics alone; pass image_width "
+            "explicitly or every depth sample lands off-pixel.",
+            RuntimeWarning, stacklevel=2)
+    return w_x
 
 
 def project_joints_to_norm_pixels(
@@ -119,7 +139,12 @@ def project_joints_to_norm_pixels(
     u = (W - 1.0) - row  # width axis
     v = col              # height axis
 
-    grid_xy = torch.stack([u, v], dim=-1) / W.unsqueeze(-1)  # [B, S, H, J, 2] in [0, 1]
+    # The +0.5 is the pixel-CENTRE offset, not a fudge. sample_depth_at_joints maps x in
+    # [0,1] to g = 2x-1 and calls grid_sample(align_corners=False), which reads pixel
+    # p = x*W - 0.5, so landing on the centre of pixel k requires x = (k + 0.5)/W. Without it
+    # every sample sat half a pixel off, and pushing identical prediction and ground truth
+    # through the object-depth path returned a non-zero residual.
+    grid_xy = (torch.stack([u, v], dim=-1) + 0.5) / W.unsqueeze(-1)  # [B, S, H, J, 2] in [0, 1]
     return grid_xy, pred_joints[..., 2]
 
 
