@@ -95,6 +95,7 @@ def project_joints_to_norm_pixels(
     pred_joints: torch.Tensor,
     cam_intr: torch.Tensor,
     image_width: float | None = None,
+    rotated: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Project camera-frame joints to normalised (x=width, y=height) pixels.
 
@@ -136,8 +137,18 @@ def project_joints_to_norm_pixels(
 
     col = f * x / z + cx
     row = f * y / z + cy
-    u = (W - 1.0) - row  # width axis
-    v = col              # height axis
+    if rotated:
+        # gs_depth is stored 90-degree rotated relative to the image; this is the convention
+        # every predicted-depth consumer uses.
+        u = (W - 1.0) - row  # width axis
+        v = col              # height axis
+    else:
+        # UNROTATED, for depth maps stored in plain image layout [row, col] - e.g. the raw
+        # HOI4D GT depth that build_contact_cache writes (imread -> centre crop -> resize, no
+        # rotation anywhere). Sampling those with the rotated grid reads an unrelated part of
+        # the frame: measured 438 mm of error against a 50 mm contact threshold.
+        u = col              # width axis
+        v = row              # height axis
 
     # The +0.5 is the pixel-CENTRE offset, not a fudge. sample_depth_at_joints maps x in
     # [0,1] to g = 2x-1 and calls grid_sample(align_corners=False), which reads pixel

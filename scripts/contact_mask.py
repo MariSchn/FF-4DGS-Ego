@@ -32,6 +32,11 @@ def is_contact(wrist_z, dense_at_wrist, in_frame, thresh_m: float = 0.05):
 def wrist_contact_mask(wrist_cam, dense_depth, cam_intr, thresh_m: float = 0.05):
     """wrist_cam [B,S,2,3] camera-frame GT wrist (m); dense_depth [B,S,1,H,W] GT
     metric depth; cam_intr [B,3] = [focal, cx, cy]. Returns contact bool [B,S,2]."""
-    grid_xy, z = project_joints_to_norm_pixels(wrist_cam.unsqueeze(3), cam_intr)  # [B,S,2,1,2],[B,S,2,1]
+    # rotated=False: dense_depth here is GT depth in plain image layout (build_contact_cache
+    # does imread -> centre crop -> resize and never rotates), NOT the rotated gs_depth every
+    # other caller passes. With the rotated grid this gate sampled an unrelated pixel and was
+    # deciding "wrist on the surface" from 438 mm of error against a 50 mm threshold.
+    grid_xy, z = project_joints_to_norm_pixels(
+        wrist_cam.unsqueeze(3), cam_intr, rotated=False)                          # [B,S,2,1,2],[B,S,2,1]
     d, in_frame = sample_depth_at_joints(dense_depth, grid_xy)                    # [B,S,2,1]
     return is_contact(z[..., 0], d[..., 0], in_frame[..., 0], thresh_m)

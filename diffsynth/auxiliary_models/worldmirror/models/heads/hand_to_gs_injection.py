@@ -102,25 +102,42 @@ class HandToGSInjection(nn.Module):
 
                     x1n, y1n, x2n, y2n = bboxes[n, h].detach().tolist()
 
-                    x1 = max(0, min(w_i, int(round(x1n * w_i))))
-                    y1 = max(0, min(h_i, int(round(y1n * h_i))))
-                    x2 = max(0, min(w_i, int(round(x2n * w_i))))
-                    y2 = max(0, min(h_i, int(round(y2n * h_i))))
+                    # Boxes are deliberately UNCLAMPED (hawor_boxes_from_detbox.py:32-34) and
+                    # the crop tokens come from roi_align over that unclamped ROI. Resize to the
+                    # box's FULL extent first, then take the visible sub-rectangle.
+                    #
+                    # BUG FIX 2026-08-06. This used to clamp x1/y1/x2/y2 into the frame and then
+                    # resize the whole crop_size x crop_size token grid into the CLAMPED
+                    # rectangle, which SQUEEZES the crop instead of cropping it: a box with its
+                    # left half off-frame injected byte-identical content to a box half its
+                    # width, so hand features landed at the wrong pixels. Partially out-of-frame
+                    # hands are the common case in egocentric video, not an edge case.
+                    x1u = int(round(x1n * w_i))
+                    y1u = int(round(y1n * h_i))
+                    x2u = int(round(x2n * w_i))
+                    y2u = int(round(y2n * h_i))
 
-                    bw = x2 - x1
-                    bh = y2 - y1
-                    if bw <= 0 or bh <= 0:
+                    bw_u = x2u - x1u
+                    bh_u = y2u - y1u
+                    if bw_u <= 0 or bh_u <= 0:
                         continue
 
                     resized = F.interpolate(
                         projected[idx:idx + 1],
-                        size=(bh, bw),
+                        size=(bh_u, bw_u),
                         mode="bilinear",
                         align_corners=False,
-                    )  # [1, gs_dims[i], bh, bw]
+                    )  # [1, gs_dims[i], bh_u, bw_u] at the box's true extent
+
+                    # visible window in frame coords, and the matching window inside `resized`
+                    x1 = max(0, x1u); x2 = min(w_i, x2u)
+                    y1 = max(0, y1u); y2 = min(h_i, y2u)
+                    if x2 - x1 <= 0 or y2 - y1 <= 0:
+                        continue                      # box lies entirely outside the frame
 
                     out_i[n, :, y1:y2, x1:x2] = (
-                        out_i[n, :, y1:y2, x1:x2] + resized.squeeze(0)
+                        out_i[n, :, y1:y2, x1:x2]
+                        + resized.squeeze(0)[:, y1 - y1u:y2 - y1u, x1 - x1u:x2 - x1u]
                     )
 
             feats_out.append(out_i)
