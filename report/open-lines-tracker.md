@@ -1,5 +1,77 @@
 # Open Lines Tracker
 
+## 2026-08-06 (evening) - the scale is 42% too small, and the cause is one-sided
+
+### The measurement that reframes task #63
+
+`ours_fix59_seg30.json`, 1884 segments, against the GT camera scale the eval already computes:
+
+| quantity | value |
+|---|---|
+| `s_gt` median (true camera scale) | **1.0230** |
+| `s_hand` median (what we solve) | **0.6208** |
+| ratio hand/GT | **0.578** |
+| on the 0.1 clamp floor | 296/1884 = 15.7% |
+
+**#63 was filed as "16% of segments clamp to 0.1". That is the symptom.** The whole distribution
+is biased low: on geo59 the population `s_med` median is 0.644 and the **maximum over 152 segments
+is 0.982**, so we never reach the truth even from above. (Caveat: only 12 of 1884 segments carry
+GT extrinsics, so the ratio is directionally solid, not tight.)
+
+This is first-order, not a tail issue. `s` multiplies the camera **translation** only, and the W
+decomposition names translation as the dominant lever (lw60: GT translation −47.8 mm vs GT
+rotation −18.8 mm, jointly −93.0 mm). Our seg128 W is 200.9 against a GT-trajectory oracle of
+61.5.
+
+### Where the bias comes from, and why it is one-sided
+
+Not the hand: C-MPJPE absolute is ~36 mm at ~0.7 m, about 5%, nowhere near 42%. So `d_scene` at
+the sampled pixels reads roughly **1.7x too far**.
+
+At a hand joint's pixel the nearest visible surface **is** the hand. So any misregistration,
+sub-pixel error, or silhouette blur in the predicted depth blends in **background**, which is
+strictly **farther**. `d_scene` can be pushed up and essentially never down, so `s = z/d` is
+biased **down**. A hand at 0.5 m against background at 0.85 m gives a ratio of 1.7 - the size we
+measure.
+
+**Under one-sided contamination the correct estimator is a low-order statistic, not the mean-like
+bilinear blend.** That is a statement about the noise model, not a tuning knob.
+
+### Implemented, both OFF by default
+
+- **H1** `--require_positive_z` - behind-camera joints (the projection clamps depth to
+  `Z_MIN`=5 cm but returns the RAW depth, so such a joint lands at a plausible in-frame pixel and
+  contributes a negative ratio the median eats).
+- **H2** `--scene_depth_window 3 --scene_depth_reduce min` - one-sided contamination.
+
+`sample_depth_at_joints` gained `window=`/`reduce=`, sampling a KxK neighbourhood in normalised
+units so it stays resolution-independent. `"mean"` is deliberately **not** offered: averaging
+re-introduces exactly the blend this exists to remove.
+
+12 new tests pin both mechanisms on synthetic maps with exact truth, including a **no-op test on
+flat depth**, so a "fix" that merely always reports something nearer would fail rather than pass.
+
+### The 2x2 (job 104353, 30 matched sequences, seg30)
+
+Only H2 predicts the **size** of the bias; H1 predicts the clamp tail. They are not exclusive,
+hence a 2x2 rather than a shootout.
+
+**Adopt only if** W-MPJPE goes down (primary, all segments) **and** `scale_ratio_med` moves toward
+1.0 (corroboration) **and** `C_abs`/`C_rr` do **not** move - those are camera-frame and cannot
+depend on the scene scale, so if they shift the arm is void and the readout prints VOID
+automatically. A lower clamp rate alone is not success: excluding joints shrinks the population.
+**If nothing moves W**, the scale is not the binding term and the camera head (#38/#39) is next.
+
+### Settled on the side: the Fast3R index pool is NOT needed
+
+`visual_transformer.py:505-524` - `cam_token`/`reg_token` have shape `(1, 2, X, C)`: position 0
+for frame 0, position 1 shared by **every** remaining frame. There is no per-frame positional
+encoding along the frame axis at all, so the model is permutation-equivariant across frames 2..S.
+Fast3R needs the index pool because it *has* index embeddings trained only over 0..19; we have
+nothing that can go out of range. Task #48 drops to the random frame count alone, which is already
+implemented. No architecture work owed.
+
+
 ## 2026-08-06 (later) - the #59 geometry fix did NOT close #63; a behind-camera hole in the scale mask is the new suspect
 
 ### MEASURED, not inferred
