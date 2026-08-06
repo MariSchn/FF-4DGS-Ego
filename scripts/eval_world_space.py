@@ -171,13 +171,21 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
 
     ratios = torch.empty(0)
     s = 1.0
+    s_failed = False
     if gs_depth is not None and cam_intr is not None:
         grid_xy, z = project_joints_to_norm_pixels(pred_joints, cam_intr.to(device))
         sampled, in_frame = sample_depth_at_joints(gs_depth, grid_xy)
         valid = in_frame & (sampled > 0.01) & torch.isfinite(z) & torch.isfinite(sampled)
         if bool(valid.any()):
             ratios = (z / sampled)[valid].detach().float().cpu()    # [n_valid] z_hand/scene_depth
-            s = float(ratios.median().clamp(0.1, 10.0))
+            _s_raw = float(ratios.median())
+            s = float(min(max(_s_raw, 0.1), 10.0))
+            # A solved scale sitting exactly on a clamp bound is not an estimate, it is the
+            # bound. The true camera-centre scale on this data is ~1.0, so 0.1 or 10.0 means the
+            # solve FAILED for this clip. Measured over 1884 segments: 15.7% land on the floor,
+            # in the median case with EVERY clip of the segment at the bound and zero variance.
+            # Record it so the caller can decide, instead of returning the bound as a number.
+            s_failed = (_s_raw < 0.1) or (_s_raw > 10.0)
 
     # Contact Phase 1: post-hoc root-depth correction. Applied AFTER the scene-scale
     # solve (so the scene scale stays an independent property, no anchor->scale
@@ -215,7 +223,7 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
                 "dz_max_m": float(_dz.abs().max()),
                 "disagree_gated_m": disagree_gated,
             })
-    return pred_joints[0].float().cpu(), c2w.cpu(), s, ratios
+    return pred_joints[0].float().cpu(), c2w.cpu(), s, ratios, s_failed
 
 
 def _dense_scene_points(preds, cam_intr, pj_cam, s_clip, grid=24, hand_radius_m=0.15):
@@ -284,7 +292,7 @@ def _intr_3x3(cam_intr, res, device):
 def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len, stride, wa_short,
                   max_segs=0, feed_intrinsics=False, smooth_windows=None, dump_list=None,
                   refine_pose=False, refine_iters=40, refine_lr=3e-3, refine_frame_stride=1,
-                  refine_sanity=False, robust_scale=False,
+                  refine_sanity=False, robust_scale=False, scale_fallback="clamp",
                   da3_wrist_cache_dir=None, contact_cache_dir=None, contact_gate="off",
                   oracle_depth=False, dense_link=False,
                   gravity_oracle=False, gravity_axis=(0.0, 1.0, 0.0), dump_cam_dir=None,
@@ -497,10 +505,10 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         # robust median of the per-clip scalars. per-seq POOLED = ONE median over EVERY valid
         # (z_hand / scene_depth) correspondence in the whole sequence -> the principled
         # sequence-level solve (every joint votes once, robust to clips with few valid joints).
-        scales = torch.tensor([s for (_, _, s, _) in clip_cams], dtype=torch.float32)
+        scales = torch.tensor([s for (_, _, s, _, _) in clip_cams], dtype=torch.float32)
         s_med = float(scales.median())
         s_std = float(scales.std()) if scales.numel() > 1 else 0.0
-        pooled = [r for (_, _, _, r) in clip_cams if r.numel()]
+        pooled = [r for (_, _, _, r, _) in clip_cams if r.numel()]
         all_ratios = torch.cat(pooled) if pooled else torch.empty(0)
         if robust_scale and all_ratios.numel():
             # MAD outlier rejection before the median: the W-decomposition flagged the pooled
@@ -523,9 +531,26 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             print(f"  !! SCALE DEGENERATE (s=1.0, no gs_depth correspondences) - world/W metrics "
                   f"are NOT metric. Set model.enable_gs=True in the eval config.", flush=True)
 
-        worlds_pc = [_world_from_cam(pj, c2w, s) for (pj, c2w, s, _) in clip_cams]       # per-clip
-        worlds_md = [_world_from_cam(pj, c2w, s_med) for (pj, c2w, _, _) in clip_cams]   # per-seq median
-        worlds_pl = [_world_from_cam(pj, c2w, s_pool) for (pj, c2w, _, _) in clip_cams]  # per-seq pooled
+        # --- SCALE-SOLVE FALLBACK (task #63) ---------------------------------------------
+        # 15.7% of segments have a per-clip solve that lands exactly on a clamp bound, which is
+        # the bound rather than an estimate, and because the reported aggregate is a MEAN those
+        # segments drag every world number. `pooled` substitutes the sequence-pooled scale for
+        # the failed clips only; `clamp` keeps the historical behaviour. The rate is reported
+        # either way so the failure can never be invisible again.
+        n_failed = sum(1 for (_, _, _, _, f) in clip_cams if f)
+        frac_failed = n_failed / max(len(clip_cams), 1)
+        if scale_fallback == "pooled" and n_failed:
+            clip_cams = [(pj, c2w, (s_pool if f else s), r, f)
+                         for (pj, c2w, s, r, f) in clip_cams]
+        if n_failed:
+            print(f"  [scale] {n_failed}/{len(clip_cams)} clips FAILED the solve "
+                  f"({100*frac_failed:.1f}%), policy={scale_fallback}"
+                  + (f" -> substituted s_pool={s_pool:.4f}" if scale_fallback == "pooled" else
+                     " -> kept at the clamp bound"), flush=True)
+
+        worlds_pc = [_world_from_cam(pj, c2w, s) for (pj, c2w, s, _, _) in clip_cams]       # per-clip
+        worlds_md = [_world_from_cam(pj, c2w, s_med) for (pj, c2w, _, _, _) in clip_cams]   # per-seq median
+        worlds_pl = [_world_from_cam(pj, c2w, s_pool) for (pj, c2w, _, _, _) in clip_cams]  # per-seq pooled
         g_pc = _greedy(worlds_pc)
         gl_pc = _global(worlds_pc)
         g_md = _greedy(worlds_md)
@@ -541,7 +566,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         # scale is c2w[k, :3, 3] * s_pool (exactly the translation _world_from_cam applies), so joints
         # and centres share the clip-local world frame. Reported as the "_link" suffix -> a direct
         # greedy(_spool)-vs-linker(_link) comparison at the same scene scale.
-        centers_pl = [c2w[:, :3, 3] * s_pool for (_, c2w, _, _) in clip_cams]
+        centers_pl = [c2w[:, :3, 3] * s_pool for (_, c2w, _, _, _) in clip_cams]
         gl_link = _linked(worlds_pl, centers_pl)      # linker WITH camera centres (needs reliable cam poses)
         gl_linkcf = _linked(worlds_pl, None)          # cross-fade only, NO centres (the safe variant)
         # RIGID linker variants (per_clip_scale=False): after the pooled scene scale, per-clip
@@ -583,7 +608,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         # trajectory / scene scale, not hand depth (depth anchoring won't move W).
         if oracle_depth and clip_oracle:
             worlds_or = [_world_from_cam(po, c2w, s_pool)
-                         for po, (_, c2w, _, _) in zip(clip_oracle, clip_cams)]
+                         for po, (_, c2w, _, _, _) in zip(clip_oracle, clip_cams)]
             m_or = _metrics(chain_trajectories_by_overlap(worlds_or, overlap=overlap))
             sm_rows["W_MPJPE_depthOracle"] = m_or["W_MPJPE"]
             sm_rows["WA_MPJPE_short_depthOracle"] = m_or["WA_MPJPE_short"]
@@ -816,6 +841,11 @@ def main():
     ap.add_argument("--refine_iters", type=int, default=40, help="pose-refine Adam iters per frame")
     ap.add_argument("--refine_lr", type=float, default=3e-3, help="pose-refine se3 learning rate")
     ap.add_argument("--refine_frame_stride", type=int, default=1, help="refine every Nth frame (speed)")
+    ap.add_argument("--scale_fallback", choices=["clamp", "pooled"], default="clamp",
+                    help="what to do when a clip's scale solve lands on a clamp bound (it failed): "
+                         "'clamp' keeps the bound (historical behaviour); 'pooled' substitutes the "
+                         "sequence-pooled scale for those clips only. The failure RATE is reported "
+                         "under both policies.")
     ap.add_argument("--robust_scale", action="store_true",
                     help="MAD-reject z_hand/scene_depth outliers before the per-seq pooled scale median")
     ap.add_argument("--da3_wrist_cache_dir", default=None,
@@ -953,6 +983,7 @@ def main():
                                      refine_pose=args.refine_pose, refine_iters=args.refine_iters,
                                      refine_lr=args.refine_lr, refine_frame_stride=args.refine_frame_stride,
                                      refine_sanity=args.refine_sanity, robust_scale=args.robust_scale,
+                                     scale_fallback=args.scale_fallback,
                                      da3_wrist_cache_dir=args.da3_wrist_cache_dir,
                                      contact_cache_dir=args.contact_cache_dir,
                                      contact_gate=args.contact_gate,
