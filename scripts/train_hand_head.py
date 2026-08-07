@@ -1993,6 +1993,9 @@ def train():
                     p.requires_grad = True
                     backbone_unfrozen.append(p)
         model._backbone_trainable = True
+        # Recorded so the optimizer can give these their own (lower) lr. Without a separate group
+        # they inherit the head's lr and the comparison measures the learning rate, not freezing.
+        model._unfrozen_backbone_params = backbone_unfrozen
         print(f"Partial unfreeze: last {unfreeze_n} frame+global blocks "
               f"({sum(p.numel() for p in backbone_unfrozen):,} params)")
 
@@ -2290,17 +2293,40 @@ def train():
     # warm-start lr starves it (|dz| stayed ~1mm in the 50-step probe). Give it its
     # own (higher) lr via a separate param group; defaults to base_lr if unset.
     anchor_lr = float(training_cfg.get("root_anchor_lr", base_lr))
+    # UNFROZEN BACKBONE BLOCKS NEED THEIR OWN, LOWER LR. Without this they inherit base_lr, which
+    # is tuned for a randomly-initialised head (1e-4) and is 10-100x the rate normally used to
+    # fine-tune a pretrained ViT. Job 9954605_1 ran that way and unfreezing one block LOOKED
+    # harmful (HOI4D C_abs 72.46 -> 79.60, C_rr 36.48 -> 48.11), but that is confounded: the
+    # standard way to destroy a pretrained backbone is to train it at the head's lr. A
+    # frozen-vs-unfrozen claim measured that way would not survive review.
+    backbone_lr = float(training_cfg.get("backbone_lr", base_lr))
+    backbone_params = [p for p in getattr(model, "_unfrozen_backbone_params", [])
+                       if p.requires_grad]
+    groups, seen = [], set()
+    if backbone_params and backbone_lr != base_lr:
+        seen |= {id(p) for p in backbone_params}
+        groups.append({"params": backbone_params, "lr": backbone_lr})
     if root_anchor_params and anchor_lr != base_lr:
-        anchor_ids = {id(p) for p in root_anchor_params}
-        base_group = [p for p in trainable_params if id(p) not in anchor_ids]
-        optimizer = Adam([
-            {"params": base_group, "lr": base_lr},
-            {"params": root_anchor_params, "lr": anchor_lr},
-        ], lr=base_lr)
-        print(f"Optimizer: base lr={base_lr:.2e} ({len(base_group)} tensors) | "
-              f"root_anchor lr={anchor_lr:.2e} ({len(root_anchor_params)} tensors)")
+        anchor_new = [p for p in root_anchor_params if id(p) not in seen]
+        seen |= {id(p) for p in anchor_new}
+        groups.append({"params": anchor_new, "lr": anchor_lr})
+    if groups:
+        rest = [p for p in trainable_params if id(p) not in seen]
+        optimizer = Adam([{"params": rest, "lr": base_lr}] + groups, lr=base_lr)
+        msg = f"Optimizer: base lr={base_lr:.2e} ({len(rest)} tensors)"
+        if backbone_params and backbone_lr != base_lr:
+            msg += f" | backbone lr={backbone_lr:.2e} ({len(backbone_params)} tensors)"
+        if root_anchor_params and anchor_lr != base_lr:
+            msg += f" | root_anchor lr={anchor_lr:.2e}"
+        print(msg, flush=True)
     else:
         optimizer = Adam(trainable_params, lr=base_lr)
+        if backbone_params:
+            # Loud, because this is the configuration that produced the confounded result.
+            print(f"  !! {len(backbone_params)} unfrozen BACKBONE tensors are training at the "
+                  f"head's lr={base_lr:.2e}. Set training.backbone_lr (e.g. 1e-5) or a "
+                  f"frozen-vs-unfrozen comparison measures the learning rate, not the freezing.",
+                  flush=True)
     scheduler  = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=float(training_cfg.get("min_lr", 1e-6)))
 
     log_every  = training_cfg.get("log_every", 500)
