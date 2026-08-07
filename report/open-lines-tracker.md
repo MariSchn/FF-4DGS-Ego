@@ -1,5 +1,61 @@
 # Open Lines Tracker
 
+## 2026-08-07 (result) - #63 CLOSED AS NULL, #70 real but not an accuracy lever
+
+Jobs 104381 + 104382, 30 matched HOI4D sequences, 360 segments, jitterrob, detbox v3. The win
+condition was written into the job BEFORE it ran, with W primary, precisely so that improved
+diagnostics could not be mistaken for success.
+
+| arm | W | dW | s_med | ratio/GT | floor% | C_abs | C_rr |
+|---|---|---|---|---|---|---|---|
+| base | 32.23 | | 0.603 | 0.551 | 19.2% | 32.16 | 21.02 |
+| z (#63 H1 behind-camera) | 32.33 | +0.10 | 0.633 | 0.588 | 16.9% | 32.16 | 21.02 |
+| win (#63 H2 win3-min) | 32.26 | +0.03 | 0.609 | 0.556 | 19.2% | 32.16 | 21.02 |
+| **hv (#70 hand gate)** | 32.44 | +0.21 | **0.772** | **0.668** | **0.0%** | 32.16 | 21.02 |
+| hv + win | 32.48 | +0.24 | 0.778 | 0.672 | 0.0% | 32.16 | 21.02 |
+
+C_abs and C_rr are bit-identical in all five. They are camera-frame and cannot depend on the scene
+scale, so any movement would have voided the arm. None moved.
+
+### The defect is real; the lever is not
+
+The hand gate moves `s_med` 0.603 -> 0.772, narrowing the gap to the true 1.023 from 41% to 25%,
+and removes **every** clamp-floor failure (19.2% -> 0.0%). A clamp-floor segment is a solve that
+failed and returned the bound as though it were an estimate, so this is a genuine robustness gain.
+
+And **W does not move**: every arm is between +0.03 and +0.24 mm, inside the +/-0.8 mm seed band.
+
+### Two things this settles about #63
+
+**H1 was a partial proxy for #70, not a mechanism of its own.** `z` reaches `s_med` 0.633 against
+`hv`'s 0.772, about 17% of the effect. The arithmetic explains it: 94% of behind-camera samples are
+the phantom hand, but only HALF the phantom hand's joints are behind the camera. `z` removes that
+half; `hv` removes all of it.
+
+**H2 is null even in combination.** On top of `hv` it contributes +0.006 to `s_med` and nothing
+else. Its premise, one-sided background contamination making a low-order statistic the right
+estimator, does not survive the actual depth map: the prediction is smooth enough that a 3x3
+minimum is nearly the bilinear read. Visible in `report/fig_registration_steps.png`, where the
+depth panel is blobby rather than sharp. A larger window or a lower quantile remains testable, but
+the mechanism is not a W lever either way.
+
+### The conclusion, reached three independent ways
+
+The scale can now be substantially CORRECTED and W is indifferent. That agrees with
+`hoi4d-world-space-results` (scale and pose both refuted as W levers on HOI4D) and with
+`camera-head-is-the-lever` (hand within 2 mm of oracle while W sits at 200). Three routes, one
+answer: **W is not scale-limited, and the long-window work belongs on the camera trajectory.**
+
+### Decision
+
+Adopt `--gate_scale_on_hand_valid` on CORRECTNESS and ROBUSTNESS grounds, and state in the paper
+that it leaves W unchanged. Feeding joints from a hand the detector never found into a metric solve
+is indefensible once a reviewer sees it, and removing 19.2% of failed solves is real. Presenting it
+as an accuracy improvement would be false.
+
+Job 104415 produces the paper-grade full-157 gated cells at seg30 and seg100. The 360-segment
+numbers above are a matched contrast and must not enter the paper.
+
 ## 2026-08-07 (later) - a job reported COMPLETED while all four arms produced nothing
 
 ### The third instance of the same shape
