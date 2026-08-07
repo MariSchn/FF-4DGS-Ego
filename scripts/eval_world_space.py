@@ -72,6 +72,36 @@ def _assert_checkpoint_is_trained(path, ck):
         )
 
 
+# The two irreplaceable heads live in a PRIVATE HF repo; the local copies were deleted once the
+# upload verified, which is why a missing file here is a RESTORE, not a rebuild.
+_CKPT_BACKUP_REPO = "mondraaa/worldhand4dgs-checkpoints"
+
+
+def _require_checkpoint_present(path):
+    """Fail loudly, with the restore command, instead of raising a bare FileNotFoundError.
+
+    WHAT THIS CAUGHT (2026-08-07). zguard job 104380 ran all four arms of the #63 2x2, every one
+    died on `FileNotFoundError: .../jitterrob10ep_best.pt`, and sacct still reported the job
+    **COMPLETED** because the readout script ran afterwards and exited 0. The readout printed
+    "MISSING" on all four rows and nobody was paged. A run that reports success while producing
+    nothing is the same failure mode as the enable_gs eval trap and the C-abs-725 checkpoint.
+
+    The bare exception was also unhelpful: it said the file was absent but not that it is
+    recoverable, so the obvious reading was "the checkpoint is lost" rather than "run one command".
+    """
+    if os.path.exists(path):
+        return
+    name = os.path.basename(path)
+    raise SystemExit(
+        f"\n!! CHECKPOINT MISSING: {path}\n"
+        f"   This is RECOVERABLE. The file lives in the private HF repo {_CKPT_BACKUP_REPO},\n"
+        f"   because local copies were deleted after the upload verified.\n\n"
+        f"   Restore it with (token on stdin, never in argv):\n"
+        f"     printf '%s\\n' \"$HF_TOKEN\" | bash ~/hf_restore.sh   # edit the filename to {name}\n\n"
+        f"   Do NOT retrain: the head behind the paper's headline numbers cannot be reproduced\n"
+        f"   bit-for-bit. Exiting non-zero so a batch script cannot report success without it.")
+
+
 def build_model(cfg, device):
     """Build WorldMirror from cfg, load the base checkpoint, warm-start the hand head."""
     from diffsynth.auxiliary_models.worldmirror.models.models.worldmirror import WorldMirror
@@ -81,6 +111,7 @@ def build_model(cfg, device):
     state = ckpt.get("state_dict", ckpt.get("reconstructor", ckpt))
     model.load_state_dict(state, strict=False)
     if mcfg.get("warm_start_hand_head"):
+        _require_checkpoint_present(mcfg["warm_start_hand_head"])
         ws = torch.load(mcfg["warm_start_hand_head"], map_location=device)
         _assert_checkpoint_is_trained(mcfg["warm_start_hand_head"], ws)
         sd = ws["model_state_dict"] if isinstance(ws, dict) and "model_state_dict" in ws else ws
