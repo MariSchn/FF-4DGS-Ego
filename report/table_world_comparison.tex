@@ -14,8 +14,14 @@
 % Hand3R stays as a reported-only reference row. Own-detector / own-regime numbers
 % are preserved in the footnotes so nothing verified is lost.
 %   VERIFIED: HaWoR-detbox 87.7 / 40.1 / 53.4 (job 8294650, json).
-%             Ours-detbox 36.2 / 33.2 / 37.3 = C_abs 36.204 / WA_short 33.163 / W 37.333
-%             (gb10 job 103354, ours_detbox_157.json, 1825 segs, C_rr 26.191, s_med 0.707).
+%             Ours-detbox 36.2 / 32.9 / 36.8 = C_abs 36.204 / WA_short 32.934 / W 36.812
+%             (gb10 job 104348 geo59, ours_geofix_seg30.json, 1825 segs, C_rr 26.191, s_med 0.654).
+%             UPDATED 2026-08-07: the previous cells (33.163 / 37.333, s_med 0.707) predate the
+%             task #59 depth-sampling fix. s multiplies the camera translation, so every world
+%             metric moved when s did. C_abs and C_rr are camera-frame and are BIT-IDENTICAL
+%             (36.2039 / 26.1911) across the two runs, which is the expected signature.
+%             Task #64 (frame width 2*cx=228.56 -> declared 224) is a NULL result on top of that:
+%             W 36.8200 -> 36.8123, i.e. 0.008mm. It should not stay tagged P0-BLOCKER.
 %             Ours FPS 6.59 (fps_probe cl16), offline FPS 2.47 (measured).
 %   BOX-SOURCE AUDIT 2026-08-06. The WA column was mixing native and shared-box numbers, which
 %   is exactly what this table's premise forbids. Audited every row against its pred dir:
@@ -66,7 +72,7 @@ Dyn-HaMR$^{h}$ & offline optim. & \na & 49.3 & \na & 2.47$^{f}$ \\
 % It also uses 21 joints incl. fingertips vs our 16, a 100-frame segment vs this table's 30, and
 % an unpublished HOI4D split. Discussed in prose only.
 \rowcolor{oursbg}
-Ours (feedforward)$^{e}$ & online, no SLAM & \best{36.2} & \best{33.2} & \best{37.3} & \best{6.59} \\
+Ours (feedforward)$^{e}$ & online, no SLAM & \best{36.2} & \best{32.9} & \best{36.8} & \best{6.59} \\
 \bottomrule
 \end{tabular}\\[8pt]
 \begin{minipage}{17.0cm}
