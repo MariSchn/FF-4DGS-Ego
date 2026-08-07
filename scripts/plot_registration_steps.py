@@ -105,10 +105,10 @@ def main() -> None:
         if not v_.any():
             return
         ax.scatter(px[~slot0], py[~slot0], s=7, c=ACCENT,
-                   edgecolors="white", linewidths=0.3, zorder=3, label="hand detected")
+                   edgecolors="white", linewidths=0.3, zorder=3, label="hand 1 (detected)")
         if slot0.any():
             ax.scatter(px[slot0], py[slot0], s=26, marker="x", c="#f0b429",
-                       linewidths=1.1, zorder=4, label="no hand detected")
+                       linewidths=1.1, zorder=4, label="hand 2 (never detected)")
         if legend:
             # A frameless white legend sits on a bright wall in this scene and disappears. Give it
             # a translucent plate and dark text so it survives whatever frame is chosen.
@@ -147,7 +147,7 @@ def main() -> None:
     bins = np.linspace(min(lo, 0.0), hi, 49)
     # Stacked, so the reader sees WHICH population the left lobe is rather than being told.
     ax.hist([r_det, r_und], bins=bins, stacked=True, color=[COOL, "#f0b429"],
-            edgecolor="none", label=["hand detected", "no hand detected"])
+            edgecolor="none", label=["hand 1 (detected)", "hand 2 (never detected)"])
     ax.axvline(s, color=ACCENT, lw=1.6, label=rf"$s=\mathrm{{med}}={s:.3f}$")
     if r_det.size:
         ax.axvline(float(np.median(r_det)), color=ACCENT, lw=1.4, ls="--",
