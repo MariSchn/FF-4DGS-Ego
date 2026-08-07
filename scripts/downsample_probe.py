@@ -96,7 +96,9 @@ def run_clip(model, mano_model, device, cfg, video_path, idx, sampling, hd, box_
     views = build_views(imgs, N, device, hb, hv)
     with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
         preds = model(views, cond_flags=[0, 0, 0], is_inference=True, use_motion=False)
-    pj_cam, c2w, s, _ = predict_clip(preds, mano_model, device, cam_intr, model=model)
+    # Starred: predict_clip's tuple has grown twice (ratios, then s_failed) and a fixed-arity
+    # unpack here is a latent ValueError that only fires when this probe runs. See #70.
+    pj_cam, c2w, s, *_rest = predict_clip(preds, mano_model, device, cam_intr, model=model)
     return pj_cam, c2w, s, (hv[0].cpu() if hv is not None else torch.ones(N, 2, dtype=torch.bool))
 
 

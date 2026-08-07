@@ -116,11 +116,20 @@ def _world_from_cam(pj, c2w, s):
     return world
 
 
-def ratio_validity_mask(z, sampled, in_frame, require_positive_z=False):
+def ratio_validity_mask(z, sampled, in_frame, require_positive_z=False, hand_present=None):
     """Which joint/scene-depth correspondences may feed the scene-scale median.
 
     ``z`` is the metric camera-frame hand depth, ``sampled`` the predicted scene depth read at
     the joint's projected pixel, ``in_frame`` whether that pixel landed inside the image.
+
+    ``hand_present`` broadcasts the per-frame, per-hand detector flag over the joint axis
+    (task #70). Every other term here is geometric, so a hand slot the detector never filled
+    still passes: the model emits a default MANO for the empty slot, those joints project to
+    plausible in-frame pixels, and the median consumes them. Measured on five HOI4D clips whose
+    box store has ``valid[:, 0].sum() == 0`` over all 300 frames, the absent slot supplied 96
+    accepted correspondences per clip at a median ratio of -0.019, and 94.1% of every
+    behind-camera correspondence in the sample. This is the CAUSE that ``require_positive_z``
+    only masks the symptom of, which is why both exist and why the A/B runs them separately.
 
     ``require_positive_z`` closes a hole that the other three terms do not cover. A joint behind
     the camera (z < 0) is projected by ``project_joints_to_norm_pixels`` with its depth clamped to
@@ -134,12 +143,17 @@ def ratio_validity_mask(z, sampled, in_frame, require_positive_z=False):
     valid = in_frame & (sampled > 0.01) & torch.isfinite(z) & torch.isfinite(sampled)
     if require_positive_z:
         valid = valid & (z > 0)
+    if hand_present is not None:
+        # hand_present is [S,H] (or anything broadcastable); valid is [...,S,H,J]. Unsqueeze the
+        # joint axis rather than reshaping, so a caller passing [1,S,H] still broadcasts.
+        valid = valid & hand_present.unsqueeze(-1).to(valid.device).bool()
     return valid
 
 
 def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=None, contact_mask=None,
                  ref_d_scene=None, depth_out=None, steps_out=None, require_positive_z=False,
-                 scene_depth_window=1, scene_depth_reduce="bilinear"):
+                 scene_depth_window=1, scene_depth_reduce="bilinear", hand_valid=None,
+                 gate_scale_on_hand_valid=False):
     """Run the hand head for one clip and gather its metric-scale correspondences.
 
     Returns ``(pj_cam, c2w, s_clip, ratios)``: ``pj_cam`` [S,H,J,3] metric camera-frame joints
@@ -202,14 +216,26 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
         # prevalence of behind-camera joints is a number rather than a story, while the mask
         # change stays behind require_positive_z until the A/B says it helps.
         valid_unguarded = ratio_validity_mask(z, sampled, in_frame, require_positive_z=False)
-        valid = ratio_validity_mask(z, sampled, in_frame, require_positive_z=require_positive_z)
+        _hp = hand_valid if gate_scale_on_hand_valid else None
+        valid = ratio_validity_mask(z, sampled, in_frame, require_positive_z=require_positive_z,
+                                    hand_present=_hp)
         _nonpos = (~torch.isfinite(z)) | (z <= 0)
         _n_tot = int(valid_unguarded.numel())
         _frac_nonpos_valid = (float((valid_unguarded & _nonpos).sum())
                               / max(int(valid_unguarded.sum()), 1))
+        # Always measured, gated separately (task #70). How much of the accepted population comes
+        # from a hand slot the detector never filled is the number that decides whether the gate
+        # is worth adopting, and it must be recorded under BOTH settings to stay comparable.
+        _frac_absent_hand = None
+        if hand_valid is not None:
+            _absent = ~hand_valid.unsqueeze(-1).to(valid.device).bool()
+            _frac_absent_hand = (float((valid_unguarded & _absent).sum())
+                                 / max(int(valid_unguarded.sum()), 1))
         if steps_out is not None:
             steps_out["frac_nonpos_z_of_valid"] = _frac_nonpos_valid
             steps_out["n_joints_total"] = _n_tot
+            steps_out["frac_absent_hand_of_valid"] = _frac_absent_hand
+            steps_out["gate_scale_on_hand_valid"] = bool(gate_scale_on_hand_valid)
         if bool(valid.any()):
             ratios = (z / sampled)[valid].detach().float().cpu()    # [n_valid] z_hand/scene_depth
             _s_raw = float(ratios.median())
@@ -358,7 +384,8 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                   oracle_depth=False, dense_link=False,
                   gravity_oracle=False, gravity_axis=(0.0, 1.0, 0.0), dump_cam_dir=None,
                   diag_cam=False, require_positive_z=False,
-                  scene_depth_window=1, scene_depth_reduce="bilinear"):
+                  scene_depth_window=1, scene_depth_reduce="bilinear",
+                  gate_scale_on_hand_valid=False):
     """Eval all `segment_len` segments of one sequence; return list of per-segment metrics.
 
     ``feed_intrinsics``: condition the backbone on the *known* camera intrinsics (ray prior,
@@ -474,7 +501,8 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                               ref_d_scene=_ref, contact_mask=_con, depth_out=clip_depths,
                               steps_out=_steps, require_positive_z=require_positive_z,
                               scene_depth_window=scene_depth_window,
-                              scene_depth_reduce=scene_depth_reduce)
+                              scene_depth_reduce=scene_depth_reduce,
+                              hand_valid=hv, gate_scale_on_hand_valid=gate_scale_on_hand_valid)
             clip_cams.append(cc)
             # Task #63 diagnostic: what fraction of the correspondences the UNGUARDED mask
             # accepts are behind-camera joints. Recorded whether or not the guard is on, so the
@@ -951,6 +979,16 @@ def main():
                          "median: a candidate cause of the segments that solve onto the 0.1 "
                          "clamp floor (task #63). OFF by default until the A/B measures it; the "
                          "behind-camera RATE is reported under both settings.")
+    ap.add_argument("--gate_scale_on_hand_valid", action="store_true",
+                    help="drop joints belonging to a hand slot the detector never filled from the "
+                         "scene-scale solve (task #70). The model emits a default MANO for an "
+                         "empty slot and those joints project to plausible in-frame pixels, so "
+                         "the purely geometric mask accepts them: measured on 5 HOI4D clips whose "
+                         "store has valid[:,0]==0 on all 300 frames, the absent hand supplied 96 "
+                         "correspondences per clip at median ratio -0.019 and 94.1% of all "
+                         "behind-camera samples. This is the CAUSE that --require_positive_z only "
+                         "masks the symptom of. OFF by default until the A/B measures W/WA/s_med; "
+                         "the absent-hand RATE is reported under both settings.")
     ap.add_argument("--scene_depth_window", type=int, default=1,
                     help="odd neighbourhood (in depth-map pixels) to read scene depth over "
                          "when solving the scene scale. 1 = the historical single-point read.")
@@ -1108,7 +1146,8 @@ def main():
                                      diag_cam=args.diag_cam,
                                      require_positive_z=args.require_positive_z,
                                      scene_depth_window=args.scene_depth_window,
-                                     scene_depth_reduce=args.scene_depth_reduce)
+                                     scene_depth_reduce=args.scene_depth_reduce,
+                                     gate_scale_on_hand_valid=args.gate_scale_on_hand_valid)
         except Exception as e:
             print(f"[skip {os.path.basename(sq)}] {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()
