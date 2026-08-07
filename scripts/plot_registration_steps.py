@@ -4,13 +4,19 @@ Fig. 1's registration block names three stages and shows none of them, so a read
 solve on faith. This renders each stage from a REAL forward pass, using the arrays
 scripts/dump_registration_steps.py pulls out of eval_world_space's own predict_clip via steps_out.
 
-The three steps are the ones Fig. 1's caption already names, so the panel labels match the paper
-rather than inventing a second vocabulary. Step 1 does two things and therefore gets two panels:
+Panels are named after what they DO, in the order Fig. 1's caption states them. There is
+deliberately no R1/R2/R3 numbering: it was internal shorthand a reader meets nowhere else, and it
+advertised a numbering instead of the step.
 
-  R1a  project the metric hand joints     where the joints land in the frame
-  R1b  read d_scene at those pixels       the predicted scene depth, same pixels
-  R2   solve one scale                    the z_hand / d_scene population and the median taken
-  R3   scale the translation              the up-to-scale camera track vs the same track times s
+  project joints          where the metric hand joints land in the frame
+  read d_scene            the predicted scene depth at those same pixels
+  solve one scale         the z_hand / d_scene population and the median taken
+  scale the translation   the up-to-scale camera track vs the same track times s
+
+The markers are split by HAND SLOT. The model always emits two hands; the detector often finds one.
+Joints in a slot with NO detection still reach the scale median, and on this sequence they are 96
+samples per clip at a median ratio of -0.019 (task #70), so the split is the point of the figure,
+not decoration.
 
 WHY IT IS FED BY THE EVAL. An earlier standalone dumper re-implemented the load-and-forward path,
 silently diverged (no bfloat16 autocast, no cond_flags), and emitted a CONSTANT hand depth of
@@ -22,7 +28,7 @@ project_joints_to_norm_pixels emits [u, v] = [(W-1)-row, col] / W, so a joint si
 the depth STORE and at (x=v, y=(W-1)-u) in the frame.
 
 We therefore un-rotate the depth map for display with rot90(k=1) and draw the joints at the SAME
-pixel coordinates in R1a and R1b. This is not cosmetic: a reader comparing two panels whose markers
+pixel coordinates in both left-hand panels. This is not cosmetic: a reader comparing two panels whose markers
 sit in different places cannot see that it is one projection feeding one lookup. It is also exactly
 lossless -- verified numerically, rot90(depth, k=1)[py, px] reproduces the eval's own store-frame
 sample depth[y_d, x_d] with max abs difference 0.0 over the valid joints.
@@ -59,7 +65,7 @@ COOL = "#2c6fbb"        # scene-side quantities
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dump", required=True)
-    ap.add_argument("--frame", type=int, default=None, help="which frame to show in R1")
+    ap.add_argument("--frame", type=int, default=None, help="which frame to show in the two image panels")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -82,7 +88,7 @@ def main() -> None:
     gs = fig.add_gridspec(1, 4, width_ratios=[1.0, 1.0, 1.15, 1.15], wspace=0.34,
                           left=0.035, right=0.985, top=0.84, bottom=0.17)
 
-    # One set of pixel coordinates, used by BOTH R1 panels. The frame is plain image layout
+    # One set of pixel coordinates, used by BOTH image panels. The frame is plain image layout
     # (col = v*W, row = (W-1) - u*W); the depth store is un-rotated below to match it.
     #
     # Split by HAND SLOT, because that is what the panel turns out to be evidence of (task #70).
@@ -99,10 +105,10 @@ def main() -> None:
         if not v_.any():
             return
         ax.scatter(px[~slot0], py[~slot0], s=7, c=ACCENT,
-                   edgecolors="white", linewidths=0.3, zorder=3, label="detected hand")
+                   edgecolors="white", linewidths=0.3, zorder=3, label="hand detected")
         if slot0.any():
             ax.scatter(px[slot0], py[slot0], s=26, marker="x", c="#f0b429",
-                       linewidths=1.1, zorder=4, label="undetected slot")
+                       linewidths=1.1, zorder=4, label="no hand detected")
         if legend:
             # A frameless white legend sits on a bright wall in this scene and disappears. Give it
             # a translucent plate and dark text so it survives whatever frame is chosen.
@@ -111,25 +117,25 @@ def main() -> None:
                            handletextpad=0.4, borderpad=0.3)
             lg.get_frame().set_linewidth(0.0)
 
-    # ---------------- R1a: the frame, with the projected joints ----------------
+    # ---------------- the frame, with the projected joints ----------------
     ax = fig.add_subplot(gs[0, 0])
     ax.imshow(rgb[f].permute(1, 2, 0).numpy())
     draw_joints(ax, legend=True)
-    ax.set_title(r"$\mathbf{R1a}$  project joints", pad=6)
+    ax.set_title("project joints", pad=6)
     ax.set_xticks([]); ax.set_yticks([])
 
-    # ---------------- R1b: the predicted scene depth, SAME pixels ----------------
+    # ---------------- the predicted scene depth, SAME pixels ----------------
     ax = fig.add_subplot(gs[0, 1])
     # rot90(k=1) maps the store into image layout: store[y_d, x_d] -> disp[(W-1)-x_d, y_d].
     # Verified lossless against the eval's own samples (see the coordinate note above).
     im = ax.imshow(np.rot90(depth[f].numpy(), k=1), cmap="viridis")
     draw_joints(ax)
-    ax.set_title(r"$\mathbf{R1b}$  read $d_{\mathrm{scene}}$", pad=6)
+    ax.set_title(r"read $d_{\mathrm{scene}}$", pad=6)
     ax.set_xticks([]); ax.set_yticks([])
     cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
     cb.ax.tick_params(labelsize=6)
 
-    # ---------------- R2: the ratio population and the median that is taken -------------
+    # ---------------- the ratio population and the median that is taken -------------
     ax = fig.add_subplot(gs[0, 2])
     r_all = (hz[val] / sc[val]).numpy()
     hand_all = torch.arange(val.shape[1]).view(1, -1, 1).expand_as(val)[val].numpy()
@@ -141,7 +147,7 @@ def main() -> None:
     bins = np.linspace(min(lo, 0.0), hi, 49)
     # Stacked, so the reader sees WHICH population the left lobe is rather than being told.
     ax.hist([r_det, r_und], bins=bins, stacked=True, color=[COOL, "#f0b429"],
-            edgecolor="none", label=["detected hand", "undetected slot"])
+            edgecolor="none", label=["hand detected", "no hand detected"])
     ax.axvline(s, color=ACCENT, lw=1.6, label=rf"$s=\mathrm{{med}}={s:.3f}$")
     if r_det.size:
         ax.axvline(float(np.median(r_det)), color=ACCENT, lw=1.4, ls="--",
@@ -149,13 +155,13 @@ def main() -> None:
     ax.axvline(0.0, color=INK, lw=0.8, ls=":")
     ax.set_xlabel(r"$z_{\mathrm{hand}} / d_{\mathrm{scene}}$")
     ax.set_ylabel("joint samples")
-    ax.set_title(r"$\mathbf{R2}$  solve one scale", pad=6)
+    ax.set_title("solve one scale", pad=6)
     ax.legend(fontsize=6, frameon=False, loc="upper left")
     frac_neg = float((r_all <= 0).mean())
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
 
-    # ---------------- R3: the camera track, up-to-scale vs metric ----------------
+    # ---------------- the camera track, up-to-scale vs metric ----------------
     ax = fig.add_subplot(gs[0, 3])
     t = c2w[:, :3, 3].numpy()
     t = t - t[0]
@@ -164,7 +170,7 @@ def main() -> None:
     ax.plot(ts[:, 0], ts[:, 2], "-o", ms=2.6, lw=1.0, color=ACCENT,
             label=rf"$\times\,s={s:.3f}$ (metric)")
     ax.set_xlabel("x (m)"); ax.set_ylabel("z (m)")
-    ax.set_title(r"$\mathbf{R3}$  scale the translation", pad=6)
+    ax.set_title("scale the translation", pad=6)
     ax.legend(fontsize=7, frameon=False)
     ax.set_aspect("equal", adjustable="datalim")
     for sp in ("top", "right"):
