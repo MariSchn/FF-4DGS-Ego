@@ -1,5 +1,52 @@
 # Open Lines Tracker
 
+## 2026-08-07 (later) - a job reported COMPLETED while all four arms produced nothing
+
+### The third instance of the same shape
+
+zguard job 104380 ran the whole #63 2x2. Every arm died on
+`FileNotFoundError: /home/dmonopoli/ckpt_backup/jitterrob10ep_best.pt`, because the local copy was
+deleted once the HuggingFace upload verified its hashes. `sacct` reported **COMPLETED**: the arm
+wrapper swallowed each non-zero exit, the readout script ran afterwards, printed `MISSING` on all
+four rows, and exited 0. So H2 (the window-min estimator, the mechanism that actually predicts the
+SIZE of the scale bias) has never had a reading at all.
+
+This is the same failure as the `enable_gs` eval trap (exit 0, silently non-metric W/WA) and the
+C-abs-725 untrained checkpoint. The pattern: **a run that reports success while producing
+nothing**. It is expensive precisely because nothing draws attention to it.
+
+### Fixed in three places
+
+1. `build_model` now calls `_require_checkpoint_present`, which exits non-zero **before** a GPU
+   hour is spent and names the restore route. The bare `FileNotFoundError` was actively
+   misleading: it said the file was absent but not that it is one command away in the private HF
+   repo, so the obvious response was to retrain and quietly change the headline numbers. The
+   message says `Do NOT retrain` for exactly that reason.
+2. `handgate.sbatch` records per-arm failures and **exits non-zero** if any arm failed or wrote an
+   empty JSON, so the readout can no longer be the last word.
+3. `tests/test_missing_checkpoint_is_loud.py` pins both properties, with a negative control that a
+   present checkpoint is a no-op.
+
+### The checkpoint is back
+
+Restored from `mondraaa/worldhand4dgs-checkpoints` and **independently hash-verified** on the
+cluster: `5f2f12ddc52fddf201bc9d04abfbece2fde4aae1ce2a09f15c74cd9e786651bc`, matching the recorded
+value. It now lives in `/home/dmonopoli/ckpt_backup/` (5.09 GB) rather than scratch, because
+`/work/scratch/dmonopoli` is **at quota** - `mkdir` there fails outright. Home went 8.6 G -> 14 G.
+
+Note for next time: the login node has no `pip` and no `huggingface_hub`, and `venv_gb10` is
+aarch64 so it cannot run there. The restore therefore uses plain `curl` with the bearer token fed
+through `curl -K -` (stdin), which keeps it out of `ps` and off disk. Script: `~/hf_restore.sh`.
+
+### Paper consistency swept at the same time
+
+The world table row was updated to the post-#59 numbers (W 36.812 / WA 32.934) in f917e4c, but
+**four prose sites still quoted the pre-fix 37.3 / 33.2**: the W-vs-WA-at-30-frames illustration,
+the `\todo` naming the bolded cell, the segment-length sensitivity sentence, and the HaPTIC
+shared-box comparison. All four corrected; `main.tex` recompiles clean at 28 pages. Same
+checkpoint and same segments throughout - only `s` moved, and `s` multiplies camera translation
+only, so W and WA move while C_abs does not.
+
 ## 2026-08-07 - the scale solve was eating a hand the detector never found (#70)
 
 ### Found by fixing a figure, not by reading code
