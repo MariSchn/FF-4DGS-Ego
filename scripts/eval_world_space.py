@@ -239,6 +239,13 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
     ratios = torch.empty(0)
     s = 1.0
     s_failed = False
+    # Bound BEFORE the solve, not inside it. steps_out reads _s_raw unconditionally, so leaving it
+    # to the `if valid.any()` branch is an UnboundLocalError the moment a clip has no usable
+    # correspondence. That was latent until task #70's hand gate made the empty case reachable:
+    # a clip in which the detector found no hand in any frame legitimately has nothing to solve on,
+    # and it killed all 30 sequences of the hv arm (job 104381) because one bad clip aborts a whole
+    # sequence. An empty population is a FAILED solve, not a crash.
+    _s_raw = float("nan")
     if gs_depth is not None and cam_intr is not None:
         grid_xy, z = project_joints_to_norm_pixels(pred_joints, cam_intr.to(device))
         sampled, in_frame = sample_depth_at_joints(
@@ -262,11 +269,28 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
             _absent = ~hand_valid.unsqueeze(-1).to(valid.device).bool()
             _frac_absent_hand = (float((valid_unguarded & _absent).sum())
                                  / max(int(valid_unguarded.sum()), 1))
+        _n_gated, _n_ungated = int(valid.sum()), int(valid_unguarded.sum())
         if steps_out is not None:
             steps_out["frac_nonpos_z_of_valid"] = _frac_nonpos_valid
             steps_out["n_joints_total"] = _n_tot
             steps_out["frac_absent_hand_of_valid"] = _frac_absent_hand
             steps_out["gate_scale_on_hand_valid"] = bool(gate_scale_on_hand_valid)
+            steps_out["n_valid"] = _n_gated
+            steps_out["n_valid_ungated"] = _n_ungated
+        if not bool(valid.any()):
+            # Say WHY once, rather than leaving a silent s=1.0 that looks like a solved scale.
+            # Distinguishing "the gate emptied it" from "the geometry emptied it" is the whole
+            # point: the first is expected on clips with no detection, the second is a defect.
+            _why = ("the hand gate removed every correspondence"
+                    if gate_scale_on_hand_valid and _n_ungated > 0 else
+                    "no correspondence passed the geometric mask")
+            if not getattr(predict_clip, "_warned_empty_ratio", False):
+                predict_clip._warned_empty_ratio = True
+                print(f"  !! scale solve has an EMPTY population ({_why}; ungated={_n_ungated}). "
+                      f"Marking s_failed so the caller's scale_fallback policy applies, instead of "
+                      f"returning s=1.0 as though it were solved. Further clips not warned.",
+                      flush=True)
+            s_failed = True
         if bool(valid.any()):
             ratios = (z / sampled)[valid].detach().float().cpu()    # [n_valid] z_hand/scene_depth
             _s_raw = float(ratios.median())
