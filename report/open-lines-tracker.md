@@ -1,5 +1,59 @@
 # Open Lines Tracker
 
+## 2026-08-07 - the scale solve was eating a hand the detector never found (#70)
+
+### Found by fixing a figure, not by reading code
+
+Cyrus asked for "visual intermediate results for the registration steps". Building that panel
+meant putting the projected joints on the RGB frame AND on the predicted scene depth. `gs_depth`
+is stored 90 degrees rotated, so the first version drew the same joints at different pixel
+positions in the two panels. Un-rotating the depth for display (`rot90(k=1)`, verified lossless:
+it reproduces the eval's own store-frame sample with max abs difference **0.0**) put both hands in
+one coordinate frame, and a second joint cluster appeared sitting on a door, a floor and a table,
+but on no hand.
+
+### MEASURED, 5 dumps, scene ZY20210800001_H1_C12
+
+| | n per 16f clip | median ratio | frac z<=0 |
+|---|---|---|---|
+| slot 0 (never detected) | exactly 96 (6/frame) | **-0.019** | 50% |
+| slot 1 (the visible hand) | 213-246 | 0.607-0.894 | 0-4.2% |
+
+Slot 0 is **240 of 255 = 94.1%** of every behind-camera correspondence.
+
+`hoi4d_detboxes_v3/ZY20210800001_H1_C12_N28_S200_s01_T2.pt` has `valid[:,0].sum() == 0` over all
+**300** frames. The detector never found a left hand. So this is not a badly predicted real hand:
+the store says the hand is absent, the model emits a default MANO into the empty slot, those
+joints project to plausible in-frame pixels, and the purely geometric `ratio_validity_mask`
+accepts them. `eval_sequence` already reads `hand_valid` and passes it to `build_views` for
+conditioning; `predict_clip` was simply never given it.
+
+### This reframes #63
+
+The behind-camera population is mostly this phantom hand. `--require_positive_z` masks a symptom
+whose cause is the absent slot, so the two must be measured on separate arms or they conflate.
+Dropping slot 0 moves `s` per clip 0.6053->0.6233, 0.7395->0.8943, 0.7199->0.7636, 0.5901->0.6072,
+0.6745->0.6968: toward `s_gt` 1.023, **not closing** it. `s` multiplies camera translation only,
+so W/WA move and C_abs does not.
+
+### Status: instrumented, OFF by default
+
+`--gate_scale_on_hand_valid` ships OFF (commit 0221ba4), same discipline as the z-guard. The
+absent-hand rate is recorded under both settings so the arms stay comparable. **Validate
+criterion:** adopt only if the full 157-seq A/B moves `s_med` toward 1.0 AND does not worsen W/WA.
+If the rate turns out to be ~0% on other stores, record that too rather than leaving the flag
+dangling. Caveat: 5 clips of ONE HOI4D scene; check H2O and HOT3D for the same asymmetry.
+
+### Also closed on the way
+
+- **`downsample_probe.py:99` unpacked 4 values from the 5-tuple.** The same latent
+  `ValueError: too many values to unpack` that killed every sequence of geo59's seg100 stage. The
+  arity test written after that incident only scans `eval_world_space.py`, so it never saw this
+  one. Fixed with starred unpacking.
+- **The figure's labels were wrong.** `R1/R1/R2/R3` read as a typo. Fig. 1's caption names
+  **three** steps and the first does two things, so the panels are now `R1a/R1b/R2/R3` and use the
+  caption's own vocabulary rather than a second one.
+
 ## 2026-08-06 (late) - task #68 resolved: "detbox" means a different detector per method
 
 ### The answer was already in this file
