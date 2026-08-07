@@ -709,11 +709,11 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         if gravity_oracle and clip_grav and len(clip_grav) == len(clip_cams):
             grav = torch.tensor(gravity_axis, dtype=torch.float32)
             worlds_gv = [_world_from_cam(pj, gravity_align_c2w(c2w, c2wg, grav, mode="tilt"), s_pool)
-                         for (pj, c2w, _, _), c2wg in zip(clip_cams, clip_grav)]
+                         for (pj, c2w, *_g), c2wg in zip(clip_cams, clip_grav)]
             m_gv = _metrics(chain_trajectories_by_overlap(worlds_gv, overlap=overlap))
             sm_rows["W_MPJPE_gravOracle"] = m_gv["W_MPJPE"]
             worlds_ro = [_world_from_cam(pj, gravity_align_c2w(c2w, c2wg, grav, mode="rot"), s_pool)
-                         for (pj, c2w, _, _), c2wg in zip(clip_cams, clip_grav)]
+                         for (pj, c2w, *_g), c2wg in zip(clip_cams, clip_grav)]
             m_ro = _metrics(chain_trajectories_by_overlap(worlds_ro, overlap=overlap))
             sm_rows["W_MPJPE_rotOracle"] = m_ro["W_MPJPE"]
             print(f"  [gravity seg{seg}] gravOracle={m_gv['W_MPJPE']:.1f} rotOracle={m_ro['W_MPJPE']:.1f}"
@@ -727,7 +727,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         # ~= W_spool => our per-clip dense geometry is drift-inconsistent too (not the lever).
         if dense_link and clip_dense and all(cd is not None for cd in clip_dense):
             dense_pl, dense_val = [], []
-            for (dp, dv), (_, c2w, _, _) in zip(clip_dense, clip_cams):
+            for (dp, dv), (_, c2w, *_d) in zip(clip_dense, clip_cams):
                 dense_pl.append(_world_from_cam((dp * s_pool).unsqueeze(1), c2w, s_pool))
                 dense_val.append(dv)
             tr_r, diag_r = chain_trajectories_dense(worlds_pl, dense_pl, dense_val, overlap,
@@ -768,7 +768,11 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         # each absolute frame is counted once.
         RH = 1
         pcf = {}
-        for c, (pj, _, _, _) in enumerate(clip_cams):
+        # Starred, NOT a fixed arity: clip_cams grew from 4 to 5 fields when s_failed was
+        # added and this line was missed, killing every seg100 sequence with
+        # 'too many values to unpack'. seg30 never reached it on the old file, so it stayed
+        # latent until a mid-run sync. Star it so the next field cannot break it.
+        for c, (pj, *_rest) in enumerate(clip_cams):
             start = (base + c) * stride
             for kk in range(pj.shape[0]):
                 f = start + kk
