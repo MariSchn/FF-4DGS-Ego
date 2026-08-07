@@ -215,6 +215,25 @@ def main():
             seq_c_rows.append(seq_c)
         if rows:
             n_scored += 1
+    # SCORING NOTHING IS A FAILURE, NOT AN EMPTY RESULT. The per-sequence loop skips silently when
+    # <pred_dir>/<seq>.pt is absent, so a wrong --pred_dir scores ZERO sequences, writes a
+    # well-formed JSON full of NaN, and exits 0. That happened on 2026-08-07 (job 104440): four of
+    # five baselines were pointed at /work/scratch when their predictions live in /home, and the
+    # job reported LW100_ALL_DONE with a table of nan. A non-empty output FILE is not evidence of a
+    # non-empty RESULT, which is why the caller's `[ -s out.json ]` check did not catch it either.
+    if not os.path.isdir(args.pred_dir):
+        raise SystemExit(f"\n!! --pred_dir does not exist: {args.pred_dir}\n"
+                         f"   Nothing would be scored and the output would be all-NaN. Exiting "
+                         f"non-zero so a batch script cannot report success.")
+    if n_scored == 0:
+        n_avail = len([f for f in os.listdir(args.pred_dir) if f.endswith(".pt")])
+        raise SystemExit(
+            f"\n!! SCORED ZERO SEQUENCES from {args.pred_dir}\n"
+            f"   {len(seqs)} sequences in {args.data_root}, {n_avail} .pt files in the pred dir, "
+            f"and NOT ONE matched.\n"
+            f"   Expected <pred_dir>/<seq>.pt with <seq> exactly a data_root subdirectory name.\n"
+            f"   This is a FAILURE, not an empty result: continuing would write all-NaN metrics "
+            f"that a downstream table renders as real numbers.")
     agg = aggregate(results, seq_c_rows)
     # Stamp the protocol so the artifact records its own hand set and window. The hand set in
     # particular was previously implicit (world = both hands, C = right only) and that asymmetry
