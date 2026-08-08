@@ -234,6 +234,20 @@ def main():
             f"   Expected <pred_dir>/<seq>.pt with <seq> exactly a data_root subdirectory name.\n"
             f"   This is a FAILURE, not an empty result: continuing would write all-NaN metrics "
             f"that a downstream table renders as real numbers.")
+    # ...and zero SEGMENTS is equally a failure, which the n_scored check above does NOT cover.
+    # Dyn-HaMR on 2026-08-08: the converter read an optimisation working directory that held no
+    # final results, wrote 157 well-formed .pt files that were 100% NaN, and the scorer then
+    # reported `n_seqs=157 n_segs=0` with an all-NaN aggregate and exit 0. Sequences were found;
+    # not one produced a usable segment. Guarding only on n_scored let that through.
+    if not results:
+        raise SystemExit(
+            f"\n!! MATCHED {n_scored} SEQUENCES BUT PRODUCED ZERO SEGMENTS from {args.pred_dir}\n"
+            f"   The prediction files exist and were read, but none yielded a scorable window.\n"
+            f"   Usual cause: the predictions are entirely NaN or `valid` is all False, e.g. a\n"
+            f"   converter that ran against the wrong directory and had nothing to convert.\n"
+            f"   Check one file: torch.load(<pred_dir>/<seq>.pt)['valid'].sum() should be > 0.\n"
+            f"   Exiting non-zero rather than writing an all-NaN aggregate a table would render "
+            f"as real numbers.")
     agg = aggregate(results, seq_c_rows)
     # Stamp the protocol so the artifact records its own hand set and window. The hand set in
     # particular was previously implicit (world = both hands, C = right only) and that asymmetry

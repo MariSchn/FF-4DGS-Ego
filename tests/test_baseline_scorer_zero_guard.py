@@ -39,8 +39,8 @@ def test_missing_pred_dir_exits_nonzero():
 
 
 def test_zero_scored_sequences_exits_nonzero():
-    m = re.search(r"if n_scored == 0:(.{0,700}?)\n\s*agg = aggregate", SRC, re.S)
-    assert m, "expected a zero-scored guard immediately before aggregation"
+    m = re.search(r"if n_scored == 0:(.{0,900}?)\n\s*# \.\.\.and zero SEGMENTS", SRC, re.S)
+    assert m, "expected a zero-scored guard before the zero-segment guard"
     body = m.group(1)
     assert "SystemExit" in body, "scoring nothing must exit non-zero"
     assert "NOT ONE matched" in body or "not one matched" in body.lower(), (
@@ -59,7 +59,38 @@ def test_guard_runs_before_aggregate():
 
 def test_message_explains_the_expected_naming():
     """A path bug is only actionable if the message says what the expected layout is."""
-    m = re.search(r"if n_scored == 0:(.{0,700}?)\n\s*agg = aggregate", SRC, re.S)
+    m = re.search(r"if n_scored == 0:(.{0,900}?)\n\s*# \.\.\.and zero SEGMENTS", SRC, re.S)
     assert "<pred_dir>/<seq>.pt" in m.group(1), (
         "the message must state the expected filename convention so a mismatch is diagnosable "
         "without reading the source")
+
+
+def test_zero_segments_also_fails_even_when_sequences_matched():
+    """The hole the first guard left, found the same day it was written.
+
+    Dyn-HaMR (2026-08-08): the converter was pointed at an optimisation working directory that
+    contained no final results. It wrote 157 well-formed .pt files whose tensors were 100% NaN and
+    whose `valid` mask was all False. The scorer then reported
+
+        BASELINE_WORLD_EVAL n_seqs=157 n_segs=0
+          W_MPJPE=nan  WA_short=nan  ...
+
+    and exited 0. The `n_scored == 0` guard did not fire because 157 sequences WERE matched and
+    read; they simply produced no scorable window. Matching files is not the same as producing
+    results, so both have to be checked.
+    """
+    m = re.search(r"if not results:(.{0,900}?)\n\s*agg = aggregate", SRC, re.S)
+    assert m, "expected a zero-segment guard before aggregate()"
+    body = m.group(1)
+    assert "SystemExit" in body, "zero segments must exit non-zero"
+    assert "ZERO SEGMENTS" in body, "the message must distinguish this from the zero-sequence case"
+    assert "valid" in body, (
+        "the message must name the concrete check (valid.sum() > 0), because the failure looks "
+        "identical to a path bug from the outside")
+
+
+def test_both_guards_precede_aggregate():
+    """Order again: after aggregate() the NaNs exist and the JSON is written regardless."""
+    for guard in ("if n_scored == 0:", "if not results:"):
+        assert SRC.index(guard) < SRC.index("agg = aggregate(results, seq_c_rows)"), (
+            f"{guard} must run before aggregate()")
