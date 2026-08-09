@@ -48,6 +48,107 @@ from scripts.train_hand_head import build_views, compute_joints_from_batch, HOT3
 from scripts.hand_vis_utils import MANOModel
 
 
+# Which submodules are INHERITED from the pretrained reconstruction model and which we ADDED.
+# This split is the point of the whole table. A frozen-backbone paper's speed is mostly someone
+# else's speed, and a reviewer's first question is which part we are taking credit for. Reporting
+# one aggregate number lets the reader assume we built the fast thing; reporting the split says
+# plainly that the throughput is inherited and only the small head is ours.
+INHERITED = ("visual_geometry_transformer", "depth_head", "gs_head", "cam_head", "pts_head",
+             "norm_head", "gs_fwd_attr_head", "gs_bwd_attr_head",
+             "velocity_fwd_head", "velocity_bwd_head")
+ADDED = ("hand_head", "injection", "scale_head", "root_anchor")
+
+
+def _classify(name: str) -> str:
+    """Map a top-level module name to inherited / added / other."""
+    root = name.split(".")[0]
+    if root in INHERITED:
+        return "inherited"
+    if any(root.startswith(a) for a in ADDED):
+        return "added"
+    return "other"
+
+
+def _param_split(model) -> dict:
+    """Parameters by provenance and by trainability, counted from the live module tree.
+
+    Trainable is read from requires_grad, which is NOT the same as "was trained": the camera head
+    carries requires_grad=True yet appears in no optimizer param group, which is exactly how
+    fps_probe.py came to report 262.4M trainable when the trained count is 46.3M. Both are
+    reported so the discrepancy is visible rather than load-bearing.
+    """
+    out = {}
+    for name, mod in model.named_children():
+        cls = _classify(name)
+        n = sum(p.numel() for p in mod.parameters())
+        t = sum(p.numel() for p in mod.parameters() if p.requires_grad)
+        if n == 0:
+            continue
+        out[name] = {"class": cls, "params": n, "params_requires_grad": t}
+    # Snapshot the per-module rows BEFORE inserting totals: writing "_total_*" into `out` and then
+    # re-scanning out.values() makes the second pass trip over the summary rows, which have no
+    # "class" key.
+    tot = sum(v["params"] for v in out.values())
+    sums = {cls: sum(v["params"] for v in out.values() if v["class"] == cls)
+            for cls in ("inherited", "added", "other")}
+    for cls, s in sums.items():
+        out[f"_total_{cls}"] = {"params": s, "pct": 100.0 * s / tot if tot else 0.0}
+    out["_total"] = {"params": tot}
+    return out
+
+
+def _forward_once(model, batch, clip_len, device):
+    """One inference forward, identical to the timed path so FLOPs and latency describe the same
+    computation. Shared with _time_config rather than duplicated, because a FLOP count taken on a
+    different code path than the timing is a number about nothing."""
+    imgs = batch["img"].unsqueeze(0).to(device)
+    hb = batch["hand_bboxes"].unsqueeze(0).to(device) if "hand_bboxes" in batch else None
+    hv = batch["hand_valid"].unsqueeze(0).to(device) if "hand_valid" in batch else None
+    views = build_views(imgs, clip_len, device, hb, hv)
+    return model(views, cond_flags=[0, 0, 0], is_inference=True, use_motion=False)
+
+
+def _flop_split(model, clip, clip_len, enable_gs, device):
+    """Per-module FLOPs for one forward pass, using torch's own counter (no extra dependency).
+
+    FLOPs are the honest efficiency currency here because latency depends on the GPU, the batch
+    and the memory system, while a reviewer comparing against an offline SLAM pipeline wants to
+    know how much arithmetic the method fundamentally does. It is also the number that makes the
+    inherited/added split undeniable: our head is a rounding error against the encoder.
+    """
+    try:
+        from torch.utils.flop_counter import FlopCounterMode
+    except ImportError:
+        return {"error": "torch.utils.flop_counter unavailable (needs torch >= 2.0)"}
+
+    counter = FlopCounterMode(display=False, depth=1)
+    try:
+        with counter:
+            with torch.no_grad():
+                _forward_once(model, clip, clip_len, device)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    per_mod = counter.get_flop_counts()
+    out, totals = {}, {"inherited": 0, "added": 0, "other": 0}
+    for mod_name, ops in per_mod.items():
+        # Skip BOTH the "Global" row and the model ROOT. The counter reports the root module's own
+        # total alongside each child's, so summing everything double-counts: on a two-child test
+        # model that put 50% of all FLOPs in "other" and halved both real shares.
+        if mod_name == "Global" or "." not in mod_name:
+            continue
+        f = sum(ops.values())
+        short = mod_name.split(".", 1)[1]     # "Model.visual_geometry_transformer" -> the child
+        cls = _classify(short)
+        out[short] = {"class": cls, "flops": f}
+        totals[cls] += f
+    grand = sum(totals.values())
+    for cls, s in totals.items():
+        out[f"_total_{cls}"] = {"flops": s, "pct": 100.0 * s / grand if grand else 0.0}
+    out["_total"] = {"flops": grand, "enable_gs": enable_gs}
+    return out
+
+
 def _sync(device):
     if device == "cuda":
         torch.cuda.synchronize()
@@ -79,13 +180,9 @@ def _time_config(cfg, enable_gs, clips, clip_len, warmup, iters, device, mano_mo
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     def _one(batch):
-        imgs = batch["img"].unsqueeze(0).to(device)
-        hb = batch["hand_bboxes"].unsqueeze(0).to(device) if "hand_bboxes" in batch else None
-        hv = batch["hand_valid"].unsqueeze(0).to(device) if "hand_valid" in batch else None
-        views = build_views(imgs, clip_len, device, hb, hv)
         _sync(device); t0 = time.perf_counter()
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            preds = model(views, cond_flags=[0, 0, 0], is_inference=True, use_motion=False)
+            preds = _forward_once(model, batch, clip_len, device)
         _sync(device); t1 = time.perf_counter()
         _ = compute_joints_from_batch(preds["hand_joints"], mano_model, device)
         _sync(device); t2 = time.perf_counter()
@@ -100,6 +197,9 @@ def _time_config(cfg, enable_gs, clips, clip_len, warmup, iters, device, mano_mo
         f, l = _one(b)
         fwd.append(f); lift.append(l)
     peak = torch.cuda.max_memory_allocated() / 2**30 if device == "cuda" else float("nan")
+    # Provenance and arithmetic, measured on the SAME model instance that was just timed.
+    params = _param_split(model)
+    flops = _flop_split(model, clips[0], clip_len, enable_gs, device)
     del model
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -115,6 +215,8 @@ def _time_config(cfg, enable_gs, clips, clip_len, warmup, iters, device, mano_mo
         "total_s_mean": float(tot.mean()), "total_s_std": float(tot.std()),
         "fps": float(clip_len / tot.mean()),
         "peak_mem_GiB": float(peak),
+        "param_split": params,
+        "flop_split": flops,
         "n_timed": int(len(tot)),
     }
 
@@ -188,6 +290,39 @@ def main():
     print("\\bottomrule")
     print("\\end{tabular}")
     print("% Detection: " + rows["_meta"]["detection"])
+
+    # ---- inherited vs added. The table above says how fast; this one says whose speed it is.
+    ref = ok.get("hands_plus_gaussians") or ok.get("hands_only")
+    if ref and "param_split" in ref:
+        ps, fs = ref["param_split"], ref["flop_split"]
+        print("\n% ---- inherited vs added (paste into the paper) ----")
+        print("\\begin{tabular}{@{}lrrrr@{}}")
+        print("\\toprule")
+        print("Component & params (M) & \\% & GFLOPs & \\% \\\\")
+        print("\\midrule")
+        for cls, label in (("inherited", "Inherited (frozen reconstruction model)"),
+                           ("added", "Added (hand branch, injection)")):
+            p = ps.get(f"_total_{cls}", {})
+            f = fs.get(f"_total_{cls}", {}) if "error" not in fs else {}
+            gf = f"{f['flops']/1e9:.1f}" if f.get("flops") else "---"
+            fp = f"{f['pct']:.1f}" if f.get("pct") is not None else "---"
+            print(f"{label} & {p.get('params',0)/1e6:.1f} & {p.get('pct',0):.1f} & {gf} & {fp} \\\\")
+        print("\\bottomrule")
+        print("\\end{tabular}")
+        if "error" in fs:
+            print(f"% FLOPs unavailable: {fs['error']}")
+        print("% Read this table before quoting the throughput: the cost is dominated by the")
+        print("% inherited encoder, so our FPS is mostly the backbone's FPS. What is ours is the")
+        print("% small added branch, and that is what the parameter-efficiency claim is about.")
+
+        print("\n% per-module detail (appendix)")
+        for name, v in sorted(ps.items()):
+            if name.startswith("_"):
+                continue
+            fl = fs.get(name, {}).get("flops") if "error" not in fs else None
+            fl_s = f"{fl/1e9:.2f} GFLOPs" if fl else "n/a"
+            print(f"%   {name:32s} {v['class']:9s} {v['params']/1e6:8.1f} M  {fl_s}")
+
     print(f"\nFPS_BREAKDOWN_DONE T={a.clip_len} out={a.out}")
 
 
