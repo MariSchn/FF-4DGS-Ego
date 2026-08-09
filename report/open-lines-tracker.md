@@ -1,5 +1,109 @@
 # Open Lines Tracker
 
+## 2026-08-08 - the backbone we call frozen is not the released one (#71, RESOLVED)
+
+Started as a label check on the architecture figure ("0 of 24 blocks fine-tuned") and ended as a
+provenance finding. Student jobs 104471-104477, scripts `~/verify_frozen{,2,3}.py`,
+`~/verify_optim.py`, `~/find_ancestor.py`.
+
+**Two things were wrong, for different reasons.**
+
+*The denominator.* `visual_transformer.py` builds TWO ModuleLists of `depth` blocks, `frame_blocks`
+(line 219) and `global_blocks` (line 234), and the forward runs frame[i] then global[i]. `depth=24`
+means **48 encoder blocks**, not 24. Every "24 blocks" statement in the paper was wrong, and
+`unfreeze_last_n_blocks: N` unfreezes the last N of EACH list, i.e. 2N blocks.
+
+*The claim.* Both headline checkpoints differ from `models/NeoVerse/reconstructor.ckpt` in exactly
+`frame_blocks[20:24]` + `global_blocks[20:24]`: 8 blocks, **100,788,224 parameters**, identical in
+winner10ep (step 9900) and jitterrob10ep (step 11700). The other 40 blocks are BIT-IDENTICAL,
+max|delta| exactly 0.0, which is what rules out a save-precision artefact: a dtype effect would
+perturb all 48.
+
+**But the hand run did not train them, and that matters.** Its optimizer state owns 134 tensors
+totalling **46,256,160** parameters = 3.92% of the 1,178,658,867-parameter model, and no backbone
+tensor was ever stepped. The paper's "46.3M trainable, 3.9%" is therefore CORRECT, and is now
+sourced from Adam's per-parameter moments rather than from a config. The 8 blocks arrive at
+INITIALISATION: `exp_p4_jitterrob.yaml:67` warm-starts from `checkpoints/hoi4d_depth/best_depth.pt`
+(4.9 GB, a FULL-model dict), and `exp_hoi4d_depth.yaml:48` sets `unfreeze_last_n_blocks: 4`. The
+ancestor scan confirms `best_depth.pt` carries exactly those 8 blocks and nothing else.
+
+| checkpoint | blocks changed vs stock | params |
+|---|---|---|
+| `hoi4d_depth/best_depth.pt` (the warm start) | 8: frame/global[20:24] | 100,788,224 |
+| `winner10ep_best.pt`, `jitterrob10ep_best.pt` | 8, same indices | 100,788,224 |
+| `h2o_hand/best_cmpjpe.pt`, `h2o_hand_hires_full/`, `old_hires/` | **16**: frame/global[16:24] | 201,576,448 |
+
+**Consequences, now written into the paper** (`4exp.tex`, new paragraph "The backbone we freeze is
+not the released one"; `3method.tex:36` and the figure caption):
+1. Reproduction from stock NeoVerse will NOT match our numbers. The depth stage is part of the recipe.
+2. The warm-start contamination already disclosed in `sec:exp:data` is larger in SCOPE than written:
+   it is 100.8M backbone parameters trained on HOI4D, not merely a head initialisation. The measured
+   effect is unchanged (0.2 mm), because clean-152 already excludes the affected sequences.
+3. The backbone-substitution ablation gave its reconstruction arm one extra stage of in-domain
+   training that DINOv2 and random-init never got, and it STILL lost to DINOv2. The bias runs
+   against that arm, so the null conclusion strengthens.
+
+**OPEN, carried forward.** The H2O rows sit on a 16-block / 201.6M fine-tune. Any H2O statement
+that says or implies "frozen backbone" has to be re-checked against that. Separately, #56's
+frozen-vs-unfrozen ablation compares against a "frozen" arm that is itself depth-tuned, so its
+framing needs a sentence.
+
+**THE RULE.** A claim about a checkpoint is verified against that checkpoint's *weights*; a claim
+about what was *trained* is verified against its *optimizer state*. Configs are not evidence:
+`exp_p4_jitterrob.yaml` had been edited since the run it supposedly documented (its training block
+now reads `epochs: 1`, `output_dir: rt_c1`) and the run's stdout was gone.
+
+### Two false failures the same evening, both mine, both probes rather than the thing probed
+
+- **gsplat "BUILD FAILED" in 21 s having never invoked nvcc.** gsplat 1.5.3 keeps `_C` in
+  `gsplat.cuda._backend` and imports it lazily inside each wrapper call, so
+  `getattr(_wrapper, '_C', None)` is None whether or not the extension compiled. Testing
+  `from gsplat.cuda._backend import _C` triggers the real build: 3742 s of nvcc, then
+  `GSPLAT_BUILD_OK`. #49 unblocked.
+- **`lualatex` exiting 1 on `! Dimension too large`.** The `tab:world` caption had grown to ~450
+  words; `\@makecaption` typesets the whole caption into one unbroken hbox to test single-line fit,
+  and past TeX's maximum dimension (16383.99 pt) that measurement fails. Moved into a `minipage` of
+  table notes under the tabular, no content lost. Paper now builds rc=0, 0 overfull, no undefined
+  references.
+
+### Baseline set, revised
+
+EgoForce is **dropped** (task deleted). Verified from its abstract: it "recovers robust, absolute 3D
+hand pose and its position from the user's (camera-space) viewpoint" and reports camera-space MPJPE.
+No trajectory, no world evaluation. It cannot fill a world-table row, only a C-abs one.
+
+**Replacement search, conducted 2026-08-09 with CODE AVAILABILITY as the gate.** The 2026 world-space
+hand literature is almost entirely code-less right now:
+
+| method | world-space? | code | usable as a baseline |
+|---|---|---|---|
+| StableHand (2605.18553) | yes, W/WA-MPJPE + Accel on HOT3D+ARCTIC | **none** | no |
+| Hand3R (2602.03200) | yes, our closest competitor | **none found** | no |
+| WHOLE (2602.22209) | yes, but needs metric-SLAMed Aria input | **none found** | no |
+| EgoGrasp (2601.01050) | yes, H2O + HOI4D | **none found** | no |
+| UniHand (2602.21631) | camera + world on HOT3D | **none found** | no |
+| HaWoR (2501.02973) | yes | `ThunderVVV/HaWoR` | ALREADY a baseline (#30) |
+| Dyn-HaMR | yes | released | IN FLIGHT (#31) |
+| EgoAllo | world, but body SMPL-H + Aria MPS | released | out of regime, #44 |
+
+Also searched and rejected, so nobody repeats the search: **HandFlow** (2607.11221, leads every
+world/trajectory metric, WA 16.17 vs Dyn-HaMR 31.01) has no code. **EgoHandICL** (2601.19850,
+ICLR 2026) HAS code but is not world-space: its metrics are P-MPJPE, P-MPVPE, F@k and MRRPE, all
+root-relative or Procrustes-aligned camera-space. **HMP** (WACV 2024) optimises a global hand
+trajectory but never estimates camera motion, so it is not world-space under a moving egocentric
+camera. **HandDGP** (`nianticlabs/HandDGP`, code released) is camera-space by title and would only
+be a fourth instance of the SLAM composition we already have three of.
+
+**THE REFRAME THAT MATTERS.** Hand3R, our closest competitor, builds its own world-space comparison
+from exactly **HaMeR-SLAM, WiLoR-SLAM and HaWoR**. That is the published field standard for this
+metric, and our table already contains all three plus **Dyn-HaMR** and **HaPTIC+SLAM**. We are not
+missing a world-space baseline; we have a SUPERSET of what the closest competitor uses. The real
+gap is not coverage but input-matching (#30 HaWoR on detbox v3, #31 Dyn-HaMR currently scoring zero
+segments). Fixing those two is worth more than any additional row.
+
+Everything code-less above should be cited as concurrent work, numbers quoted and explicitly marked
+non-comparable, and the authors emailed for code.
+
 ## 2026-08-07 (result) - #63 CLOSED AS NULL, #70 real but not an accuracy lever
 
 Jobs 104381 + 104382, 30 matched HOI4D sequences, 360 segments, jitterrob, detbox v3. The win

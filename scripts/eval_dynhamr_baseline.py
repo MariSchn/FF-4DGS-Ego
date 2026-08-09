@@ -49,7 +49,17 @@ def main():
     dynhamr_out = os.path.join(args.work_dir, "dynhamr_output")
     os.makedirs(dynhamr_out, exist_ok=True)
     print("=== Step 2: Running Dyn-HaMR Model Inference ===", flush=True)
-    run_cmd(f"python {args.dynhamr_dir}/demo.py --data_dir {dynhamr_in} --out_dir {dynhamr_out} 2>/dev/null || true")
+    # NO `2>/dev/null || true` here. It used to carry both, which discarded Dyn-HaMR's stderr AND
+    # forced a zero exit, so run_cmd's own failure check could never fire. On 2026-07-22 demo.py
+    # produced nothing, the pipeline continued, and the job reported COMPLETED over a result set
+    # that was 100% NaN with n_segs=0.
+    run_cmd(f"python {args.dynhamr_dir}/demo.py --data_dir {dynhamr_in} --out_dir {dynhamr_out}")
+
+    n_out = len([f for f in os.listdir(dynhamr_out) if f.endswith(".pt")])
+    if n_out == 0:
+        sys.exit(f"[Error] Dyn-HaMR exited 0 but wrote no .pt files to {dynhamr_out}. "
+                 "Refusing to score an empty prediction set.")
+    print(f"Dyn-HaMR wrote {n_out} prediction files.", flush=True)
 
     # 4. Convert Dyn-HaMR outputs to eval_worldspace_baseline contract
     pred_dir = os.path.join(args.work_dir, "eval_preds")

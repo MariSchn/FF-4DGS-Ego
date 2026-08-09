@@ -19,9 +19,17 @@ MANO2SMPLX16 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 
 
 def convert_seq(seq_name: str, pred_path: str, gt_dir: str, out_pred_dir: str):
+    """Returns (wrote_file, had_prediction).
+
+    The two are NOT the same, and conflating them is what produced a well-formed all-NaN result
+    set on 2026-07-22: this function used to return True whenever the GT cache existed, so a run
+    whose Dyn-HaMR output directory was EMPTY still wrote 157 files, printed
+    "Converted 157 sequence predictions", and the scorer then reported n_segs=0 with every metric
+    NaN while exiting 0. Callers must check `had_prediction`.
+    """
     gt_cam_path = os.path.join(gt_dir, seq_name, "hand_data", "gt_joints_cache_cam_v2.pt")
     if not os.path.exists(gt_cam_path):
-        return False
+        return False, False
     gt_cam = torch.load(gt_cam_path, weights_only=True)
     N = gt_cam.shape[0]
 
@@ -29,7 +37,8 @@ def convert_seq(seq_name: str, pred_path: str, gt_dir: str, out_pred_dir: str):
     world_joints = torch.full((N, 2, NUM_JOINTS, 3), float("nan"), dtype=torch.float32)
     valid = torch.zeros(N, 2, dtype=torch.bool)
 
-    if os.path.exists(pred_path):
+    had_prediction = os.path.exists(pred_path)
+    if had_prediction:
         pred_data = torch.load(pred_path, map_location="cpu")
         j_cam = pred_data.get("cam_joints", pred_data.get("pred_joints_cam"))
         j_world = pred_data.get("world_joints", pred_data.get("pred_joints_world"))
@@ -51,7 +60,7 @@ def convert_seq(seq_name: str, pred_path: str, gt_dir: str, out_pred_dir: str):
         "world_joints": world_joints,
         "valid": valid
     }, out_file)
-    return True
+    return True, had_prediction
 
 
 def main():
@@ -65,12 +74,36 @@ def main():
     seqs = sorted(os.listdir(args.data_root))
     print(f"Converting Dyn-HaMR predictions across {len(seqs)} sequences...", flush=True)
 
+    if not os.path.isdir(args.dynhamr_out):
+        raise SystemExit(
+            f"--dynhamr_out does not exist: {args.dynhamr_out}\n"
+            "Dyn-HaMR has not been run, or its output went elsewhere. Refusing to write an "
+            "all-NaN prediction set that would score as n_segs=0 and exit 0.")
+
     count = 0
+    with_pred = 0
     for seq in seqs:
         p_file = os.path.join(args.dynhamr_out, f"{seq}.pt")
-        if convert_seq(seq, p_file, args.data_root, args.pred_dir):
-            count += 1
-    print(f"Converted {count} sequence predictions -> {args.pred_dir}", flush=True)
+        wrote, had_pred = convert_seq(seq, p_file, args.data_root, args.pred_dir)
+        count += int(wrote)
+        with_pred += int(had_pred)
+
+    # A file per sequence is NOT evidence of a prediction per sequence. On 2026-07-22 this script
+    # printed "Converted 157 sequence predictions" while <dynhamr_out> was EMPTY, and the scorer
+    # dutifully reported every metric NaN with n_segs=0 and exit code 0. Fail here instead.
+    if with_pred == 0:
+        raise SystemExit(
+            f"CONVERTED {count} SEQUENCES BUT FOUND ZERO PREDICTIONS in {args.dynhamr_out}.\n"
+            f"Expected one <seq>.pt per sequence there (e.g. {seqs[0] if seqs else '<seq>'}.pt).\n"
+            "Every output file would be all-NaN, which scores as n_segs=0 and exits 0 - a run "
+            "that looks COMPLETED and contains nothing. Check that Dyn-HaMR actually ran and "
+            "that its output path matches --dynhamr_out.")
+
+    print(f"Converted {count} sequences, {with_pred} of them WITH a Dyn-HaMR prediction "
+          f"-> {args.pred_dir}", flush=True)
+    if with_pred < count:
+        print(f"WARNING: {count - with_pred} sequences have no prediction and are all-NaN; "
+              "they will contribute no scorable segment.", flush=True)
 
 
 if __name__ == "__main__":
