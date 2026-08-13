@@ -184,11 +184,19 @@ def main():
     ap.add_argument("--out", default="baseline_world_eval.json")
     ap.add_argument("--hands", choices=["both", "right"], default="both",
                     help="which hands enter the WORLD metrics. C-MPJPE is always right-hand-only, "
-                         "so --hands right makes both metric families use the same hand set and "
-                         "matches the Hand3R / HaWoR convention.")
+                         "so --hands right makes both metric families use the same hand set. NOT "
+                         "the same as Hand3R's hand set, despite what this help text said before "
+                         "2026-08-13: their protocol is right-PREFERRED with a LEFT FALLBACK, so a "
+                         "frame annotated with only a left hand contributes that hand to their "
+                         "score and contributes nothing to ours.")
     ap.add_argument("--drop_partial_tail", action="store_true",
                     help="score only whole segment_len windows, so this row's segment set matches "
                          "eval_world_space's (which never predicts the ragged tail)")
+    ap.add_argument("--allow_unstamped_pred_dir", action="store_true",
+                    help="Score a prediction directory that carries no _provenance.json. The box "
+                         "store and trajectory source are then unproven, the result file records "
+                         "box_source_unproven=true, and the number must not enter a table without "
+                         "that caveat stated. For reproducing pre-2026-08-06 artefacts only.")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
     if args.selftest:
@@ -257,10 +265,34 @@ def main():
     # defects on 2026-08-06 (tasks #65/#67/#68). Copy the producer's own record in, and shout when
     # it is absent or marks a GT-oracle trajectory.
     from scripts.pred_provenance import describe_or_warn
+    prov = describe_or_warn(args.pred_dir)
+    # A WARNING IS NOT ENOUGH, and 2026-08-12 is the proof. Four of the six rows in the paper's
+    # long-window table came from directories written before stamping existed, so their box source
+    # rests on the directory NAME - which is exactly what the three defects above showed to be
+    # unreliable. Every one of those rows was produced through this scorer, which duly warned, and
+    # every warning scrolled past in a job log while the number went into a table.
+    #
+    # So an unstamped directory is now a hard stop. Scoring one is still possible, but only by
+    # saying so on the command line, and the acknowledgement is written into the result file: a
+    # cell whose inputs are unproven can no longer be indistinguishable from one whose inputs are
+    # known, either on the terminal or on disk.
+    if not prov and not args.allow_unstamped_pred_dir:
+        raise SystemExit(
+            f"REFUSING TO SCORE: {args.pred_dir} has no _provenance.json, so the box store and the\n"
+            f"trajectory source that produced it cannot be established from the artefact. The\n"
+            f"directory name is not provenance (see scripts/pred_provenance.py for three defects\n"
+            f"caused by trusting it).\n"
+            f"  Preferred: re-run the producer, which now writes the stamp.\n"
+            f"  If the producer cannot be re-run, write the stamp by hand from its job log, then\n"
+            f"  score again.\n"
+            f"  To score anyway, pass --allow_unstamped_pred_dir. The result file will then carry\n"
+            f"  pred_provenance=null and box_source_unproven=true, and the number must not be\n"
+            f"  printed in a table without saying so.")
     protocol = {"segment_len": args.segment_len, "wa_short": args.wa_short,
                 "hands": args.hands, "drop_partial_tail": bool(args.drop_partial_tail),
                 "pred_dir": args.pred_dir, "data_root": args.data_root,
-                "pred_provenance": describe_or_warn(args.pred_dir)}
+                "pred_provenance": prov,
+                "box_source_unproven": not bool(prov)}
     json.dump({"protocol": protocol, "aggregate": agg, "per_segment": results,
                "per_seq_c": seq_c_rows},
               open(args.out, "w"), indent=2)

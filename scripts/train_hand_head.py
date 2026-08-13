@@ -2454,11 +2454,32 @@ def train():
         ckpt_state = torch.load(latest_path, map_location=device)
         model.load_state_dict(ckpt_state["model_state_dict"])
         optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
-        scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
+        # EXTENDING A FINISHED RUN NEEDS THIS, or the extra epochs do nothing.
+        # CosineAnnealingLR.state_dict() carries T_max and last_epoch, so loading the state of a
+        # completed schedule restores T_max to the OLD total and last_epoch to its end, whatever
+        # the new training.epochs says. The learning rate then sits at eta_min (1e-7 here) for
+        # every added epoch and the run burns GPU-days changing nothing, while every log line and
+        # every checkpoint looks entirely healthy. Set training.restart_schedule to start a fresh
+        # cosine over the remaining steps instead, which is a warm restart in the SGDR sense.
+        if bool(training_cfg.get("restart_schedule", False)):
+            print(f"restart_schedule: NOT loading the scheduler state. A fresh cosine runs over "
+                  f"{total_steps} steps from lr={base_lr:.2e} down to "
+                  f"{float(training_cfg.get('min_lr', 1e-6)):.2e}.", flush=True)
+        else:
+            scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
         global_step = ckpt_state["global_step"]
         start_epoch = ckpt_state["epoch"]
         best_val_loss = ckpt_state["best_val_loss"]
         print(f"Resumed successfully. global_step={global_step}, start_epoch={start_epoch}, best_val_loss={best_val_loss:.4f}")
+        # Say the resulting learning rate out loud. A resume that silently continues at eta_min is
+        # the failure this guard exists for, and the number is the only thing that proves it did not
+        # happen.
+        _lr_now = optimizer.param_groups[0]["lr"]
+        print(f"  learning rate after resume: {_lr_now:.3e}", flush=True)
+        if _lr_now <= 1.5 * float(training_cfg.get("min_lr", 1e-6)):
+            print("  !! that is at the schedule's floor. If you are EXTENDING a finished run, set "
+                  "training.restart_schedule: true, or these epochs will not move the weights.",
+                  flush=True)
     elif cfg["model"].get("warm_start_hand_head"):
         # Initialise the hand head from a prior checkpoint (e.g. the 50mm run)
         # instead of training it from scratch, so the abs-3D loss only has to
