@@ -45,6 +45,12 @@ from scripts.world_space_metrics import (
 RH = 1          # right hand (matches eval_world_space.py)
 J = 16          # smplx joints per hand
 
+# Hand3R fits its W-MPJPE transform on the first two frames of each chunk, per the protocol bundle
+# their authors sent on 2026-08-13. Two is the smallest window that determines a rigid pose, which
+# is why their W never degenerates into a segment-rigid error the way ours does when the alignment
+# window equals the segment length.
+HAND3R_W_ALIGN_FRAMES = 2
+
 
 def load_gt(seq_dir: str):
     """Return (gt_world [N,2,16,3], gt_cam [N,2,16,3], gt_valid [N,2]) or None if uncached."""
@@ -122,10 +128,25 @@ def eval_sequence(seq_dir: str, pred_path: str, segment_len: int, wa_short: int,
             vw = (valid[sl] & fin_w[sl]).repeat_interleave(J, dim=1)
         if int(vw.sum()) >= 3:
             w = w_mpjpe_first_window_aligned(pw, gw, vw, wa_short)
+            # Hand3R's W gauge, from the protocol bundle their authors sent on 2026-08-13: the same
+            # rigid, scale-fixed transform, fitted on the FIRST TWO FRAMES instead of the first
+            # window. Emitted alongside ours rather than instead of it, from the same predictions in
+            # the same pass, so the two conventions can never drift apart across separate runs and
+            # the per-row cost of the difference is free to read off.
+            #
+            # This is not an approximation of their gauge, it is their gauge: at wa_short=2 the
+            # helper reduces to a 2-frame Umeyama rotation plus a rigid translation, which
+            # reproduces their reference scorer bit-for-bit (tests/test_hand3r_protocol_parity.py).
+            #
+            # It matters most where our own gauge is weakest. At segment_len=30 with wa_short=30 the
+            # alignment window IS the whole segment, so W collapses to a segment-rigid error and
+            # stops measuring drift at all; a 2-frame fit keeps measuring drift at every segment
+            # length. Prefer this column for any short-video row.
+            w_h3r = w_mpjpe_first_window_aligned(pw, gw, vw, HAND3R_W_ALIGN_FRAMES)
             wa_s = wa_mpjpe(pw, gw, window=wa_short, valid=vw)
             wa_l = wa_mpjpe(pw, gw, window=t, valid=vw)
         else:
-            w = wa_s = wa_l = float("nan")
+            w = w_h3r = wa_s = wa_l = float("nan")
 
         # ---- camera-frame C-MPJPE, right hand only (RH=1) ----
         gc = gt_cam[sl, RH]                                # [t,16,3]
@@ -138,7 +159,8 @@ def eval_sequence(seq_dir: str, pred_path: str, segment_len: int, wa_short: int,
             c_rr = c_ab = float("nan")
 
         out.append({"seq": os.path.basename(seq_dir), "seg": seg, "frames": t,
-                    "W_MPJPE": w, "WA_MPJPE_short": wa_s, "WA_MPJPE_long": wa_l,
+                    "W_MPJPE": w, "W_MPJPE_h3r": w_h3r,
+                    "WA_MPJPE_short": wa_s, "WA_MPJPE_long": wa_l,
                     "C_MPJPE": c_rr, "C_MPJPE_abs": c_ab})
 
     # ---- sequence-level C metrics (the canonical aggregation unit) ----
@@ -159,7 +181,7 @@ def aggregate(results, seq_c_rows=None):
     C metrics: mean over SEQUENCES (one value per sequence), matching how ours is scored in
     eval_hand_cam_anchor.py. Falls back to per-segment C only if no seq rows were passed."""
     valid = [r for r in results if r["W_MPJPE"] == r["W_MPJPE"]]
-    keys = ("W_MPJPE", "WA_MPJPE_short", "WA_MPJPE_long")
+    keys = ("W_MPJPE", "W_MPJPE_h3r", "WA_MPJPE_short", "WA_MPJPE_long")
 
     def _mean(k, rows):
         vals = [r[k] for r in rows if k in r and r[k] == r[k]]
@@ -292,7 +314,14 @@ def main():
                 "hands": args.hands, "drop_partial_tail": bool(args.drop_partial_tail),
                 "pred_dir": args.pred_dir, "data_root": args.data_root,
                 "pred_provenance": prov,
-                "box_source_unproven": not bool(prov)}
+                "box_source_unproven": not bool(prov),
+                # Which gauge produced which W column, stamped rather than inferred from the key
+                # name, because the whole reason W_MPJPE_h3r exists is that a comment once asserted
+                # our gauge was Hand3R's and no artefact recorded otherwise.
+                "w_align_frames": args.wa_short,
+                "w_h3r_align_frames": HAND3R_W_ALIGN_FRAMES,
+                "w_gauge_degenerate": args.wa_short >= args.segment_len,
+                "joints_per_hand": J}
     json.dump({"protocol": protocol, "aggregate": agg, "per_segment": results,
                "per_seq_c": seq_c_rows},
               open(args.out, "w"), indent=2)
