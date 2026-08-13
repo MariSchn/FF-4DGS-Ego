@@ -121,7 +121,7 @@ while read -r s; do
       --recover_k \
       --seq "$nested" \
       --out "$OUT" \
-      --mano_model models/MANO --res 1080 > /dev/null 2>&1 \
+      --mano_model models/MANO --res 224 > /dev/null 2>&1 \
     && { ok=$((ok+1)); } || { fail=$((fail+1)); echo "CONVFAIL $s"; }
   [ $(( (ok+fail) % 20 )) -eq 0 ] && echo "  convert ok=$ok fail=$fail"
   # ANTI-TACO GATE. The TACO run failed 2311 times in a row on one wrong keyword because the
@@ -133,12 +133,16 @@ while read -r s; do
     nested=$(head -1 "$LIST" | tr '_' '/')
     $PY -m scripts.preprocessing.preprocess_hoi4d --hoi4d_root "$RAW/nested" --rgb_root "$RAW/nested" \
         --handpose_root "$S/hoi4d_handpose/Hand_pose/handpose_right_hand" --recover_k \
-        --seq "$nested" --out "$OUT" --mano_model models/MANO --res 1080 2>&1 | tail -25
+        --seq "$nested" --out "$OUT" --mano_model models/MANO --res 224 2>&1 | tail -25
     exit 4
   fi
 done < "$LIST"
 echo "CONVERT ok=$ok fail=$fail"
 
+# 224, not the 1080 the preprocessor docstring shows: that is the model input, and the 157-sequence
+# store every baseline was scored on carries hand_bboxes_v2_rf1.5_res224x224.pt. At 1080 the 3D
+# joints are identical but the intrinsics and boxes are at a different scale, verify_box_store
+# reports "no readable box files", and a store that looks complete is unusable.
 echo "===== 4. verify the box store ====="
 $PY -m scripts.verify_box_store --data_root "$OUT" 2>&1 | tail -20
 echo "sequences written: $(ls "$OUT" 2>/dev/null | wc -l)"
