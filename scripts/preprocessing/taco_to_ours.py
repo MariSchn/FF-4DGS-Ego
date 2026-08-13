@@ -255,11 +255,30 @@ def convert_seq(taco_root: str, triplet: str, seq: str, out_root: str, mano,
     torch.save({"bboxes": torch.tensor(boxes), "valid": torch.tensor(valid),
                 "gt": torch.tensor(gt64)},
                os.path.join(hd, f"hand_bboxes_v2_rf{rescale_factor}_res{res}x{res}.pt"))
+    # THE STORE CONTRACT, and this converter broke it for a day. Every other converter
+    # (dexycb, h2o, hoi4d, reinterhand) writes {"timestamp_ns": i, "hand_poses": {...}} and
+    # HOT3DHandDataset reads exactly those two keys. This one wrote {"frame", "left", "right"},
+    # which loads fine, converts fine and passes verify_box_store, because that gate checks the
+    # BOX store and never opens the jsonl. The failure surfaced only when the feature-cache build
+    # reached the dataset and died on KeyError: 'hand_poses', 2311 sequences after the fact.
+    #
+    # Slot keys are "0" for left and "1" for right, matching the gt64 layout below and the
+    # hand_id loop in train_hand_head. Per slot, gt64 holds
+    # [transl 3, quat_wxyz 4, pose15 PCA, betas 10] = 32 floats.
     with open(os.path.join(hd, "mano_hand_pose_trajectory.jsonl"), "w") as f:
         for i in range(N):
-            f.write(json.dumps({"frame": i,
-                                "left":  gt64[i, :32].tolist(),
-                                "right": gt64[i, 32:].tolist()}) + "\n")
+            hp = {}
+            for slot in (0, 1):
+                if not bool(valid[i, slot]):
+                    continue
+                v = gt64[i, slot * 32:(slot + 1) * 32]
+                hp[str(slot)] = {
+                    "wrist_xform": {"t_xyz":  [float(x) for x in v[0:3]],
+                                    "q_wxyz": [float(x) for x in v[3:7]]},
+                    "pose":  [float(x) for x in v[7:22]],
+                    "betas": [float(x) for x in v[22:32]],
+                }
+            f.write(json.dumps({"timestamp_ns": i, "hand_poses": hp}) + "\n")
 
     # Video: re-encode truncated to N so that video frame t IS cache row t, which is the store
     # contract. A symlink to the original would break it on every truncated sequence.

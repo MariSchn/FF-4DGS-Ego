@@ -46,6 +46,20 @@ print("cache cfg num_frames =", cfg["data"]["num_frames"])
 PYEOF
 [ $? -eq 0 ] || { echo "config gen failed"; exit 2; }
 
+# SMOKE FIRST, on three sequences into a throwaway directory. The previous attempt reached the
+# GPU, built the model, and died on the first sample with KeyError: 'hand_poses', because
+# taco_to_ours wrote a jsonl schema no other converter uses and verify_box_store never opens the
+# jsonl. Three sequences cost two minutes and would have caught it.
+SMOKE=$S/featcache32/_taco_smoke
+rm -rf "$SMOKE"; mkdir -p "$SMOKE"
+$PY -u -m scripts.build_feature_cache \
+  --config "$CFG" --data_root "$R" --out "$SMOKE" \
+  --clip_stride 16 --batch_size 2 --num_workers 2 --max_seqs 3 2>&1 | tail -12
+n_smoke=$(ls "$SMOKE" 2>/dev/null | wc -l)
+echo "smoke wrote $n_smoke files"
+[ "$n_smoke" -gt 0 ] || { echo "SMOKE PRODUCED NOTHING, not starting the full build"; exit 3; }
+rm -rf "$SMOKE"
+
 mkdir -p "$OUT"
 echo "########## 32f cache: $N <- $R ##########"
 lquota 2>/dev/null | grep scratch | head -1
