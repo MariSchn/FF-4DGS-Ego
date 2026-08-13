@@ -1,0 +1,11 @@
+{
+    "schema_version": 2,
+    "commit": "90dd2af1700ad00eb746a442e2fe69fa43ef5ca4",
+    "indexed_at": "2026-08-11T09:45:55Z",
+    "project": "FF-4DGS-Ego",
+    "nodes": 431839,
+    "edges": 467932,
+    "original_size": 391577600,
+    "compressed_size": 32369683,
+    "compression_level": 3
+}

@@ -1,5 +1,14 @@
 # FF-4DGS-Ego — Research Synthesis & Weekend Plan (2026-06-19)
 
+> **STALE THESIS WARNING (added 2026-07).** This is a dated session snapshot, kept as a
+> historical record. Its framing ("hand as metric anchor for a feedforward Gaussian scene",
+> "first feedforward full-scene 3DGS made metric by the hand") was experimentally falsified
+> in 2026-07 (scale-source ablation: hand-as-global-scene-scale 0.728 vs oracle 1.022; the
+> 4DGS backbone is frozen third-party, Gaussian rendering is off). The current thesis is
+> absolute camera-frame egocentric hand pose from a frozen feedforward recon backbone; see
+> `report/related-work-positioning.md` and `report/publication-plan.md`. The literature
+> pointers below are still useful; do not reuse the positioning or the plan.
+
 **Status:** session knowledge dump (session hit limit; compaction failed). This file is the
 single source of truth for resuming. Everything below was produced 2026-06-19 from a stride-4
 experiment + 3 web-research agents + a full codebase-feasibility dive + a HOI4D-eval feasibility

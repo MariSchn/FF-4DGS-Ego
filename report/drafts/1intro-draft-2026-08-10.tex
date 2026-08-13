@@ -1,0 +1,74 @@
+\section{Introduction}
+\label{sec:intro}
+
+Egocentric video is the natural input for understanding manipulation: the camera sits where the
+actor looks, and the hands are where intention meets the world. Using that signal downstream, for
+imitation learning, for AR interaction, or for reasoning about what a person did, requires knowing
+where the hands are in \emph{metric} terms, in a coordinate frame attached to the scene rather than
+to a crop around the wrist.
+
+Current hand estimators do not provide this. State-of-the-art single-image methods
+\citep{pavlakos2024hamer, potamias2024wilor} crop tightly around a detected hand and regress pose
+under a weak-perspective camera. The crop is what makes them accurate, because it removes nuisance
+variation and lets a large model specialise. It is also what makes them non-metric: hand size and
+hand distance trade off against each other at nearly constant reprojection, so the crop alone cannot
+determine how far away the hand is. Our own measurements show the split clearly. On HOI4D, WiLoR and
+HaMeR reach root-relative errors of $27.2$ and $30.3$\,mm while their absolute errors are $83.4$ and
+$88.0$\,mm. These methods have an articulation model and no placement model.
+
+The usual repair composes such an estimator with a separate pipeline that supplies the missing
+geometry, a SLAM trajectory or a monocular depth predictor or both
+\citep{zhang2025hawor, dynhamr}. This works, and it is what the strongest published baselines do.
+It also inherits the failure modes of every stage, needs the whole sequence before it can produce
+anything, and leaves the hand and the scene in coordinate systems that must be reconciled afterwards.
+
+We take the opposite route and ask what a hand branch attached to a \emph{frozen} feed-forward
+reconstruction backbone recovers in a single pass. The backbone already computes, for its own
+purposes, the evidence a crop discards: the surfaces the hand rests on, reaches toward and occludes.
+Our contribution turns out to be less an architecture for consuming that evidence than an account of
+\emph{what makes egocentric hand estimation metric}, and two of our three findings are negative or
+data-side rather than architectural. We report them as we measured them.
+
+\paragraph{Absolute supervision, not architecture, is what buys metric placement.}
+A regressor trained against root-relative targets is never asked how far away the hand is, so it
+never learns. Supervising the decoder's translation output directly against absolute camera-frame
+joints fixes this and adds no parameters. Crossing the two absolute terms in a $2\times2$ shows the
+effect is causal and coarse: with neither term the model collapses to a near-constant depth at
+$682.8$\,mm, while either term alone recovers almost everything, $27.1$ or $23.0$ against $22.8$ for
+the pair. The particular loss is interchangeable. Its presence is not.
+
+\paragraph{Cross-dataset transfer is governed by depth coverage, not data volume.}
+Absolute placement is partly prior-driven, so a model inherits the depth distribution of its
+training mixture. We find that error on an unseen dataset grows with how far its hands sit from that
+distribution, and that what matters is whether the test store lies inside the mixture's
+\emph{support}. Trained on a single dataset our model reaches $184.8$\,mm zero-shot on H2O; trained
+on a mixture whose depth support contains H2O it reaches $\mathbf{66.2}$, a $64\%$ reduction on an
+identical split, at an in-domain cost of $6.9$\,mm. We registered this prediction before the run.
+
+\paragraph{The scene branch is a conditioning signal, and we report where it does not help.}
+Our hand branch crops in feature space rather than pixel space, so both hands reuse the single
+backbone pass the scene already required, and the crop tokens attend to the full frame. A controlled
+substitution over three seeds then finds that a frozen generic DINOv2 backbone is at least as good as
+the reconstruction backbone, $22.2 \pm 0.7$ against $23.6 \pm 0.8$, while a randomly initialised
+frozen backbone is clearly worse at $27.7$. Pretrained features are necessary; reconstruction
+features are not, so we do not attribute our results to them. A second control degrades the detection box at evaluation time and finds that removing
+its per-frame geometry entirely costs $0.7$\,mm, inside our seed band, refuting our own hypothesis
+that box size was acting as a depth cue.
+
+We evaluate against HaWoR, HaMeR, WiLoR, HaPTIC and Dyn-HaMR, running each ourselves on our own
+detector boxes rather than reprinting published numbers, and we state the comparison that goes
+against us: applying our own absolute-supervision recipe as a full fine-tune of HaMeR and scoring it
+on identical boxes reaches $23.4$\,mm against our $35.8$. Our contribution is therefore not accuracy.
+It is that a $46.3$\,M-parameter branch on a frozen backbone recovers metric hands in one
+feed-forward pass, with no SLAM, no monocular depth stage and no test-time optimisation, together
+with an account of which ingredients that depends on.
+
+\todo{FINAL PASS OWED once the running jobs report.
+(i) World-space framing is deliberately ABSENT here: every W/WA number is being regenerated after
+the depth-sampling fix (task \#59). Add one sentence if the rebuilt numbers support it, and none if
+they do not.
+(ii) The hand-to-Gaussian direction (Sec.~\ref{sec:method:gs}) is omitted from the contribution list
+until its run reports. If it holds it becomes a fourth paragraph; if it does not, it is cut from the
+paper and from the title with it (task \#49).
+(iii) Add the efficiency claim from App.~\ref{app:cost} once measured, with hardware named and
+detection accounted for, in the per-component format the accepted comparables use (task \#57).}

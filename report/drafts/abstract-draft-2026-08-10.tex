@@ -1,0 +1,23 @@
+\begin{abstract}
+Egocentric hand estimators are accurate about articulation and silent about placement. Cropping
+around a detected hand is what makes them work and also what makes them non-metric, since hand size
+and hand distance trade off at nearly constant reprojection. On HOI4D, WiLoR and HaMeR reach
+root-relative errors of $27.2$ and $30.3$\,mm while their absolute errors are $83.4$ and $88.0$\,mm.
+The usual repair bolts on SLAM or monocular depth, which recovers scale at the cost of a multi-stage
+pipeline that needs the whole sequence. We instead attach a hand branch to a \emph{frozen}
+feed-forward reconstruction backbone, crop in feature space so both hands reuse the single pass the
+scene already required, and ask what that recovers in one shot. The answer is mostly not
+architectural, and we report it as we measured it. First, absolute supervision is causally necessary
+and coarse: removing it collapses the model to a near-constant depth at $682.8$\,mm, while either of
+two absolute terms alone recovers almost everything. Second, cross-dataset transfer is governed by
+the \emph{depth coverage} of the training mixture rather than its size; a mixture whose support
+contains the test store cuts zero-shot error on H2O from $184.8$ to $\mathbf{66.2}$\,mm, a $64\%$
+reduction, for $6.9$\,mm in domain. Third, two controls refute our own hypotheses: a generic
+self-supervised backbone matches the reconstruction backbone, and removing the detection box's
+per-frame geometry costs $0.7$\,mm, inside our seed band. We run HaWoR, HaMeR, WiLoR, HaPTIC and
+Dyn-HaMR ourselves on shared detector boxes, and state the comparison that goes against us: our own
+recipe applied as a full fine-tune of HaMeR reaches $23.4$\,mm on identical boxes against our
+$35.8$. What we offer is not accuracy but a trade, one feed-forward pass and $46.3$\,M trained
+parameters with no SLAM and no test-time optimisation, and an account of which ingredients metric
+egocentric hand estimation actually depends on.
+\end{abstract}

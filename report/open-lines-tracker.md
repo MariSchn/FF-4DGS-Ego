@@ -1,5 +1,42 @@
 # Open Lines Tracker
 
+## TARGET: ICLR 2027. Abstract Sep 18 2026, paper Sep 25 2026. Set 2026-08-09.
+
+Six and a half weeks, not the three months the CVPR-November assumption implied. Read this before
+picking up anything below, because it changes what is worth doing rather than only how fast.
+
+**Critical path is #39, the camera-head fine-tune.** It is the only item left that needs a full
+training run; everything else is writing or evaluation and compresses. Its result also decides which
+paper we write, so the introduction cannot be drafted before it lands. Recovering a meaningful share
+of the 200.9 -> 61.5 oracle gap keeps the thesis at "method with analysis"; a null moves it to
+"analysis", which then has to be written as such.
+
+**The thesis moves.** Every strong architectural claim has been refuted by our own controls: DINOv2
+matches the reconstruction backbone, scene-recon is not a lever, the scale is not a lever, box
+geometry is null, and HaMeR_ft beats us 23.4 to 35.8 on identical boxes. What the measurements do
+support is transfer: depth coverage of the training mixture cuts H2O zero-shot 184.8 -> 66.2, a 64%
+reduction, for 6.9 mm in domain. That belongs on page one and is currently buried.
+
+**Order.** Weeks 1-2 experimental: #39 on both GPUs, box-consistent tables, HaMeR_ft 23.4 moved INTO
+the table beside a parameter column, and #49 settled - prefer RETITLING over evaluating the scene,
+because evaluating opens a new attack surface at six weeks out while retitling closes one for free.
+Weeks 3-4 rewrite. Week 5 figures A1-A6 and the supplementary video, whose absence is named
+explicitly in our own reject samples, then ONE OpenReview panel on a finished draft. Week 6 fixes
+and buffer.
+
+**Cut:** TACO (a fifth dataset does not move a contribution score; the thesis does), EgoAllo,
+**EgoForce**, and the variable-length run if its step-1600 read does not pay.
+
+EgoForce was reinstated and then cut again the same day, and the second decision is the right one
+under the new thesis: it is camera-space, and once we stop claiming to beat everyone on accuracy we
+do not need an absolute SLAM-free comparator in a table. It remains CITED in related work with its
+published figures and an explicit not-input-matched note, so the question "why is the published
+SLAM-free absolute SOTA missing" has an answer rather than a silence. To reinstate: code, weights
+and ARCTIC/H2O/HO3D/HOT3D loaders at github.com/dfki-av/EgoForce, ordinary Python requirements with
+no SLAM to compile, and native HOT3D_PINHOLE support matching our own conversion. Independently of
+the table, its Crop Intrinsics Token is the published mechanism our null box-geometry ablation
+points at, and that deserves a sentence in the paper.
+
 ## 2026-08-08 - the backbone we call frozen is not the released one (#71, RESOLVED)
 
 Started as a label check on the architecture figure ("0 of 24 blocks fine-tuned") and ended as a
