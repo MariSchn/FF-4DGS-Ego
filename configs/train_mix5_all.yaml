@@ -1,44 +1,44 @@
-# FIVE-DATASET SCALE-UP: HOI4D + OakInk2 + ARCTIC + HOT3D + Ego-Exo4D.
-# Eval stays HOI4D-157 and H2O (Dario 2026-08-03): H2O is HELD OUT, never in data_roots below.
+# FIVE-DATASET SCALE-UP: ARCTIC + DexYCB + HOT3D + OakInk2 + TACO.
 #
-# ORDER OF INTEGRATION (Dario): HOT3D first, Ego-Exo4D second. Both are Aria, but they differ:
-#   HOT3D      fisheye -> UNDISTORTED to pinhole by scripts/preprocessing/preprocess_undistort.py
-#              at f=609.78, the validated pinhole_f609 recipe (50.08 mm MPJPE).
-#   Ego-Exo4D  ego_pose publishes ALREADY-RECTIFIED pinhole intrinsics, so it needs no undistort.
-#              Its K is rescaled 512 -> 448 to match the downloaded video.
-# Cyrus's rule "pinhole only, cannot mix-train across camera types" is therefore satisfied by
-# both, for different reasons.
+# HOI4D and H2O are the HELD-OUT evaluation sets and appear in neither the roots nor the caches.
+# That is the whole point of the scale-up: the final tables report zero-shot transfer onto two
+# datasets the model never trained on, which is the strongest result this project has
+# (H2O C_abs 184.8 -> 66.2 under depth-diverse mixing).
 #
-# EGO-EXO4D IS JOINTS-ONLY. It ships 3D keypoints, never MANO, so:
-#   - its MANO param losses are MASKED per sample via has_mano (train_hand_head._param_mask);
-#     unmasked they would train the model to predict ZERO MANO, silently, with transl at 1.0.
-#   - kp3d / kp3d_abs / kp2d ARE supervised, and kp3d_abs is the load-bearing absolute term, so
-#     the data still pulls its weight. This matches standard practice (HaMeR trains on
-#     datasets with only 2D keypoints).
+# WHAT CHANGED, 2026-08-13. The previous version of this file listed HOI4D + OakInk2 + ARCTIC +
+# HOT3D + Ego-Exo4D and was unrunnable on two counts:
+#   * HOI4D was in data_roots while also being the evaluation set, i.e. train-on-test.
+#   * Ego-Exo4D ships 3D keypoints and never MANO, and its store is EMPTY (0 sequences); it was
+#     dropped rather than masked. See the egoexo4d-has-no-mano note.
+# DexYCB and TACO replace them. DexYCB is the deepest root at 0.875 m and TACO sits at 0.577 m
+# between H2O 0.503 and HOI4D 0.677, so the pool now BRACKETS both held-out sets in depth, which
+# is what makes the transfer claim work rather than a coincidence.
 #
-# min_labelled_frames: Ego-Exo4D labels ~2.3% of frames, so most clips would carry NO supervision
-# at all. Requiring >= 4 labelled frames keeps ~7.6% of its clips (measured) and is a NO-OP on the
-# dense roots (they keep 100%), which is why it is safe to set globally.
+# CAMERA TYPE. Cyrus's rule is pinhole only, no mixing across camera models. HOT3D is fisheye and
+# is therefore UNDISTORTED to pinhole at f=609.78 by preprocess_undistort.py (the validated
+# pinhole_f609 recipe, 50.08 mm MPJPE). Every other root is natively pinhole with no distortion.
 #
-# COST NOTE, do not overlook: there are no feature caches for hot3d/egoexo yet, so this config
-# trains UNCACHED (full backbone forward) unless caches are built first - hours per epoch rather
-# than minutes. Build featcache/hot3d and featcache/egoexo before a long run.
+# FEATURE CACHES. Four of the five are built under featcache32/ (arctic, dexycb, hot3d, oakink2,
+# ~37.6k clips, 1.2 TB). TACO's is NOT, and until it exists this config trains UNCACHED, which is
+# hours per epoch rather than minutes. Build it before any long run.
+
 data:
   data_roots:
-  - root: /cluster/scratch/dmonopoli/hoi4d_train
-    name: hoi4d
-    weight: 1.0
-  - root: /cluster/scratch/dmonopoli/oakink2_ours
-    name: oakink2
-    weight: 1.0
+  # THE FIVE. HOI4D and H2O are the held-out evaluation sets and appear in NEITHER list.
   - root: /cluster/scratch/dmonopoli/arctic_ours
     name: arctic
+    weight: 1.0
+  - root: /cluster/scratch/dmonopoli/dexycb/store
+    name: dexycb
     weight: 1.0
   - root: /cluster/scratch/dmonopoli/hot3d_pinhole_f609
     name: hot3d
     weight: 1.0
-  - root: /cluster/scratch/dmonopoli/egoexo_ours
-    name: egoexo4d
+  - root: /cluster/scratch/dmonopoli/oakink2_ours
+    name: oakink2
+    weight: 1.0
+  - root: /cluster/scratch/dmonopoli/taco_ours
+    name: taco
     weight: 1.0
   num_frames: 16
   resolution:
