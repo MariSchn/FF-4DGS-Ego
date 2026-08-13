@@ -181,7 +181,7 @@ def ratio_validity_mask(z, sampled, in_frame, require_positive_z=False, hand_pre
     return valid
 
 
-def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=None, contact_mask=None,
+def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=None, contact_mask=None, invert_cam_convention=False,
                  ref_d_scene=None, depth_out=None, steps_out=None, require_positive_z=False,
                  scene_depth_window=1, scene_depth_reduce="bilinear", hand_valid=None,
                  gate_scale_on_hand_valid=False):
@@ -210,6 +210,26 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
     _c2w_raw = preds.get("rendered_extrinsics")
     if _c2w_raw is not None:
         c2w = _c2w_raw[0].float()                           # [S,4,4]
+        # RESOLVED 2026-08-10, and the default is now the inversion. `rendered_extrinsics` is
+        # world-to-camera despite worldmirror.py:346 labelling it "C2W pose (OpenCV)", so every
+        # world metric this project ever reported was computed with the trajectory applied
+        # backwards. Four independent lines say so:
+        #   1. diag_camera_head, 1570 clips: rotation error 2.149 deg as emitted vs 0.362 deg
+        #      inverted, inverted better in 1539/1570 (98.0%); optimal translation scale median
+        #      -0.944; direction error 142.6 deg, past the 90 deg of a random direction.
+        #   2. End-to-end A/B, 60 detbox-v3 sequences, jobs 105477/105480: W-MPJPE 114.78 -> 59.83,
+        #      WA short 28.96 -> 21.12, WA long 48.16 -> 30.91.
+        #   3. The control holds exactly. C-MPJPE 24.73, C-MPJPE_abs 34.10 and the solved scale
+        #      0.673 move by 0.00, as they must, since none of them reads a camera pose. The flip
+        #      touches what it should and nothing else.
+        #   4. The standing anomaly resolves. With the emitted poses, substituting the TRUE metric
+        #      scale made W worse (129.23 vs 114.78), which is impossible for a correct pipeline;
+        #      inverted, the true scale helps (52.71 vs 59.83). A too-small scale was shrinking a
+        #      backwards trajectory toward identity, which is why identity used to beat prediction.
+        # Keep the flag so the old behaviour stays reproducible: passing --no_invert_cam_convention
+        # reproduces every world number in the pre-2026-08-10 records.
+        if invert_cam_convention:
+            c2w = torch.linalg.inv(c2w.double()).float()
     else:
         _S = pred_joints.shape[1]
         c2w = torch.eye(4, device=pred_joints.device).unsqueeze(0).repeat(_S, 1, 1)
@@ -438,6 +458,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                   da3_wrist_cache_dir=None, contact_cache_dir=None, contact_gate="off",
                   oracle_depth=False, dense_link=False,
                   gravity_oracle=False, gravity_axis=(0.0, 1.0, 0.0), dump_cam_dir=None,
+                  invert_cam_convention=False,
                   diag_cam=False, require_positive_z=False,
                   scene_depth_window=1, scene_depth_reduce="bilinear",
                   gate_scale_on_hand_valid=False):
@@ -492,6 +513,12 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
     # of by eval_world_space's own segmenter - the two enumerate segments differently (this file
     # drops the partial tail, the baseline scorer keeps it), which would otherwise make the rows
     # non-comparable. Frames outside a scored segment stay NaN and the scorer masks them out.
+    # OWED (noted 2026-08-10): this dump stores only the RESULT of the world lift, so any later
+    # change to the lift - the camera-convention flip, a different scale solve, a different linker -
+    # costs a full 5-hour re-run of the forward pass over 157 sequences. Storing the per-clip poses
+    # AND the per-clip chaining transforms would turn that into a re-score. Storing the poses alone
+    # is not enough and must not be done: world_joints comes from chained clips, so a pose-only
+    # field would look authoritative and fail to reproduce the file it sits next to.
     world_buf = torch.full_like(gt_cam, float("nan")) if dump_cam_dir else None
     n_seg = len(ds) // clips_per_seg
     if max_segs > 0:
@@ -553,6 +580,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                     _con = _sl.unsqueeze(0).to(device)                  # [1,S,2] contact gate
             _steps: dict = {}
             cc = predict_clip(preds, mano_model, device, cam_intr, model=model, anchor_log=anchor_log,
+                              invert_cam_convention=invert_cam_convention,
                               ref_d_scene=_ref, contact_mask=_con, depth_out=clip_depths,
                               steps_out=_steps, require_positive_z=require_positive_z,
                               scene_depth_window=scene_depth_window,
@@ -637,10 +665,18 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         def _metrics(pred):
             t = min(pred.shape[0], t_avail)
             p, g, v = pred[:t], gtw[:t], val[:t]
-            # W-MPJPE under the shared first-window RIGID gauge (rotation+translation, NO scale):
-            # matches Hand3R's "first-window align, no scale" and avoids the Sim3 scale blow-up.
-            # Predictions are already metric (in-scene hand anchor), so scale is never re-solved.
+            # W-MPJPE under OUR first-window RIGID gauge (rotation+translation, NO scale), solved
+            # on the first ``wa_short`` frames. Predictions are already metric (in-scene hand
+            # anchor), so scale is never re-solved, which also avoids the Sim3 scale blow-up.
             # Helper lives in world_space_metrics so the offline smoothing sweep scores identically.
+            #
+            # THIS IS NOT HAND3R'S GAUGE. An earlier version of this comment claimed it matched
+            # their "first-window align, no scale"; the protocol bundle their authors sent on
+            # 2026-08-13 says the transform is estimated from the FIRST TWO FRAMES. Ours fits 30.
+            # Both are rigid and scale-free, and they are not the same measurement: a 30-frame fit
+            # is a least-squares compromise across the window it is scored on, so it forgives early
+            # drift that a 2-frame fit does not. Score Hand3R-comparable W through
+            # scripts/hand3r_protocol/hand3r_metrics.py, never by relabelling this number.
             w = w_mpjpe_first_window_aligned(p, g, v, wa_short)
             return {"W_MPJPE": w,
                     "WA_MPJPE_short": wa_mpjpe(p, g, window=wa_short, valid=v),
@@ -1074,6 +1110,15 @@ def main():
                     help="world gravity direction, comma-separated (HOI4D world is Y-up -> 0,1,0)")
     ap.add_argument("--diag_cam", action="store_true",
                     help="print predicted vs GT per-clip camera-centre excursion (scale-effect diagnostic)")
+    # ON by default since 2026-08-10: rendered_extrinsics is world-to-camera, not the C2W its
+    # source labels it, and the A/B measured W-MPJPE 114.78 -> 59.83 with the camera-frame metrics
+    # unmoved. See the block in predict_clip for the four lines of evidence.
+    ap.add_argument("--no_invert_cam_convention", dest="invert_cam_convention",
+                    action="store_false", default=True,
+                    help="Use the predicted camera poses exactly as emitted, without inverting "
+                         "them. This reproduces every world number recorded before 2026-08-10, "
+                         "all of which applied the trajectory backwards. For reproducing old "
+                         "records only; it is not a configuration anyone should evaluate with.")
     ap.add_argument("--dump_cam_preds", default="",
                     help="if set, dump per-seq per-frame cam-space hands {cam_joints[N,2,16,3],valid} "
                          "to this dir (for the 'ours + SLAM' world composition, lever 2)")
@@ -1202,7 +1247,8 @@ def main():
                                      require_positive_z=args.require_positive_z,
                                      scene_depth_window=args.scene_depth_window,
                                      scene_depth_reduce=args.scene_depth_reduce,
-                                     gate_scale_on_hand_valid=args.gate_scale_on_hand_valid)
+                                     gate_scale_on_hand_valid=args.gate_scale_on_hand_valid,
+                                     invert_cam_convention=args.invert_cam_convention)
         except Exception as e:
             print(f"[skip {os.path.basename(sq)}] {type(e).__name__}: {e}", flush=True)
             traceback.print_exc()

@@ -29,6 +29,12 @@ def solve_similarity(src: torch.Tensor, dst: torch.Tensor,
     scalars/tensors (s: scalar, R: [3,3], t: [3]) in ``src``'s dtype/device.
     """
     assert src.shape == dst.shape and src.shape[-1] == 3 and src.dim() == 2
+    # The solve always runs in float64, but the RESULT is returned in the caller's dtype rather
+    # than unconditionally in float32. A float32 rotation carries ~1e-7 relative error, which over
+    # a metre of camera travel is ~0.1 mm and therefore inside the range of the protocol
+    # differences we are trying to measure against Hand3R's float64 reference scorer. Float32
+    # callers see no change.
+    out_dtype = src.dtype if src.dtype.is_floating_point else torch.float32
     src = src.to(torch.float64)
     dst = dst.to(torch.float64)
 
@@ -45,8 +51,9 @@ def solve_similarity(src: torch.Tensor, dst: torch.Tensor,
     if src.shape[0] < 3:
         # Below 3 correspondences the similarity is not determined. Return identity rather than
         # raising, so the caller records a useless-but-finite alignment for this pair.
-        return (torch.tensor(1.0), torch.eye(3, dtype=torch.float32, device=src.device),
-                torch.zeros(3, dtype=torch.float32, device=src.device))
+        return (torch.tensor(1.0, dtype=out_dtype),
+                torch.eye(3, dtype=out_dtype, device=src.device),
+                torch.zeros(3, dtype=out_dtype, device=src.device))
 
     n = src.shape[0]
     if weights is None:
@@ -67,7 +74,7 @@ def solve_similarity(src: torch.Tensor, dst: torch.Tensor,
     var_s = (w * (xs ** 2).sum(-1)).sum() / wsum
     scale = (d * s_diag).sum() / var_s.clamp_min(1e-12)
     trans = mu_d - scale * (rot @ mu_s)
-    return scale.float(), rot.float(), trans.float()
+    return scale.to(out_dtype), rot.to(out_dtype), trans.to(out_dtype)
 
 
 def solve_similarity_robust(src: torch.Tensor, dst: torch.Tensor, iters: int = 5,
@@ -565,6 +572,11 @@ def first_window_rigid_align(pred: torch.Tensor, gt: torch.Tensor,
     the Umeyama ROTATION over it (scale-free), apply a RIGID (scale=1) translation, return aligned
     ``pred`` [T,J,3]. Predictions are already metric (in-scene hand anchor) so scale is never
     re-solved. Returns ``None`` when no window has enough valid+finite joints.
+
+    This gauge is OURS. Hand3R's W-MPJPE fits the same kind of transform on the FIRST TWO FRAMES
+    rather than the first window, per the protocol bundle their authors sent on 2026-08-13, so the
+    two numbers are not interchangeable and neither should be presented under the other's name.
+    ``scripts/hand3r_protocol/hand3r_metrics.py`` implements theirs.
     """
     t, j = pred.shape[0], pred.shape[1]
     v = _valid_mask(valid, t, j, pred.device)
