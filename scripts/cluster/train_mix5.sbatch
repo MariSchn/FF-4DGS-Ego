@@ -4,8 +4,8 @@
 #SBATCH --output=/cluster/scratch/dmonopoli/mix5_%j.out
 #SBATCH --time=120:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem-per-cpu=7G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem-per-cpu=8G
 #SBATCH --gpus=1
 #SBATCH --gres=gpumem:24g
 # The five-dataset run. ARCTIC + DexYCB + HOT3D + OakInk2 + TACO, with HOI4D and H2O held out and
@@ -13,14 +13,24 @@
 #
 # The guards below are not defensive habit. Each one is a defect this project already paid for,
 # and each cost more than the job it protects.
+# MEMORY. The first attempt asked 4x7G and the kernel OOM-killed it after 53 minutes,
+# right after the initial validation, which is the peak: the train and validation
+# loaders coexist there. The dataset preloads per-sequence GT into RAM and every
+# dataloader worker forks a copy of it, so five stores at num_workers 2 across three
+# loaders is up to six copies. Raised to 8x8G and num_workers dropped to 1; with a
+# feature cache the loader only reads one .pt per clip, so workers buy little.
 set -uo pipefail
 S=/cluster/scratch/dmonopoli
 cd $S/FF-4DGS-Ego
 export PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 PY=$S/train_env/bin/python
-CFG=configs/train_mix5_all.yaml
-RUN=mix5
+# Both arms run through THIS script so they cannot drift apart. An ablation whose two arms live in
+# two scripts ends up measuring whatever else diverged, which is how the unfreezing ablation once
+# measured the learning rate. Usage: sbatch train_mix5.sbatch [run_name] [config]
+RUN=${1:-mix5}
+CFG=${2:-configs/train_mix5_all.yaml}
 CKDIR=$S/checkpoints/$RUN
+echo "=== ARM: $RUN  CFG: $CFG ==="
 
 echo "=== GUARDS ==="
 $PY -c 'import torch,numpy,cv2,smplx,chumpy; print("env OK torch",torch.__version__,"cuda",torch.cuda.is_available())' || exit 1
@@ -47,7 +57,10 @@ PYG
 #    cache is worse, because nothing anywhere reports it. The TACO build died at 17568 of 23134 on
 #    a full scratch quota while SLURM recorded it COMPLETED 0:0, so ">100 clips" would have passed
 #    and the headline run would have trained on 76% of one dataset. Expected counts, not presence.
-declare -A EXPECT=( [arctic]=11000 [dexycb]=5800 [hot3d]=4900 [oakink2]=15000 [taco]=23000 )
+#    Counts are MEASURED from each completed build, not derived from sequences times stride. A
+#    derived figure blocked this run once: TACO yields 19199 clips, not the 23134 that arithmetic
+#    over 2311 sequences suggests, because clips per sequence follow sequence length.
+declare -A EXPECT=( [arctic]=11000 [dexycb]=5800 [hot3d]=4900 [oakink2]=15000 [taco]=19199 )
 for n in arctic dexycb hot3d oakink2 taco; do
   c=$(ls $S/featcache32/$n 2>/dev/null | wc -l)
   e=${EXPECT[$n]}
