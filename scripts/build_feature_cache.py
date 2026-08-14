@@ -142,6 +142,20 @@ def main() -> None:
         batch = [b for b in batch if b is not None]
         return default_collate(batch) if batch else None
 
+    # Drop already-cached clips HERE, from the clip index, not after the loader has built them.
+    # The skip below still works and stays as a backstop, but reaching it costs a full video
+    # decode per clip with the GPU idle. Resuming a 17.5k-clip build that way ran for half an
+    # hour without writing anything. The key is the same expression the training loader uses.
+    if hasattr(ds, "clips"):
+        n0 = len(ds.clips)
+        ds.clips = [c for c in ds.clips if not os.path.exists(os.path.join(
+            args.out, f"{os.path.basename(c['seq_path'])}_{c['frame_offset']}.pt"))]
+        print(f"[resume] {n0 - len(ds.clips)} clips already cached, {len(ds.clips)} to build",
+              flush=True)
+        if not ds.clips:
+            print(f"CACHE_BUILD_DONE done=0 skip={n0} out={args.out}", flush=True)
+            return
+
     dl = DataLoader(_SafeDS(ds), batch_size=args.batch_size, num_workers=args.num_workers,
                     shuffle=False, collate_fn=_collate_skip_none)
 
