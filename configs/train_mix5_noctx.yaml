@@ -74,6 +74,10 @@ model:
     mlp_dim: 1024
     dropout: 0.0
     crop_global_depth: 1
+    # ABLATION ARM. False cuts the cross-attention from hand tokens to the
+    # full-frame scene tokens, which is the mechanism the abstract claims
+    # supplies contextual cues for metric placement. Nothing else changes.
+    use_global_context: false
 loss_weights:
   betas: 0.01
   global_orient: 0.01
@@ -115,7 +119,7 @@ wandb:
   enabled: true
   project: hand-head-training
   entity: 3DV-Project
-  run_name: mix5 ARCTIC+DexYCB+HOT3D+OakInk2+TACO (HOI4D and H2O held out)
+  run_name: mix5 NO global scene context (ablation of the hand-reads-scene path)
   tags:
   - mixed
   - 5dataset
