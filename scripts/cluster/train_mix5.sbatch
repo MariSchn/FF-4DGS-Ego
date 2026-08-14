@@ -42,13 +42,23 @@ print("config OK: kp3d_abs 1.0, roots", names)
 PYG
 [ $? -eq 0 ] || exit 2
 
-# 2. All five caches present. A missing one does not fail either: the loader falls back to a full
-#    backbone forward and the run silently becomes hours per epoch instead of minutes.
+# 2. All five caches present AND complete. A missing cache does not fail on its own: the loader
+#    falls back to a full backbone forward and the run silently becomes hours per epoch. A PARTIAL
+#    cache is worse, because nothing anywhere reports it. The TACO build died at 17568 of 23134 on
+#    a full scratch quota while SLURM recorded it COMPLETED 0:0, so ">100 clips" would have passed
+#    and the headline run would have trained on 76% of one dataset. Expected counts, not presence.
+declare -A EXPECT=( [arctic]=11000 [dexycb]=5800 [hot3d]=4900 [oakink2]=15000 [taco]=23000 )
 for n in arctic dexycb hot3d oakink2 taco; do
   c=$(ls $S/featcache32/$n 2>/dev/null | wc -l)
-  echo "  cache $n: $c clips"
-  [ "$c" -gt 100 ] || { echo "!! cache $n missing or short, refusing to start"; exit 3; }
+  e=${EXPECT[$n]}
+  echo "  cache $n: $c clips (expect >= $e)"
+  [ "$c" -ge "$e" ] || { echo "!! cache $n has $c clips, expected at least $e, refusing to start"; exit 3; }
 done
+
+# A clip truncated by a full disk still satisfies os.path.exists, so the cache builder skips it on
+# resume and training loads a zero-byte tensor. Cheap to check, impossible to debug later.
+BAD=$(find $S/featcache32 -name '*.pt' -size -1M 2>/dev/null | head -5)
+[ -z "$BAD" ] || { echo "!! truncated cache clips present:"; echo "$BAD"; exit 3; }
 
 echo "=== TRAIN ==="
 $PY -u -m scripts.train_hand_head --config $CFG
@@ -74,6 +84,12 @@ echo "=== EVAL: HOI4D-157, zero-shot ==="
 # while the job still exits 0. That one bit us three times.
 EC=$S/FF-4DGS-Ego/configs/_${RUN}_hoi4d_eval.yaml
 $PY scripts/_make_eval_cfg.py $CFG "$CKPT" "$EC"
+# 4. enable_cam. Without it the model never publishes camera_poses, the world lift falls back to
+#    identity poses, and every W and WA measures hand-joint chaining with a camera that never moves.
+#    The training configs set it false, which is correct for training and fatal for a world eval.
+for E in "$EC"; do
+  grep -qE '^\s*enable_cam:\s*true' "$E" || { echo "!! enable_cam not true in $E"; exit 6; }
+done
 $PY -u -m scripts.eval_world_space --config "$EC" \
   --data_root $S/hoi4d_test157_detv3 \
   --segment_len 100 --wa_short 30 \
@@ -82,6 +98,7 @@ $PY -u -m scripts.eval_world_space --config "$EC" \
 echo "=== EVAL: H2O, zero-shot ==="
 EH=$S/FF-4DGS-Ego/configs/_${RUN}_h2o_eval.yaml
 $PY scripts/_make_eval_cfg.py $CFG "$CKPT" "$EH"
+grep -qE '^\s*enable_cam:\s*true' "$EH" || { echo "!! enable_cam not true in $EH"; exit 6; }
 $PY -u -m scripts.eval_world_space --config "$EH" \
   --data_root $S/h2o/store \
   --segment_len 100 --wa_short 30 \

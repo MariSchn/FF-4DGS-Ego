@@ -28,19 +28,24 @@ data:
   - root: /cluster/scratch/dmonopoli/arctic_ours
     name: arctic
     weight: 1.0
+    feature_cache_dir: /cluster/scratch/dmonopoli/featcache32/arctic
   - root: /cluster/scratch/dmonopoli/dexycb/store
     name: dexycb
     weight: 1.0
+    feature_cache_dir: /cluster/scratch/dmonopoli/featcache32/dexycb
   - root: /cluster/scratch/dmonopoli/hot3d_pinhole_f609
     name: hot3d
     weight: 1.0
+    feature_cache_dir: /cluster/scratch/dmonopoli/featcache32/hot3d
   - root: /cluster/scratch/dmonopoli/oakink2_ours
     name: oakink2
     weight: 1.0
+    feature_cache_dir: /cluster/scratch/dmonopoli/featcache32/oakink2
   - root: /cluster/scratch/dmonopoli/taco_ours
     name: taco
     weight: 1.0
-  num_frames: 16
+    feature_cache_dir: /cluster/scratch/dmonopoli/featcache32/taco
+  num_frames: 32
   resolution:
   - 224
   - 224
