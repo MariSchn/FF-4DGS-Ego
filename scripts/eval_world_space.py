@@ -42,6 +42,17 @@ from scripts.world_space_metrics import (
 # untrained-model performance as if it were a result.
 MIN_TRAINED_STEP = 10
 
+# The velocity heads and the dynamic Gaussian attribute heads are built (enable_motion and
+# enable_dynamic_gs_attr default to True) and gated on `use_motion`, which every call site in this
+# project passes as False. So they are counted in the parameter total and never execute, and the
+# scene we produce is a stack of per-frame reconstructions rather than a motion-modelled 4D one.
+# The backbone supplies the bidirectional token lists those heads need only under
+# `use_motion and is_inference`, so enabling it here is enough to run them.
+#
+# DEFAULT STAYS FALSE. The window-length arms are matched by running the same configuration, and
+# w32/w64 are queued against a w16 that ran without it. Opt in with --use_motion.
+USE_MOTION = False
+
 
 def _assert_checkpoint_is_trained(path, ck):
     """Refuse to evaluate a checkpoint that was saved before training did anything.
@@ -546,7 +557,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                 views["camera_intrs"] = k.view(1, 1, 3, 3).expand(1, clip_len, 3, 3).contiguous()
                 cond_flags = [0, 0, 1]
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                preds = model(views, cond_flags=cond_flags, is_inference=True, use_motion=False)
+                preds = model(views, cond_flags=cond_flags, is_inference=True, use_motion=USE_MOTION)
             # Per-clip camera-pose refinement: sharpen each frame's pose against the clip's own
             # static Gaussian map (the per-clip-pose bottleneck the oracle-cam diagnostic exposed).
             # Runs in fp32 outside the autocast block; overwrites the c2w predict_clip lifts with.
@@ -1006,7 +1017,7 @@ def eval_oracle_cam(model, mano_model, device, seq_dir, cfg, clip_len, stride, m
         hv = batch["hand_valid"].unsqueeze(0).to(device) if "hand_valid" in batch else None
         views = build_views(imgs, clip_len, device, hb, hv)
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            preds = model(views, is_inference=True, use_motion=False)
+            preds = model(views, is_inference=True, use_motion=USE_MOTION)
         pj = compute_joints_from_batch(preds["hand_joints"], mano_model, device)[0].float().cpu()  # [S,2,16,3] cam (m)
         w2c = batch["cam_extrinsics"].float().cpu()                                                # [S,4,4] world->cam
         start = j * stride
@@ -1127,8 +1138,17 @@ def main():
     ap.add_argument("--dump_cam_preds", default="",
                     help="if set, dump per-seq per-frame cam-space hands {cam_joints[N,2,16,3],valid} "
                          "to this dir (for the 'ours + SLAM' world composition, lever 2)")
+    ap.add_argument("--use_motion", action="store_true",
+                    help="run the velocity and dynamic Gaussian attribute heads, which are built "
+                         "but gated off at every call site, so the scene is currently a stack of "
+                         "per-frame reconstructions rather than a motion-modelled 4D one. Off by "
+                         "default because the reported arms were all measured without it.")
     ap.add_argument("--out", default="world_eval.json")
     args = ap.parse_args()
+    global USE_MOTION
+    USE_MOTION = bool(args.use_motion)
+    if USE_MOTION:
+        print("use_motion ON: velocity and dynamic Gaussian attribute heads will execute", flush=True)
 
     smooth_windows = [int(x) for x in args.smooth_windows.split(",") if x.strip()] or None
     dump_list = [] if args.dump_traj else None
