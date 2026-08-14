@@ -171,11 +171,19 @@ def _load_clips(cfg, mcfg, data_root, clip_len, stride, need, mano_model):
     return clips
 
 
-def _time_config(cfg, enable_gs, clips, clip_len, warmup, iters, device, mano_model):
-    """Build the model with the Gaussian branch on or off and time the online path."""
+def _time_config(cfg, enable_gs, clips, clip_len, warmup, iters, device, mano_model,
+                 gs_anchor_only=False, stride=None):
+    """Build the model with the Gaussian branch on or off and time the online path.
+
+    ``gs_anchor_only`` reproduces the configuration the world numbers are actually scored in: the
+    fast path returns before splat build and rasterization, so it costs less than a full render.
+    Timing only the two extremes reports a system nobody runs.
+    """
     cfg = copy.deepcopy(cfg)
     cfg["model"]["enable_gs"] = bool(enable_gs)
     model = build_model(cfg, device)
+    if gs_anchor_only:
+        model.gs_anchor_only = True
     n_total = sum(p.numel() for p in model.parameters())
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -213,7 +221,15 @@ def _time_config(cfg, enable_gs, clips, clip_len, warmup, iters, device, mano_mo
         "forward_s_mean": float(fwd.mean()), "forward_s_std": float(fwd.std()),
         "lift_s_mean": float(lift.mean()), "lift_s_std": float(lift.std()),
         "total_s_mean": float(tot.mean()), "total_s_std": float(tot.std()),
-        "fps": float(clip_len / tot.mean()),
+        "gs_anchor_only": bool(gs_anchor_only),
+        # Two rates, because they differ whenever clips overlap and only one of them is a
+        # throughput. clip_fps divides by the clip length and describes a non-overlapping stream.
+        # The evaluation protocol advances by `stride`, so at stride 8 with 16-frame clips every
+        # frame is encoded twice and the deployed system delivers half of clip_fps. Reporting
+        # clip_fps against a baseline's wall-clock rate overstates us by exactly that factor.
+        "clip_fps": float(clip_len / tot.mean()),
+        "fps": float((stride if stride else clip_len) / tot.mean()),
+        "stride": int(stride if stride else clip_len),
         "peak_mem_GiB": float(peak),
         "param_split": params,
         "flop_split": flops,
@@ -225,9 +241,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--data_root", required=True)
-    ap.add_argument("--clip_len", type=int, default=32,
+    # Defaults are the EVALUATION protocol, not a convenient one. eval_world_space defaults to
+    # --clip_len 16 --stride 8 and calls that the locked protocol, so clips overlap by half and
+    # every frame is encoded twice. Timing at stride 16 measures a stream nobody runs and doubles
+    # the reported throughput.
+    ap.add_argument("--clip_len", type=int, default=16,
                     help="MUST match the clip length behind the reported tables")
-    ap.add_argument("--stride", type=int, default=16)
+    ap.add_argument("--stride", type=int, default=8,
+                    help="MUST match the eval stride; the unique-frame rate is stride / latency")
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--iters", type=int, default=30)
     ap.add_argument("--detector_s_per_frame", type=float, default=None,
@@ -248,11 +269,18 @@ def main():
     print(f"[fps_breakdown] GPU={gpu} T={a.clip_len} clips={len(clips)}", flush=True)
 
     rows = {}
-    for name, gs in (("hands_only", False), ("hands_plus_gaussians", True)):
-        print(f"[fps_breakdown] timing {name} (enable_gs={gs}) ...", flush=True)
+    # Three arms, not two. "as_scored" is the configuration every world number in the paper was
+    # produced under: the Gaussian branch enabled for its depth, with the anchor-only fast path
+    # skipping rasterization. Without it the table offers a cheaper system than the one evaluated
+    # and a more expensive one than the one evaluated, and neither is what we ran.
+    for name, gs, anchor in (("hands_only", False, False),
+                             ("as_scored", True, True),
+                             ("hands_plus_gaussians", True, False)):
+        print(f"[fps_breakdown] timing {name} (enable_gs={gs}, gs_anchor_only={anchor}) ...",
+              flush=True)
         try:
             rows[name] = _time_config(cfg, gs, clips, a.clip_len, a.warmup, a.iters,
-                                      device, mano_model)
+                                      device, mano_model, gs_anchor_only=anchor, stride=a.stride)
         except Exception as e:                      # a config may not support the GS branch
             rows[name] = {"error": f"{type(e).__name__}: {e}"}
             print(f"[fps_breakdown] {name} FAILED: {e}", flush=True)
