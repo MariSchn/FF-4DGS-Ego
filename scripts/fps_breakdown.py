@@ -172,15 +172,21 @@ def _load_clips(cfg, mcfg, data_root, clip_len, stride, need, mano_model):
 
 
 def _time_config(cfg, enable_gs, clips, clip_len, warmup, iters, device, mano_model,
-                 gs_anchor_only=False, stride=None):
+                 gs_anchor_only=False, stride=None, enable_hand=True):
     """Build the model with the Gaussian branch on or off and time the online path.
 
     ``gs_anchor_only`` reproduces the configuration the world numbers are actually scored in: the
     fast path returns before splat build and rasterization, so it costs less than a full render.
     Timing only the two extremes reports a system nobody runs.
+
+    ``enable_hand=False`` times the inherited encoder with no head attached at all. The FLOP split
+    already says how much of the ARITHMETIC is inherited; this arm says how much of the LATENCY is,
+    which is the number a reviewer needs to see that our throughput is the backbone's throughput
+    and not something the hand branch earned.
     """
     cfg = copy.deepcopy(cfg)
     cfg["model"]["enable_gs"] = bool(enable_gs)
+    cfg["model"]["enable_hand"] = bool(enable_hand)
     model = build_model(cfg, device)
     if gs_anchor_only:
         model.gs_anchor_only = True
@@ -192,7 +198,10 @@ def _time_config(cfg, enable_gs, clips, clip_len, warmup, iters, device, mano_mo
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
             preds = _forward_once(model, batch, clip_len, device)
         _sync(device); t1 = time.perf_counter()
-        _ = compute_joints_from_batch(preds["hand_joints"], mano_model, device)
+        # The backbone-only arm publishes no hand_joints, and the MANO lift is a head cost anyway,
+        # so it belongs to zero rather than to a crash.
+        if "hand_joints" in preds:
+            _ = compute_joints_from_batch(preds["hand_joints"], mano_model, device)
         _sync(device); t2 = time.perf_counter()
         return (t1 - t0), (t2 - t1)
 
@@ -269,18 +278,21 @@ def main():
     print(f"[fps_breakdown] GPU={gpu} T={a.clip_len} clips={len(clips)}", flush=True)
 
     rows = {}
-    # Three arms, not two. "as_scored" is the configuration every world number in the paper was
-    # produced under: the Gaussian branch enabled for its depth, with the anchor-only fast path
-    # skipping rasterization. Without it the table offers a cheaper system than the one evaluated
-    # and a more expensive one than the one evaluated, and neither is what we ran.
-    for name, gs, anchor in (("hands_only", False, False),
-                             ("as_scored", True, True),
-                             ("hands_plus_gaussians", True, False)):
-        print(f"[fps_breakdown] timing {name} (enable_gs={gs}, gs_anchor_only={anchor}) ...",
-              flush=True)
+    # Four arms. "as_scored" is the configuration every world number in the paper was produced
+    # under: the Gaussian branch enabled for its depth, with the anchor-only fast path skipping
+    # rasterization. Without it the table offers a cheaper system than the one evaluated and a more
+    # expensive one than the one evaluated, and neither is what we ran. "backbone_only" is the
+    # floor: the inherited encoder with no head, which is the throughput we did not create.
+    for name, gs, anchor, hand in (("backbone_only", False, False, False),
+                                   ("hands_only", False, False, True),
+                                   ("as_scored", True, True, True),
+                                   ("hands_plus_gaussians", True, False, True)):
+        print(f"[fps_breakdown] timing {name} (enable_gs={gs}, gs_anchor_only={anchor}, "
+              f"enable_hand={hand}) ...", flush=True)
         try:
             rows[name] = _time_config(cfg, gs, clips, a.clip_len, a.warmup, a.iters,
-                                      device, mano_model, gs_anchor_only=anchor, stride=a.stride)
+                                      device, mano_model, gs_anchor_only=anchor, stride=a.stride,
+                                      enable_hand=hand)
         except Exception as e:                      # a config may not support the GS branch
             rows[name] = {"error": f"{type(e).__name__}: {e}"}
             print(f"[fps_breakdown] {name} FAILED: {e}", flush=True)
@@ -290,6 +302,10 @@ def main():
         d = ok["hands_plus_gaussians"]["total_s_mean"] - ok["hands_only"]["total_s_mean"]
         rows["gaussian_branch_cost_s"] = float(d)
         rows["gaussian_branch_pct"] = 100.0 * d / ok["hands_plus_gaussians"]["total_s_mean"]
+    if "backbone_only" in ok and "as_scored" in ok:
+        b, s = ok["backbone_only"]["total_s_mean"], ok["as_scored"]["total_s_mean"]
+        rows["inherited_latency_pct"] = 100.0 * b / s
+        rows["added_latency_s"] = float(s - b)
 
     rows["_meta"] = {
         "gpu": gpu, "clip_len": a.clip_len, "config": a.config,
@@ -308,7 +324,9 @@ def main():
     print("\\toprule")
     print("Configuration & latency (ms) & FPS $\\uparrow$ & peak mem (GiB) \\\\")
     print("\\midrule")
-    for key, label in (("hands_only", "Hands only (no scene)"),
+    for key, label in (("backbone_only", "Inherited encoder alone (no head)"),
+                       ("hands_only", "Hands only (no scene)"),
+                       ("as_scored", "As scored (GS depth, no raster)"),
                        ("hands_plus_gaussians", "Hands $+$ 4D Gaussians")):
         r = rows.get(key, {})
         if "error" in r:
