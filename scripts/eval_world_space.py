@@ -231,18 +231,16 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
         if invert_cam_convention:
             c2w = torch.linalg.inv(c2w.double()).float()
     else:
-        _S = pred_joints.shape[1]
-        c2w = torch.eye(4, device=pred_joints.device).unsqueeze(0).repeat(_S, 1, 1)
-        # SHOUT. Identity poses mean the world lift has NO camera motion at all, so every
-        # world/W metric degenerates to hand-joint chaining and every scene-scale variant
-        # collapses to the same number. This used to pass silently and invalidated a whole
-        # round of scale/linking experiments before the diag_cam probe caught it.
-        if not getattr(predict_clip, "_warned_identity_c2w", False):
-            predict_clip._warned_identity_c2w = True
-            print("  !! NO rendered_extrinsics IN preds - falling back to IDENTITY camera poses. "
-                  "World/W metrics from this run are NOT valid (no camera motion). Ensure the "
-                  "model publishes camera_poses (see worldmirror gs_anchor_only fast path).",
-                  flush=True)
+        # Identity poses mean the world lift has no camera motion, so every W/WA number degenerates
+        # to hand-joint chaining and every scene-scale variant returns the same value. This script
+        # exists to produce world metrics, so there is no configuration in which that is a usable
+        # result. A warning is not enough: a job that exits 0 gets read as a finding.
+        raise RuntimeError(
+            "no rendered_extrinsics in preds, so the world lift would use IDENTITY camera poses "
+            "and every world metric would be invalid. The camera head publishes camera_poses only "
+            "under model.enable_cam, and the gs_anchor_only fast path republishes it as "
+            "rendered_extrinsics. Set model.enable_cam: true in the eval config "
+            "(scripts/_make_eval_cfg.py forces it).")
     gs_depth = preds.get("gs_depth")
     # Dump support: a nearest-subsampled 32x32 per-frame scene depth (fp16). Nearest (not avg)
     # keeps real depth samples so offline scene-point backprojection has no flying-pixel blend.
@@ -754,12 +752,18 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         if s_gt_by_clip:
             worlds_gts = [_world_from_cam(pj, c2w, s_gt_by_clip.get(i, s))
                           for i, (pj, c2w, s, _, _) in enumerate(clip_cams)]
+        # NO-SCALE arm. The scene-scale module is a claimed contribution, so its ablation is the
+        # world lift with the module removed: s = 1, the raw up-to-scale camera translation. The
+        # rigid-linker variants below are NOT this ablation, they freeze the chunk-to-chunk
+        # Umeyama scale while the pooled scene scale is still applied.
+        worlds_s1 = [_world_from_cam(pj, c2w, 1.0) for (pj, c2w, _, _, _) in clip_cams]
         worlds_pc = [_world_from_cam(pj, c2w, s) for (pj, c2w, s, _, _) in clip_cams]       # per-clip
         worlds_md = [_world_from_cam(pj, c2w, s_med) for (pj, c2w, _, _, _) in clip_cams]   # per-seq median
         worlds_pl = [_world_from_cam(pj, c2w, s_pool) for (pj, c2w, _, _, _) in clip_cams]  # per-seq pooled
         g_pc = _greedy(worlds_pc)
         gl_pc = _global(worlds_pc)
         g_md = _greedy(worlds_md)
+        g_s1 = _greedy(worlds_s1)
         g_gts = _greedy(worlds_gts) if worlds_gts is not None else None
         chain_pl = chain_trajectories_by_overlap(worlds_pl, overlap=overlap)  # pooled greedy traj
         g_pl = _metrics(chain_pl)
@@ -927,6 +931,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             row[k + "_global"] = gl_pc[k]
             row[k + "_smed"] = g_md[k]             # per-seq median scale
             row[k + "_spool"] = g_pl[k]            # per-seq pooled scale (principled, sequence-level)
+            row[k + "_s1"] = g_s1[k]               # scale module REMOVED (s=1)
             row[k + "_link"] = gl_link[k]          # pooled scale, linker WITH camera centres
             row[k + "_linkcf"] = gl_linkcf[k]      # pooled scale, linker cross-fade only (no centres, safe)
             row[k + "_linkr"] = gl_linkr[k]        # RIGID linker (s=1 per clip) WITH centres
@@ -1270,7 +1275,7 @@ def main():
             # the GT scale magnitude substituted. Comparing it against the bare key attributes
             # the translation term to magnitude vs direction, which is what decides whether
             # "fix the scale" is the top W lever or a minor one.
-            for suf in ("", "_global", "_smed", "_spool", "_link", "_linkcf", "_linkr",
+            for suf in ("", "_global", "_smed", "_spool", "_s1", "_link", "_linkcf", "_linkr",
                         "_linkrcf", "_gtscale"):
                 agg[k + suf] = _mean(k + suf)
         for k in ("C_MPJPE", "C_MPJPE_abs", "s_med", "s_pool", "s_clip_std"):
@@ -1326,6 +1331,18 @@ def main():
               f"per-seq-pooled={agg['W_MPJPE_spool']:.1f}")
         print(f"OURS WA(short/long)  per-clip={agg['WA_MPJPE_short']:.1f}/{agg['WA_MPJPE_long']:.1f}  "
               f"per-seq-pooled={agg['WA_MPJPE_short_spool']:.1f}/{agg['WA_MPJPE_long_spool']:.1f}")
+        # SCALE ABLATION. s multiplies only the camera translation, so if the solved arm and the
+        # s=1 arm agree on every segment the camera is not moving and no world number here is
+        # meaningful. That degeneracy has been mistaken for "the scale module does nothing" before.
+        _n_ident = sum(1 for r in valid if r.get("W_MPJPE_s1") == r.get("W_MPJPE_spool"))
+        _gts = agg["W_MPJPE_gtscale"]
+        print(f"OURS SCALE ABLATION (W-MPJPE)  solved={agg['W_MPJPE_spool']:.1f}  "
+              f"s=1={agg['W_MPJPE_s1']:.1f}  "
+              + (f"s=GT={_gts:.1f}" if _gts == _gts else "s=GT=absent (no cam_extrinsics)")
+              + f"  | solved s={agg['s_pool']:.3f}\n"
+              f"  identical solved-vs-s1 segments: {_n_ident}/{len(valid)}"
+              + ("  !! DEGENERATE: camera translation is ~zero, world metrics are NOT valid"
+                 if _n_ident == len(valid) else ""))
         print(f"OURS CHUNK LINKER (pooled scale, W-MPJPE)  greedy={agg['W_MPJPE_spool']:.1f}  "
               f"cross-fade-only={agg['W_MPJPE_linkcf']:.1f}  +camera-centres={agg['W_MPJPE_link']:.1f}\n"
               f"  WA(short/long)  cf-only={agg['WA_MPJPE_short_linkcf']:.1f}/{agg['WA_MPJPE_long_linkcf']:.1f}  "

@@ -15,6 +15,13 @@ We therefore force ``enable_gs: true`` and pair it with ``gs_anchor_only: true``
 depth correspondences the scale solve needs while skipping the expensive gsplat rasterization, so
 correctness costs almost nothing. ``--keep_gs_off`` opts out for a camera-frame-only eval where
 the scale is genuinely irrelevant.
+
+WHY THIS ALSO FORCES enable_cam. ``camera_poses`` is published only under ``enable_cam``
+(worldmirror ``_gen_all_preds``), and it is what the ``gs_anchor_only`` fast path republishes as
+``rendered_extrinsics``. With the camera head off, the world lift falls back to identity poses:
+zero camera translation, so every scene-scale variant returns a bit-identical number and
+``s_gt_med`` comes out NaN. A world eval without a camera trajectory measures hand-joint chaining,
+not world placement.
 """
 import sys
 
@@ -38,6 +45,13 @@ else:
         print(f"forced model.enable_gs {was} -> True (+ gs_anchor_only) so the world-space scale "
               f"solve has gs_depth correspondences; pass --keep_gs_off to override")
 
+    was_cam = cfg["model"].get("enable_cam")
+    cfg["model"]["enable_cam"] = True
+    if was_cam is not True:
+        print(f"forced model.enable_cam {was_cam} -> True so the model publishes camera_poses; "
+              f"without it the world lift silently uses identity camera poses")
+
 yaml.safe_dump(cfg, open(out, "w"), sort_keys=False)
-print("eval config -> {}  (ckpt={}, num_frames={}, enable_gs={})".format(
-    out, ckpt, cfg["data"]["num_frames"], cfg["model"].get("enable_gs")))
+print("eval config -> {}  (ckpt={}, num_frames={}, enable_gs={}, enable_cam={})".format(
+    out, ckpt, cfg["data"]["num_frames"],
+    cfg["model"].get("enable_gs"), cfg["model"].get("enable_cam")))
