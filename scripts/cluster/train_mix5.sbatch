@@ -91,6 +91,16 @@ print('checkpoint', '$CKPT', 'global_step', gs)
 sys.exit(0 if (gs is None or gs>100) else 5)
 " || { echo "!! checkpoint barely stepped, not evaluating it"; exit 5; }
 
+# 5. Eval roots must exist BEFORE the days of training, not after. The H2O root read
+#    $S/h2o/store, which has never existed: the store is $S/h2o_currentproto. The eval is
+#    piped into tail, so its exit status was discarded and the job would have printed
+#    MIX5_DONE with half its results missing.
+HOI4D_ROOT=$S/hoi4d_test157_detv3
+H2O_ROOT=$S/h2o_currentproto
+for R in "$HOI4D_ROOT" "$H2O_ROOT"; do
+  [ -d "$R" ] || { echo "!! eval root $R does not exist, refusing to train for days first"; exit 7; }
+done
+
 echo "=== EVAL: HOI4D-157, zero-shot ==="
 # _make_eval_cfg forces enable_gs on. Do NOT pass --keep_gs_off: the training configs set it
 # false, and copying that into a world eval makes every W and WA non-metric (scale pinned to 1.0)
@@ -103,18 +113,21 @@ $PY scripts/_make_eval_cfg.py $CFG "$CKPT" "$EC"
 for E in "$EC"; do
   grep -qE '^\s*enable_cam:\s*true' "$E" || { echo "!! enable_cam not true in $E"; exit 6; }
 done
+set -o pipefail
 $PY -u -m scripts.eval_world_space --config "$EC" \
-  --data_root $S/hoi4d_test157_detv3 \
+  --data_root "$HOI4D_ROOT" \
   --segment_len 100 --wa_short 30 \
   --out $S/results/${RUN}_hoi4d157.json 2>&1 | tail -12
+[ $? -eq 0 ] || { echo "!! HOI4D eval failed"; exit 8; }
 
 echo "=== EVAL: H2O, zero-shot ==="
 EH=$S/FF-4DGS-Ego/configs/_${RUN}_h2o_eval.yaml
 $PY scripts/_make_eval_cfg.py $CFG "$CKPT" "$EH"
 grep -qE '^\s*enable_cam:\s*true' "$EH" || { echo "!! enable_cam not true in $EH"; exit 6; }
 $PY -u -m scripts.eval_world_space --config "$EH" \
-  --data_root $S/h2o/store \
+  --data_root "$H2O_ROOT" \
   --segment_len 100 --wa_short 30 \
   --out $S/results/${RUN}_h2o.json 2>&1 | tail -12
+[ $? -eq 0 ] || { echo "!! H2O eval failed"; exit 8; }
 
 echo "### MIX5_DONE ###"
