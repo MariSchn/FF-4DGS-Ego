@@ -60,7 +60,10 @@ PYG
 #    Counts are MEASURED from each completed build, not derived from sequences times stride. A
 #    derived figure blocked this run once: TACO yields 19199 clips, not the 23134 that arithmetic
 #    over 2311 sequences suggests, because clips per sequence follow sequence length.
-declare -A EXPECT=( [arctic]=11000 [dexycb]=5800 [hot3d]=4900 [oakink2]=15000 [taco]=19199 )
+# HOT3D was 4900 here until 2026-08-15, and that threshold was read off a build that had stopped
+# at 67 of its 136 usable recordings. A guard calibrated on a partial build certifies the partial
+# build. These are the counts after the fill, so the guard now fails if coverage regresses.
+declare -A EXPECT=( [arctic]=11298 [dexycb]=5938 [hot3d]=9988 [oakink2]=15421 [taco]=19199 )
 for n in arctic dexycb hot3d oakink2 taco; do
   c=$(ls $S/featcache32/$n 2>/dev/null | wc -l)
   e=${EXPECT[$n]}
