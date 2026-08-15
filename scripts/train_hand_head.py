@@ -3062,6 +3062,17 @@ def train():
                             f"LPIPS={gs_metrics['LPIPS']:.4f} "
                             f"(N={gs_metrics['num_valid_frames']})"
                         )
+                        # The hand-region figures went only to wandb, and the injection ablation
+                        # runs with wandb disabled, so a full training run finished with the one
+                        # metric it exists to produce recorded nowhere. Whole-frame PSNR is
+                        # background-dominated and cannot show a hand-region effect.
+                        if gs_metrics.get("num_valid_frames_hand", 0) > 0:
+                            tqdm.write(
+                                f"  gs_metrics_hand: PSNR={gs_metrics['PSNR_hand']:.2f}dB "
+                                f"SSIM={gs_metrics['SSIM_hand']:.4f} "
+                                f"LPIPS={gs_metrics['LPIPS_hand']:.4f} "
+                                f"(N={gs_metrics['num_valid_frames_hand']})"
+                            )
 
                     if use_wandb:
                         log_dict = {"val/loss": val_loss,
