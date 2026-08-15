@@ -69,9 +69,13 @@ for n in arctic dexycb hot3d oakink2 taco; do
 done
 
 # A clip truncated by a full disk still satisfies os.path.exists, so the cache builder skips it on
-# resume and training loads a zero-byte tensor. Cheap to check, impossible to debug later.
-BAD=$(find $S/featcache32 -name '*.pt' -size -1M 2>/dev/null | head -5)
-[ -z "$BAD" ] || { echo "!! truncated cache clips present:"; echo "$BAD"; exit 3; }
+# resume and training loads it and dies. The previous version of this guard looked for files under
+# 1 MB and let through the clip that killed run 10721961 after 8h29 of training: 5.26 MB against a
+# typical 31 MB. Size is the wrong test. A .pt is a zip and a zip's central directory lives at the
+# end of the file, so check that the archive is actually closed. One small tail read per clip, about
+# ten minutes for the whole cache, against eight hours lost.
+$PY -m scripts.check_feature_cache $S/featcache32 || {
+  echo "!! damaged cache clips present, listed above; rerun with --delete to drop them"; exit 3; }
 
 echo "=== TRAIN ==="
 $PY -u -m scripts.train_hand_head --config $CFG
