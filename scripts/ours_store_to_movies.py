@@ -7,6 +7,7 @@ MoVieS's input contract, from ``src/infer_davis_nvs.py``:
     npz["images"]    (F, 3, H, W) float in [0, 1]   (vis_util.tensor_to_video documents the range)
     npz["C2W"]       (F, 4, 4)    camera-to-world
     npz["fxfycxcy"]  (F, 4)       NORMALIZED intrinsics, i.e. divided by width and height
+    npz["idx"]       (F,)         ours, not theirs: the source frame each entry was decoded from
 
     <out>/<seq>.npz          and the loader is DATA_DIR/<name>.npz
 
@@ -118,8 +119,11 @@ def convert(seq_dir: str, out_path: str, n_frames: int, do_check: bool) -> dict:
         np.array([f / w, f / h, cx / w, cy / h], dtype=np.float32), (n_frames, 1))
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    # idx is ours, not part of MoVieS's contract, and np.load ignores the extra key. Scoring a
+    # render against the right ground-truth frame needs it, and recomputing the linspace at
+    # scoring time would be the same rule written twice.
     np.savez(out_path, images=images.astype(np.float32),
-             C2W=c2w.astype(np.float32), fxfycxcy=fxfycxcy)
+             C2W=c2w.astype(np.float32), fxfycxcy=fxfycxcy, idx=idx.astype(np.int32))
 
     info = {"seq": os.path.basename(seq_dir), "frames": n_frames, "of": t_total, "hw": (h, w)}
     if do_check:
