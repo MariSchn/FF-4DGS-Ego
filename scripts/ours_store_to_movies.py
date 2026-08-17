@@ -29,7 +29,8 @@ already published months of world metrics computed with a trajectory applied bac
 A convention error shows up as a self-check pass rate near zero, and as renderings that look like
 noise. Run --self_check on one sequence before converting a set.
 
-    python -m scripts.ours_store_to_movies --data_root <store> --out_root <out> --limit 1 --self_check
+    python -m scripts.ours_store_to_movies --data_root <store> --images_root <shared export> \
+        --out_root <out> --limit 1 --self_check
 """
 from __future__ import annotations
 
@@ -74,41 +75,32 @@ def self_check(intr, j_cam, w: int, h: int) -> dict:
     return {"ran": True, "n": int(len(j)), "frac_inside": float(inside)}
 
 
-def read_frames(vid: str, idx: np.ndarray) -> np.ndarray:
-    """Decode the requested frame indices as (F, H, W, 3) uint8 RGB."""
-    cap = cv2.VideoCapture(vid)
-    want = set(int(i) for i in idx)
-    frames, k = {}, 0
-    while True:
-        ok, bgr = cap.read()
-        if not ok:
-            break
-        if k in want:
-            frames[k] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        k += 1
-        if len(frames) == len(want):
-            break
-    cap.release()
-    missing = [int(i) for i in idx if int(i) not in frames]
-    if missing:
-        raise RuntimeError(f"{vid}: frames {missing[:5]} not decodable of {k} read")
-    return np.stack([frames[int(i)] for i in idx])
+def read_frames(img_dir: str, idx: np.ndarray) -> np.ndarray:
+    """Read the requested frame indices as (F, H, W, 3) uint8 RGB."""
+    out = []
+    for i in idx:
+        p = os.path.join(img_dir, f"{int(i):06d}.png")
+        bgr = cv2.imread(p)
+        if bgr is None:
+            raise RuntimeError(f"{p} not readable")
+        out.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    return np.stack(out)
 
 
-def convert(seq_dir: str, out_path: str, n_frames: int, do_check: bool) -> dict:
+def convert(seq_dir: str, img_dir: str, out_path: str, n_frames: int, do_check: bool) -> dict:
     intr, w2c, j_cam = load_seq(seq_dir)
-    vid = os.path.join(seq_dir, "video_main_rgb.mp4")
-    if not os.path.isfile(vid):
-        raise FileNotFoundError(vid)
+    n_img = len(glob.glob(os.path.join(img_dir, "*.png")))
+    if not n_img:
+        raise FileNotFoundError(img_dir)
 
-    t_total = min(len(w2c), int(cv2.VideoCapture(vid).get(cv2.CAP_PROP_FRAME_COUNT)))
+    t_total = min(len(w2c), n_img)
     if t_total < n_frames:
         raise RuntimeError(f"{seq_dir}: {t_total} frames, need {n_frames}")
     # Evenly spaced over the whole sequence: MoVieS asks for a fixed count, and a contiguous head
     # would show it a fraction of a second of motion in a clip that is several seconds long.
     idx = np.linspace(0, t_total - 1, n_frames).round().astype(int)
 
-    rgb = read_frames(vid, idx)                                   # (F, H, W, 3) uint8
+    rgb = read_frames(img_dir, idx)                               # (F, H, W, 3) uint8
     h, w = rgb.shape[1:3]
     images = (rgb.astype(np.float32) / 255.0).transpose(0, 3, 1, 2)  # (F, 3, H, W) in [0, 1]
 
@@ -134,6 +126,9 @@ def convert(seq_dir: str, out_path: str, n_frames: int, do_check: bool) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", required=True, help="our store, one directory per sequence")
+    ap.add_argument("--images_root", required=True,
+                    help="the shared export, <root>/<seq>/images/<frame>.png, so every Gaussian "
+                         "row reads the same pixels")
     ap.add_argument("--out_root", required=True, help="written as <out_root>/<seq>.npz")
     ap.add_argument("--n_frames", type=int, default=13,
                     help="MoVieS's demo hardcodes 13 input timesteps")
@@ -142,8 +137,10 @@ def main() -> None:
                     help="reproject our GT joints through the written intrinsics")
     args = ap.parse_args()
 
+    # The shared export defines the set, so the Gaussian rows cover the same sequences.
     seqs = sorted(d for d in glob.glob(os.path.join(args.data_root, "*"))
-                  if os.path.isdir(os.path.join(d, "hand_data")))
+                  if os.path.isdir(os.path.join(d, "hand_data"))
+                  and os.path.isdir(os.path.join(args.images_root, os.path.basename(d), "images")))
     if args.limit:
         seqs = seqs[:args.limit]
     if not seqs:
@@ -154,7 +151,8 @@ def main() -> None:
     for s in seqs:
         name = os.path.basename(s)
         try:
-            info = convert(s, os.path.join(args.out_root, name + ".npz"),
+            info = convert(s, os.path.join(args.images_root, name, "images"),
+                           os.path.join(args.out_root, name + ".npz"),
                            args.n_frames, args.self_check)
             ok += 1
             chk = info.get("check", {})
