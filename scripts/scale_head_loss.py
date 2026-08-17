@@ -1,14 +1,16 @@
 """Supervision for the feedforward ScaleHead (the "scale head" route).
 
-Trains the predicted global scale ``s`` so that ``s * gs_depth`` matches the
-metric MANO hand depth at the projected hand joints. With the Gaussian backbone
-frozen, both the sampled scene depth and the hand depth target are detached, so
-gradient flows ONLY into ``pred_scale``; the smooth-L1 minimiser is exactly the
-median ratio that ``solve_metric_scale`` computes in closed form — i.e. the head
-learns to reproduce the closed-form metric coupling in a single forward pass.
+Two targets are available and they are not equivalent.
 
-Reuses the shared, correctness-critical projection + sampling helpers (never
-reimplements them).
+``scale_head_loss`` trains ``s * gs_depth`` toward the metric MANO hand depth at the projected
+joints. Its optimum is the closed-form median ratio, but that ratio is a BIASED target: the frozen
+backbone does not reconstruct the thin foreground hand, so the depth sampled at hand pixels is the
+background behind it, about 1.37x too far. Measured with ground-truth hand depth, the resulting
+scale lands near 0.73 against a true 1.02, and the bias is systematic rather than noise.
+
+``scale_head_gt_loss`` trains the head against the scale that aligns the predicted camera
+trajectory to the ground-truth one, which is what the world metrics actually use. It does not read
+scene depth at all, so it does not inherit that bias.
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling imp
     project_joints_to_norm_pixels,
     sample_depth_at_joints,
 )
+from scripts.world_space_metrics import solve_similarity
 
 
 def scale_head_loss(
@@ -75,3 +78,72 @@ def scale_head_loss(
         "scale_residual_m": float(residual.item()),
         "scale_mean": info_scale_mean,
     }
+
+
+def scale_head_gt_loss(
+    pred_scale: torch.Tensor,
+    pred_c2w: torch.Tensor,
+    gt_w2c: torch.Tensor,
+    *,
+    beta: float = 0.1,
+    min_baseline: float = 0.05,
+    clamp: tuple[float, float] = (0.1, 10.0),
+) -> tuple[torch.Tensor, dict]:
+    """Smooth-L1 in log space between the predicted scale and the ground-truth camera scale.
+
+    The target is the Umeyama scale taking the predicted camera centres onto the ground-truth
+    ones, i.e. the same quantity ``eval_world_space`` reports as ``s_gt``. Log space because a
+    scale is multiplicative: predicting 2x and predicting 0.5x are equally wrong.
+
+    Args:
+        pred_scale: [B] positive predicted scale, the only tensor carrying gradient.
+        pred_c2w:   [B, S, 4, 4] predicted camera-to-world.
+        gt_w2c:     [B, S, 4, 4] ground-truth world-to-camera, the store's convention.
+        beta:       Huber beta, in log units.
+        min_baseline: metres the ground-truth camera must travel for the scale to be determined.
+        clamp:      reject targets outside this range rather than training toward them.
+
+    Returns:
+        loss_scalar: scalar tensor, 0 when no clip in the batch has a usable target.
+        info: {"n_clips", "s_gt_mean", "s_pred_mean", "log_residual"}.
+    """
+    idx, targets = [], []
+    for b in range(pred_c2w.shape[0]):
+        pc = pred_c2w[b, :, :3, 3].detach().to(torch.float64)
+        gc = torch.linalg.inv(gt_w2c[b].detach().to(torch.float64))[:, :3, 3]
+        keep = torch.isfinite(pc).all(-1) & torch.isfinite(gc).all(-1)
+        if int(keep.sum()) < 3:
+            continue
+        pc, gc = pc[keep], gc[keep]
+        # A camera that does not move leaves the scale undetermined, and solve_similarity divides
+        # by that near-zero variance. Worse, below three correspondences it returns 1.0, so an
+        # unguarded call teaches the head to predict identity on exactly the clips carrying no
+        # signal. Require real travel in the ground-truth trajectory instead.
+        if float((gc - gc.mean(0)).norm(dim=-1).max()) < min_baseline:
+            continue
+        if float((pc - pc.mean(0)).norm(dim=-1).max()) < 1e-6:
+            continue
+        s_gt, _, _ = solve_similarity(pc, gc)
+        s_gt = float(s_gt)
+        if not (clamp[0] < s_gt < clamp[1]):
+            continue
+        idx.append(b)
+        targets.append(s_gt)
+
+    info = {"n_clips": len(idx),
+            "s_pred_mean": float(pred_scale.mean().item()),
+            "s_gt_mean": 0.0,
+            "log_residual": 0.0}
+    if not idx:
+        return torch.zeros((), dtype=pred_scale.dtype, device=pred_scale.device), info
+
+    sel = pred_scale[torch.tensor(idx, device=pred_scale.device)]
+    tgt = torch.tensor(targets, dtype=sel.dtype, device=sel.device)
+    log_pred = torch.log(sel.clamp_min(1e-6))
+    log_tgt = torch.log(tgt)
+    loss = F.smooth_l1_loss(log_pred, log_tgt, beta=beta)
+
+    with torch.no_grad():
+        info["s_gt_mean"] = float(tgt.mean().item())
+        info["log_residual"] = float((log_pred - log_tgt).abs().mean().item())
+    return loss, info

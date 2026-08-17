@@ -35,7 +35,7 @@ from diffsynth.utils.auxiliary import load_video
 from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
 from scripts.hand_depth_anchor_loss import hand_depth_anchor_loss
 from scripts.object_depth_loss import object_depth_loss
-from scripts.scale_head_loss import scale_head_loss
+from scripts.scale_head_loss import scale_head_loss, scale_head_gt_loss
 from scripts.hand_scene_registration_loss import hand_scene_registration_loss
 from scripts.hand_metrics import metric_chunks_from_batch, metrics_from_chunks
 from scripts.gs_metrics import (
@@ -2137,6 +2137,14 @@ def train():
     scale_margin = float(scale_cfg.get("margin", 0.05))
     scale_depth_min = float(scale_cfg.get("depth_min", 0.01))
     scale_warmup_steps = int(scale_cfg.get("warmup_steps", 0))
+    # "hand" reproduces the closed-form solve, whose target is biased low because the frozen
+    # backbone reads the background behind the hand. "gt_camera" supervises against the scale that
+    # aligns the predicted trajectory to the ground-truth one and never touches scene depth.
+    scale_target = str(scale_cfg.get("target", "hand"))
+    if scale_target not in ("hand", "gt_camera"):
+        raise ValueError(f"scale_head.target must be 'hand' or 'gt_camera', got {scale_target!r}")
+    scale_gt_beta = float(scale_cfg.get("log_beta", 0.1))
+    scale_gt_min_baseline = float(scale_cfg.get("min_baseline_m", 0.05))
 
     # Hand-scene registration loss (dense surface-level coupling config).
     reg_cfg = cfg.get("hand_scene_registration", {})
@@ -2813,18 +2821,34 @@ def train():
                 )
                 obj_depth_residual_m = _obj_info["obj_depth_residual_m"]
 
-            # Scale-head supervision: train pred_scale so s*gs_depth matches the hand.
+            # Scale-head supervision. See scale_head.target for which signal trains it.
             loss_scale_head = torch.zeros((), device=device)
             scale_residual_m = 0.0
             pred_scale = preds.get("pred_scale")
-            if (w_scale_head > 0.0 and pred_scale is not None
-                    and gs_depth_pred is not None and "cam_intrinsics" in batch):
-                loss_scale_head, _sh_info = scale_head_loss(
-                    pred_scale, pred_joints, gs_depth_pred, has_hand,
-                    batch["cam_intrinsics"].to(device),
-                    margin=scale_margin, depth_min=scale_depth_min,
-                )
-                scale_residual_m = _sh_info["scale_residual_m"]
+            if w_scale_head > 0.0 and pred_scale is not None:
+                if scale_target == "gt_camera":
+                    if "cam_extrinsics" not in batch:
+                        raise RuntimeError(
+                            "scale_head.target is 'gt_camera' but the batch carries no "
+                            "cam_extrinsics, so there is no ground-truth trajectory to align to. "
+                            "Use a store with camera calibration or switch the target to 'hand'.")
+                    if "camera_poses" not in preds:
+                        raise RuntimeError(
+                            "scale_head.target is 'gt_camera' but the model published no "
+                            "camera_poses. Set model.enable_cam true.")
+                    loss_scale_head, _sh_info = scale_head_gt_loss(
+                        pred_scale, preds["camera_poses"],
+                        batch["cam_extrinsics"].to(device),
+                        beta=scale_gt_beta, min_baseline=scale_gt_min_baseline,
+                    )
+                    scale_residual_m = _sh_info["log_residual"]
+                elif gs_depth_pred is not None and "cam_intrinsics" in batch:
+                    loss_scale_head, _sh_info = scale_head_loss(
+                        pred_scale, pred_joints, gs_depth_pred, has_hand,
+                        batch["cam_intrinsics"].to(device),
+                        margin=scale_margin, depth_min=scale_depth_min,
+                    )
+                    scale_residual_m = _sh_info["scale_residual_m"]
 
             # Hand-scene registration loss (dense surface-level metric coupling).
             loss_hand_scene_reg = torch.zeros((), device=device)
