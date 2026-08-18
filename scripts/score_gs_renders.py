@@ -6,9 +6,12 @@ the same module the training-time validation uses, so a baseline row and our own
 by one implementation. Rewriting PSNR/SSIM/LPIPS here would make the two sets of numbers
 incomparable in exactly the way this table exists to avoid.
 
-The hand region is the union of the detbox v3 boxes, the same boxes every other row receives.
-They are stored normalized as [cx, cy, w, h] per hand and are NOT clamped to the frame, so they
-are clipped here.
+The hand region is the union of the store's own per-sequence boxes, the file
+`hand_bboxes_v2_rf1.5_res224x224.pt`, which is what our own world evaluation reads too, so every
+row here and our row in the pose tables share one region definition. It is NOT the separate
+`hoi4d_detboxes_v3` store injected into the baseline pose pipelines: those boxes differ, they run
+about 3-6% wider and carry a `det_hit` flag this file has no equivalent of. The values are
+normalized [cx, cy, w, h] per hand and are NOT clamped to the frame, so they are clipped here.
 
     python -m scripts.score_gs_renders --renders <root> --gt_root <gs_export/4dgt> \
         --store <hoi4d_test157_detv3> --method anysplat --out results/gs_anysplat.json
