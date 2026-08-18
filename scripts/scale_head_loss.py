@@ -80,6 +80,45 @@ def scale_head_loss(
     }
 
 
+def gt_camera_scales(
+    pred_c2w: torch.Tensor,
+    gt_w2c: torch.Tensor,
+    *,
+    min_baseline: float = 0.01,
+    clamp: tuple[float, float] = (0.1, 10.0),
+) -> tuple[list[int], list[float]]:
+    """Per-clip Umeyama scale taking predicted camera centres onto ground-truth ones.
+
+    Returns the indices of the clips that carry a usable target and their scales, so that a
+    caller can tell "no target" apart from "target 1.0". Shared with
+    ``scripts/scale_head_constant_baseline.py`` so the training target and the baseline it is
+    judged against cannot drift apart.
+    """
+    idx, targets = [], []
+    for b in range(pred_c2w.shape[0]):
+        pc = pred_c2w[b, :, :3, 3].detach().to(torch.float64)
+        gc = torch.linalg.inv(gt_w2c[b].detach().to(torch.float64))[:, :3, 3]
+        keep = torch.isfinite(pc).all(-1) & torch.isfinite(gc).all(-1)
+        if int(keep.sum()) < 3:
+            continue
+        pc, gc = pc[keep], gc[keep]
+        # A camera that does not move leaves the scale undetermined, and solve_similarity divides
+        # by that near-zero variance. Worse, below three correspondences it returns 1.0, so an
+        # unguarded call teaches the head to predict identity on exactly the clips carrying no
+        # signal. Require real travel in the ground-truth trajectory instead.
+        if float((gc - gc.mean(0)).norm(dim=-1).max()) < min_baseline:
+            continue
+        if float((pc - pc.mean(0)).norm(dim=-1).max()) < 1e-6:
+            continue
+        s_gt, _, _ = solve_similarity(pc, gc)
+        s_gt = float(s_gt)
+        if not (clamp[0] < s_gt < clamp[1]):
+            continue
+        idx.append(b)
+        targets.append(s_gt)
+    return idx, targets
+
+
 def scale_head_gt_loss(
     pred_scale: torch.Tensor,
     pred_c2w: torch.Tensor,
@@ -109,28 +148,8 @@ def scale_head_gt_loss(
         loss_scalar: scalar tensor, 0 when no clip in the batch has a usable target.
         info: {"n_clips", "s_gt_mean", "s_pred_mean", "log_residual"}.
     """
-    idx, targets = [], []
-    for b in range(pred_c2w.shape[0]):
-        pc = pred_c2w[b, :, :3, 3].detach().to(torch.float64)
-        gc = torch.linalg.inv(gt_w2c[b].detach().to(torch.float64))[:, :3, 3]
-        keep = torch.isfinite(pc).all(-1) & torch.isfinite(gc).all(-1)
-        if int(keep.sum()) < 3:
-            continue
-        pc, gc = pc[keep], gc[keep]
-        # A camera that does not move leaves the scale undetermined, and solve_similarity divides
-        # by that near-zero variance. Worse, below three correspondences it returns 1.0, so an
-        # unguarded call teaches the head to predict identity on exactly the clips carrying no
-        # signal. Require real travel in the ground-truth trajectory instead.
-        if float((gc - gc.mean(0)).norm(dim=-1).max()) < min_baseline:
-            continue
-        if float((pc - pc.mean(0)).norm(dim=-1).max()) < 1e-6:
-            continue
-        s_gt, _, _ = solve_similarity(pc, gc)
-        s_gt = float(s_gt)
-        if not (clamp[0] < s_gt < clamp[1]):
-            continue
-        idx.append(b)
-        targets.append(s_gt)
+    idx, targets = gt_camera_scales(pred_c2w, gt_w2c,
+                                    min_baseline=min_baseline, clamp=clamp)
 
     info = {"n_clips": len(idx),
             "s_pred_mean": float(pred_scale.mean().item()),
@@ -150,6 +169,7 @@ def scale_head_gt_loss(
     loss = F.smooth_l1_loss(log_pred, log_tgt, beta=beta)
 
     with torch.no_grad():
+        info["s_pred_mean"] = float(sel.mean().item())
         info["s_gt_mean"] = float(tgt.mean().item())
         info["log_residual"] = float((log_pred - log_tgt).abs().mean().item())
         info["s_gt_std"] = float(tgt.std().item()) if tgt.numel() > 1 else 0.0

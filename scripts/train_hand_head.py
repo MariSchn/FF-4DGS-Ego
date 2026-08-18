@@ -35,7 +35,8 @@ from diffsynth.utils.auxiliary import load_video
 from scripts.hamer_losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
 from scripts.hand_depth_anchor_loss import hand_depth_anchor_loss
 from scripts.object_depth_loss import object_depth_loss
-from scripts.scale_head_loss import scale_head_loss, scale_head_gt_loss
+from scripts.scale_head_loss import (scale_head_loss, scale_head_gt_loss,
+                                     gt_camera_scales)
 from scripts.hand_scene_registration_loss import hand_scene_registration_loss
 from scripts.hand_metrics import metric_chunks_from_batch, metrics_from_chunks
 from scripts.gs_metrics import (
@@ -1368,7 +1369,7 @@ def render_vis_list(vis_items, gt_pred_pairs, render_fn):
 # Validation
 # ------------------------------------------------------------------
 
-def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None, lpips_scorer=None, max_batches=None):
+def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None, lpips_scorer=None, max_batches=None, scale_target="hand"):
     """Run validation and optionally capture gt/pred at specific clip indices.
 
     Returns (val_loss, val_terms, captured, hand_metrics, gs_metrics) where
@@ -1388,6 +1389,7 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
         "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
         "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
         "scale_head": 0.0, "scale_residual_m": 0.0,
+            "scale_s_pred": 0.0, "scale_s_gt": 0.0, "scale_n_clips": 0.0,
         "hand_scene_registration": 0.0, "registration_residual_m": 0.0,
     }
     captured = {}
@@ -1545,17 +1547,31 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                 )
                 obj_depth_residual_m = _obj_info["obj_depth_residual_m"]
 
-            # Scale-head supervision (mirror of the train loop; default kwargs).
+            # Scale-head supervision (mirror of the train loop; default kwargs). The target has to
+            # match the one training uses, or validation silently reports zero: the hand target
+            # needs gs_depth, and a gt_camera run has enable_gs false, so every val batch would
+            # skip the term and best_val_loss would rank checkpoints on a constant.
             loss_scale_head = torch.zeros((), device=device)
             scale_residual_m = 0.0
+            scale_n_clips = scale_s_pred_sum = scale_s_gt_sum = 0.0
             pred_scale = preds.get("pred_scale")
-            if (pred_scale is not None and gs_depth_pred is not None
-                    and "cam_intrinsics" in vbatch):
-                loss_scale_head, _sh_info = scale_head_loss(
-                    pred_scale, pred_joints, gs_depth_pred, has_hand,
-                    vbatch["cam_intrinsics"].to(device),
-                )
-                scale_residual_m = _sh_info["scale_residual_m"]
+            if pred_scale is not None:
+                if scale_target == "gt_camera":
+                    if "cam_extrinsics" in vbatch and "camera_poses" in preds:
+                        loss_scale_head, _sh_info = scale_head_gt_loss(
+                            pred_scale, preds["camera_poses"],
+                            vbatch["cam_extrinsics"].to(device),
+                        )
+                        scale_residual_m = _sh_info["log_residual"]
+                        scale_n_clips = float(_sh_info["n_clips"])
+                        scale_s_pred_sum = _sh_info["s_pred_mean"] * scale_n_clips
+                        scale_s_gt_sum = _sh_info["s_gt_mean"] * scale_n_clips
+                elif gs_depth_pred is not None and "cam_intrinsics" in vbatch:
+                    loss_scale_head, _sh_info = scale_head_loss(
+                        pred_scale, pred_joints, gs_depth_pred, has_hand,
+                        vbatch["cam_intrinsics"].to(device),
+                    )
+                    scale_residual_m = _sh_info["scale_residual_m"]
 
             # Hand-scene registration loss (dense mesh <-> scene coupling).
             loss_hand_scene_reg = torch.zeros((), device=device)
@@ -1598,6 +1614,9 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             val_terms["obj_depth_residual_m"] += obj_depth_residual_m
             val_terms["scale_head"]   += loss_scale_head.item()
             val_terms["scale_residual_m"] += scale_residual_m
+            val_terms["scale_n_clips"] += scale_n_clips
+            val_terms["scale_s_pred"] += scale_s_pred_sum
+            val_terms["scale_s_gt"] += scale_s_gt_sum
             val_terms["hand_scene_registration"] += loss_hand_scene_reg.item()
             val_terms["registration_residual_m"] += reg_residual_m
 
@@ -1775,6 +1794,75 @@ def _param_mask(has_hand: torch.Tensor, batch: dict) -> torch.Tensor:
         return has_hand
     shape = (has_hand.shape[0],) + (1,) * (has_hand.dim() - 1)
     return has_hand * hm.view(shape).to(has_hand.dtype)
+
+def _dump_scale_targets(model, val_loader, num_frames, device, out_path, *, min_baseline=0.01):
+    """Write the val set's ground-truth camera scales, so the head can be judged against them.
+
+    The scale head is trained with everything else frozen, so the predicted camera trajectory
+    the target is solved against never moves: one pass gives the exact distribution the head is
+    being asked to fit, and the best constant predictor over it is the bar the head has to clear.
+    """
+    model.eval()
+    scales = []
+    with torch.no_grad():
+        for vbatch in tqdm(val_loader, desc="scale targets", leave=False):
+            imgs = vbatch["images"].to(device)
+            hb = vbatch["hand_bboxes"].to(device) if "hand_bboxes" in vbatch else None
+            hv = vbatch["hand_valid"].to(device)  if "hand_valid"  in vbatch else None
+            preds = model(build_views(imgs, num_frames, device, hb, hv),
+                          is_inference=False, use_motion=False)
+            if "camera_poses" not in preds or "cam_extrinsics" not in vbatch:
+                continue
+            _, targets = gt_camera_scales(preds["camera_poses"],
+                                          vbatch["cam_extrinsics"].to(device),
+                                          min_baseline=min_baseline)
+            scales.extend(targets)
+
+    if not scales:
+        raise RuntimeError(
+            "No val clip carried a scale target. Either the model publishes no camera_poses "
+            "(model.enable_cam, and note a feature cache never produces them), the store has no "
+            "cam_extrinsics, or min_baseline rejects every clip (currently "
+            f"{min_baseline} m of ground-truth camera travel).")
+
+    arr = np.asarray(scales, dtype=np.float64)
+    log = np.log(arr)
+    # Smooth-L1 in log space is minimised at the median for residuals above beta, so the median
+    # is the constant the head must beat, not the mean.
+    best_c = float(np.exp(np.median(log)))
+
+    def _loss(c, beta=0.1):
+        d = np.abs(log - np.log(c))
+        return float(np.mean(np.where(d < beta, 0.5 * d * d / beta, d - 0.5 * beta)))
+
+    report = {
+        "n_clips": int(arr.size),
+        "s_gt_mean": float(arr.mean()), "s_gt_median": float(np.median(arr)),
+        "s_gt_std": float(arr.std()),
+        "best_constant": best_c,
+        "loss_best_constant": _loss(best_c),
+        "loss_identity": _loss(1.0),
+        "min_baseline_m": min_baseline,
+    }
+    with open(out_path, "w") as f:
+        json.dump({**report, "scales": arr.tolist()}, f, indent=2)
+    print(json.dumps(report, indent=2), flush=True)
+    print(f"wrote {arr.size} scales -> {out_path}", flush=True)
+
+
+def _scale_diag(terms: dict) -> str:
+    """Render the scale head's prediction against its target, or nothing if no clip carried one.
+
+    A scale loss is uninterpretable on its own: log-space smooth-L1 near 0.21 is both "30% off"
+    and "roughly what predicting the constant mean would score", and the printed loss cannot tell
+    those apart. Printing both means makes the comparison readable in the job log.
+    """
+    n = terms.get("scale_n_clips", 0.0)
+    if n <= 0.0:
+        return ""
+    return (f" s_pred={terms['scale_s_pred'] / n:.3f} s_gt={terms['scale_s_gt'] / n:.3f} "
+            f"n={n:.0f}")
+
 
 def _check_loss_effect(loss_weights: dict, avg_terms: dict, step: int,
                        strict: bool = True) -> None:
@@ -2411,6 +2499,12 @@ def train():
     )
     del _probe, _probe_joints
 
+    if os.environ.get("DUMP_SCALE_TARGETS"):
+        _dump_scale_targets(model, val_loader, num_frames, device,
+                            os.environ["DUMP_SCALE_TARGETS"],
+                            min_baseline=scale_gt_min_baseline)
+        return
+
     best_val_loss = float("inf")
     global_step = 0
     start_epoch = 1
@@ -2582,6 +2676,7 @@ def train():
             "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
             "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
             "scale_head": 0.0, "scale_residual_m": 0.0,
+            "scale_s_pred": 0.0, "scale_s_gt": 0.0, "scale_n_clips": 0.0,
             "hand_scene_registration": 0.0, "registration_residual_m": 0.0,
             "root_anchor": 0.0,
         }
@@ -2824,6 +2919,7 @@ def train():
             # Scale-head supervision. See scale_head.target for which signal trains it.
             loss_scale_head = torch.zeros((), device=device)
             scale_residual_m = 0.0
+            scale_n_clips = scale_s_pred_sum = scale_s_gt_sum = 0.0
             pred_scale = preds.get("pred_scale")
             if w_scale_head > 0.0 and pred_scale is not None:
                 if scale_target == "gt_camera":
@@ -2842,6 +2938,11 @@ def train():
                         beta=scale_gt_beta, min_baseline=scale_gt_min_baseline,
                     )
                     scale_residual_m = _sh_info["log_residual"]
+                    # Weighted by clip count: a batch where every clip was rejected must not
+                    # drag the reported means toward zero.
+                    scale_n_clips = float(_sh_info["n_clips"])
+                    scale_s_pred_sum = _sh_info["s_pred_mean"] * scale_n_clips
+                    scale_s_gt_sum = _sh_info["s_gt_mean"] * scale_n_clips
                 elif gs_depth_pred is not None and "cam_intrinsics" in batch:
                     loss_scale_head, _sh_info = scale_head_loss(
                         pred_scale, pred_joints, gs_depth_pred, has_hand,
@@ -2964,6 +3065,9 @@ def train():
             accum_terms["obj_depth_residual_m"] += obj_depth_residual_m
             accum_terms["scale_head"]   += loss_scale_head.item()
             accum_terms["scale_residual_m"] += scale_residual_m
+            accum_terms["scale_n_clips"] += scale_n_clips
+            accum_terms["scale_s_pred"] += scale_s_pred_sum
+            accum_terms["scale_s_gt"] += scale_s_gt_sum
             accum_terms["hand_scene_registration"] += loss_hand_scene_reg.item()
             accum_terms["registration_residual_m"] += reg_residual_m
             accum_terms["root_anchor"] += loss_root_anchor.item()
@@ -2996,6 +3100,7 @@ def train():
                     "hand_depth_anchor": 0.0, "hand_depth_residual_m": 0.0,
                     "obj_depth": 0.0, "obj_depth_residual_m": 0.0,
                     "scale_head": 0.0, "scale_residual_m": 0.0,
+            "scale_s_pred": 0.0, "scale_s_gt": 0.0, "scale_n_clips": 0.0,
                     "hand_scene_registration": 0.0, "registration_residual_m": 0.0,
                     "root_anchor": 0.0,
                 }
@@ -3046,7 +3151,8 @@ def train():
                         # contributes nothing while abs_ramp is 0.
                         f"kp3d_abs={avg_terms['kp3d_abs']:.4f}(ramp={abs_ramp:.2f}) "
                         f"kp2d={avg_terms['kp2d']:.4f} "
-                        f"gs_l1={avg_terms['gs_l1']:.4f} gs_lpips={avg_terms['gs_lpips']:.4f}) "
+                        f"gs_l1={avg_terms['gs_l1']:.4f} gs_lpips={avg_terms['gs_lpips']:.4f} "
+                        f"scale_head={avg_terms['scale_head']:.4f}{_scale_diag(avg_terms)}) "
                         f"| grad_norm={grad_norm.item():.4f} | lr={lr:.2e}"
                     )
                     if use_wandb and train_vis_items:
@@ -3057,13 +3163,14 @@ def train():
 
                 # --- Validation ---
                 if val_loader and (global_step % val_every == 0 or global_step == 1):
-                    val_loss, val_terms, captured, hand_metrics, gs_metrics, gs_captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], capture_clip_indices, lpips_scorer=lpips_scorer, max_batches=val_max_batches)
+                    val_loss, val_terms, captured, hand_metrics, gs_metrics, gs_captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], capture_clip_indices, lpips_scorer=lpips_scorer, max_batches=val_max_batches, scale_target=scale_target)
                     tqdm.write(
                         f"  step {global_step} | val_loss={val_loss:.4f} "
                         f"(t={val_terms['transl']:.4f} o={val_terms['global_orient']:.4f} "
                         f"p={val_terms['hand_pose']:.4f} b={val_terms['betas']:.4f} "
                         f"kp3d={val_terms['kp3d']:.4f} kp2d={val_terms['kp2d']:.4f} "
-                        f"gs_l1={val_terms['gs_l1']:.4f} gs_lpips={val_terms['gs_lpips']:.4f})"
+                        f"gs_l1={val_terms['gs_l1']:.4f} gs_lpips={val_terms['gs_lpips']:.4f} "
+                        f"scale_head={val_terms['scale_head']:.4f}{_scale_diag(val_terms)})"
                     )
                     hm_all = hand_metrics.get("all")
                     if hm_all is not None:
