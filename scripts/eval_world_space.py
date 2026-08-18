@@ -535,6 +535,9 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
     for seg in range(n_seg):
         base = seg * clips_per_seg
         clip_cams = []   # [(pj_cam [S,H,J,3], c2w [S,4,4], s_perclip), ...]
+        # Parallel to clip_cams rather than a sixth field: the arity of that tuple has
+        # already been broken once by an added field, and every unpack site would need it.
+        clip_head_scales = []
         clip_oracle = [] if oracle_depth else None  # per-clip GT-depth-anchored pj_cam (ceiling diag)
         clip_dense = [] if dense_link else None     # per-clip (scene pts, valid) for the G1 dense chain
         clip_grav = [] if gravity_oracle else None  # per-clip GT c2w for the gravity-view oracle
@@ -596,6 +599,8 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                               scene_depth_reduce=scene_depth_reduce,
                               hand_valid=hv, gate_scale_on_hand_valid=gate_scale_on_hand_valid)
             clip_cams.append(cc)
+            _hs = preds.get("pred_scale")
+            clip_head_scales.append(float(_hs.reshape(-1)[0]) if _hs is not None else None)
             # Task #63 diagnostic: what fraction of the correspondences the UNGUARDED mask
             # accepts are behind-camera joints. Recorded whether or not the guard is on, so the
             # two arms of the A/B are directly comparable.
@@ -767,6 +772,14 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         # world lift with the module removed: s = 1, the raw up-to-scale camera translation. The
         # rigid-linker variants below are NOT this ablation, they freeze the chunk-to-chunk
         # Umeyama scale while the pooled scene scale is still applied.
+        # SCALE-HEAD arm. Same rotations and translation directions as every other arm, with
+        # the magnitude taken from what the feedforward head predicted instead of the depth-ratio
+        # solve. Reported alongside rather than behind a mode flag: the arms differ only in one
+        # scalar, so re-running the network per scale source would cost hours for nothing.
+        worlds_hds = None
+        if clip_head_scales and all(h is not None for h in clip_head_scales):
+            worlds_hds = [_world_from_cam(pj, c2w, clip_head_scales[i])
+                          for i, (pj, c2w, _, _, _) in enumerate(clip_cams)]
         worlds_s1 = [_world_from_cam(pj, c2w, 1.0) for (pj, c2w, _, _, _) in clip_cams]
         worlds_pc = [_world_from_cam(pj, c2w, s) for (pj, c2w, s, _, _) in clip_cams]       # per-clip
         worlds_md = [_world_from_cam(pj, c2w, s_med) for (pj, c2w, _, _, _) in clip_cams]   # per-seq median
@@ -776,6 +789,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
         g_md = _greedy(worlds_md)
         g_s1 = _greedy(worlds_s1)
         g_gts = _greedy(worlds_gts) if worlds_gts is not None else None
+        g_hds = _greedy(worlds_hds) if worlds_hds is not None else None
         chain_pl = chain_trajectories_by_overlap(worlds_pl, overlap=overlap)  # pooled greedy traj
         g_pl = _metrics(chain_pl)
         if world_buf is not None:
@@ -893,6 +907,7 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
                 "clip_ratios": [c[3].cpu() for c in clip_cams],
                 "clip_depth32": clip_depths,
                 "cam_intr": (cam_intr.detach().float().cpu() if cam_intr is not None else None),
+                "clip_head_scales": list(clip_head_scales),
                 "s_pool": float(s_pool), "s_med": float(s_med),
                 "overlap": int(overlap), "stride": int(stride), "base": int(base),
             })
@@ -955,6 +970,9 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
             # attributes the translation term to magnitude vs direction (task #38).
             for k in ("W_MPJPE", "WA_MPJPE_short", "WA_MPJPE_long"):
                 row[k + "_gtscale"] = g_gts[k]
+        if g_hds is not None:
+            for k in ("W_MPJPE", "WA_MPJPE_short", "WA_MPJPE_long"):
+                row[k + "_headscale"] = g_hds[k]
         anchor_str = ""
         if anchor_log:
             g = sum(a["gate_rate"] for a in anchor_log) / len(anchor_log)
@@ -1296,7 +1314,7 @@ def main():
             # the translation term to magnitude vs direction, which is what decides whether
             # "fix the scale" is the top W lever or a minor one.
             for suf in ("", "_global", "_smed", "_spool", "_s1", "_link", "_linkcf", "_linkr",
-                        "_linkrcf", "_gtscale"):
+                        "_linkrcf", "_gtscale", "_headscale"):
                 agg[k + suf] = _mean(k + suf)
         for k in ("C_MPJPE", "C_MPJPE_abs", "s_med", "s_pool", "s_clip_std"):
             agg[k] = _mean(k)
@@ -1356,9 +1374,11 @@ def main():
         # meaningful. That degeneracy has been mistaken for "the scale module does nothing" before.
         _n_ident = sum(1 for r in valid if r.get("W_MPJPE_s1") == r.get("W_MPJPE_spool"))
         _gts = agg["W_MPJPE_gtscale"]
+        _hds = agg["W_MPJPE_headscale"]
         print(f"OURS SCALE ABLATION (W-MPJPE)  solved={agg['W_MPJPE_spool']:.1f}  "
               f"s=1={agg['W_MPJPE_s1']:.1f}  "
               + (f"s=GT={_gts:.1f}" if _gts == _gts else "s=GT=absent (no cam_extrinsics)")
+              + (f"  s=head={_hds:.1f}" if _hds == _hds else "  s=head=absent (no scale head)")
               + f"  | solved s={agg['s_pool']:.3f}\n"
               f"  identical solved-vs-s1 segments: {_n_ident}/{len(valid)}"
               + ("  !! DEGENERATE: camera translation is ~zero, world metrics are NOT valid"
