@@ -86,7 +86,7 @@ def scale_head_gt_loss(
     gt_w2c: torch.Tensor,
     *,
     beta: float = 0.1,
-    min_baseline: float = 0.05,
+    min_baseline: float = 0.01,
     clamp: tuple[float, float] = (0.1, 10.0),
 ) -> tuple[torch.Tensor, dict]:
     """Smooth-L1 in log space between the predicted scale and the ground-truth camera scale.
@@ -100,7 +100,9 @@ def scale_head_gt_loss(
         pred_c2w:   [B, S, 4, 4] predicted camera-to-world.
         gt_w2c:     [B, S, 4, 4] ground-truth world-to-camera, the store's convention.
         beta:       Huber beta, in log units.
-        min_baseline: metres the ground-truth camera must travel for the scale to be determined.
+        min_baseline: metres the ground-truth camera must travel for the scale to be
+            determined. Measured over 16-frame HOI4D clips the median travel is 1.7 cm, so
+            0.05 would reject 86% of them and most batches would carry no target at all.
         clamp:      reject targets outside this range rather than training toward them.
 
     Returns:
@@ -133,9 +135,13 @@ def scale_head_gt_loss(
     info = {"n_clips": len(idx),
             "s_pred_mean": float(pred_scale.mean().item()),
             "s_gt_mean": 0.0,
+            "s_gt_std": 0.0,
             "log_residual": 0.0}
     if not idx:
-        return torch.zeros((), dtype=pred_scale.dtype, device=pred_scale.device), info
+        # Multiply rather than return a bare zero: backward() on a tensor with no grad_fn raises,
+        # so a batch where every clip was rejected would abort the run instead of contributing
+        # nothing. At 16 frames most HOI4D clips move the camera under 2 cm, so this is common.
+        return pred_scale.sum() * 0.0, info
 
     sel = pred_scale[torch.tensor(idx, device=pred_scale.device)]
     tgt = torch.tensor(targets, dtype=sel.dtype, device=sel.device)
@@ -146,4 +152,5 @@ def scale_head_gt_loss(
     with torch.no_grad():
         info["s_gt_mean"] = float(tgt.mean().item())
         info["log_residual"] = float((log_pred - log_tgt).abs().mean().item())
+        info["s_gt_std"] = float(tgt.std().item()) if tgt.numel() > 1 else 0.0
     return loss, info
