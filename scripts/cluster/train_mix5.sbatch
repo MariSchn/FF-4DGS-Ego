@@ -7,7 +7,12 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem-per-cpu=8G
 #SBATCH --gpus=1
-#SBATCH --gres=gpumem:24g
+# 24g put this on a Titan RTX with 23.46 GiB usable and it OOMed in the hand head's attention after
+# 32 minutes, asking for 128 MiB it did not have. 24g is the requirement with no margin, and the
+# larger HOT3D pool made the sampler reach heavier clips sooner. 40g also lands the job on a
+# newer card, which matters because at 11.7 s/it on Turing the ten epochs did not fit in the
+# five-day limit either.
+#SBATCH --gres=gpumem:40g
 # The five-dataset run. ARCTIC + DexYCB + HOT3D + OakInk2 + TACO, with HOI4D and H2O held out and
 # evaluated zero-shot. Every headline number in the paper comes from this.
 #

@@ -57,6 +57,8 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--n_views", type=int, default=32)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--static", action="store_true",
+                    help="fuse the clip into one cloud, the regime the splatting baselines use")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args()
 
@@ -91,6 +93,14 @@ def main() -> None:
             hv = bb["valid"][fi].bool().unsqueeze(0).to(a.device)
 
             views = build_views(imgs, n, a.device, hb, hv, frame_index=fi.unsqueeze(0))
+            if a.static:
+                # One fused cloud at timestamp -1 instead of one set per frame. Without it the
+                # rasterizer draws a Gaussian only into the view whose timestamp matches
+                # (`rasterization.py:321`), so every frame is rendered from its own unprojection
+                # and the score is close to a copy of the input. AnySplat builds a single scene
+                # from all views and renders them from it, so only this setting compares like
+                # with like.
+                views["is_static"] = torch.ones_like(views["is_static"])
             with torch.no_grad():
                 preds = model(views, is_inference=False, use_motion=False)
                 rendered = render_views_from_predictions(

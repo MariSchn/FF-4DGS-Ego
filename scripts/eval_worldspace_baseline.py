@@ -41,6 +41,9 @@ from scripts.world_space_metrics import (
     w_mpjpe_first_window_aligned,
     wa_mpjpe,
 )
+# One implementation of Procrustes alignment for the whole project. Rewriting it here would
+# make this column incomparable with the one eval_cmpjpe.py already reports.
+from scripts.eval_cmpjpe import _pa_mpjpe_mm
 
 RH = 1          # right hand (matches eval_world_space.py)
 J = 16          # smplx joints per hand
@@ -168,9 +171,14 @@ def eval_sequence(seq_dir: str, pred_path: str, segment_len: int, wa_short: int,
     pc = pcam[:n, RH]
     vc = (valid[:n, RH] & fin_c[:n, RH]).unsqueeze(-1).expand(-1, J)
     if int(vc.sum()) >= 1:
+        # PA needs whole frames: the alignment is solved per frame over all 16 joints, so a frame
+        # with any invalid joint cannot contribute a partial fit the way the masked means above can.
+        keep = (valid[:n, RH] & fin_c[:n, RH])
+        pa = float(_pa_mpjpe_mm(pc[keep], gc[keep]).mean()) if int(keep.sum()) >= 1 else float("nan")
         seq_c = {"seq": os.path.basename(seq_dir), "frames": n,
                  "C_MPJPE": c_mpjpe(pc, gc, valid=vc, root_relative=True),
-                 "C_MPJPE_abs": c_mpjpe(pc, gc, valid=vc, root_relative=False)}
+                 "C_MPJPE_abs": c_mpjpe(pc, gc, valid=vc, root_relative=False),
+                 "PA_MPJPE": pa}
     else:
         seq_c = None
     return out, seq_c
@@ -191,6 +199,7 @@ def aggregate(results, seq_c_rows=None):
     c_rows = [r for r in (seq_c_rows or []) if r is not None] or results
     agg["C_MPJPE"] = _mean("C_MPJPE", c_rows)
     agg["C_MPJPE_abs"] = _mean("C_MPJPE_abs", c_rows)
+    agg["PA_MPJPE"] = _mean("PA_MPJPE", c_rows)
     agg["n_segments"] = len(valid)
     agg["n_seqs_c"] = len(c_rows) if c_rows is not results else 0
     return agg
@@ -328,7 +337,7 @@ def main():
     print(f"BASELINE_WORLD_EVAL n_seqs={n_scored} n_segs={agg['n_segments']}")
     print(f"  W_MPJPE={agg['W_MPJPE']:.1f}  WA_short={agg['WA_MPJPE_short']:.1f}  "
           f"WA_long={agg['WA_MPJPE_long']:.1f}  C_rr={agg['C_MPJPE']:.1f}  "
-          f"C_abs={agg['C_MPJPE_abs']:.1f}  -> {args.out}")
+          f"C_abs={agg['C_MPJPE_abs']:.1f}  PA={agg['PA_MPJPE']:.1f}  -> {args.out}")
 
 
 def _selftest():

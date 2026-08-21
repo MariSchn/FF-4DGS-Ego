@@ -135,13 +135,87 @@ class WiLoRRunner:
         return np.asarray(wp["pred_keypoints_3d"])[0], np.asarray(wp["pred_cam"])[0]
 
 
+class HaMeRRunner:
+    """HaMeR behind the same predict contract WiLoRRunner exposes.
+
+    HaMeR ships no bbox-conditioned entry point, so the crop is built here the way its own
+    ViTDetDataset builds it: a square box scaled by the model's BBOX_SHAPE rescale factor, resized
+    to the model's input resolution, then normalised with the ImageNet statistics its config
+    carries. Reading those from the checkpoint's config rather than hardcoding them is what keeps
+    this comparable with the released model instead of with a crop we invented.
+
+    Left hands are mirrored in, and the returned keypoints mirrored back, which is what HaMeR does
+    internally, since the model is right-hand only.
+    """
+
+    def __init__(self, device, ckpt_dir=None):
+        from pathlib import Path
+        from hamer.models import load_hamer
+
+        ckpt_dir = Path(ckpt_dir or os.environ.get("HAMER_CKPT_DIR", ""))
+        ckpt = ckpt_dir / "hamer.ckpt"
+        if not ckpt.exists():
+            raise FileNotFoundError(
+                f"{ckpt}: set HAMER_CKPT_DIR or pass ckpt_dir. The checkpoint is not bundled.")
+        self.model, self.cfg = load_hamer(str(ckpt))
+        self.model = self.model.to(device).eval()
+        self.device = device
+        self.res = int(self.cfg.MODEL.IMAGE_SIZE)
+        self.mean = np.array(self.cfg.MODEL.IMAGE_MEAN, np.float32) * 255.0
+        self.std = np.array(self.cfg.MODEL.IMAGE_STD, np.float32) * 255.0
+        # 2.0 is HaMeR's own demo default for --rescale_factor. It is NOT a config field: the
+        # released model_config.yaml has no BBOX_RESCALE, so a getattr with a default would read
+        # as if the model supplied the value while silently supplying our own. Verified against
+        # the checkpoint on 2026-08-18. The crop scale moves every depth HaMeR predicts, so this
+        # constant is stated rather than looked up.
+        self.rescale = 2.0
+
+    def _crop(self, img_rgb, box_px, flip):
+        x1, y1, x2, y2 = [float(v) for v in box_px]
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        side = max(x2 - x1, y2 - y1) * self.rescale
+        half = side / 2.0
+        H, W = img_rgb.shape[:2]
+        # Pad rather than clamp: clamping a box that leaves the frame changes its centre, and the
+        # weak-perspective root is solved from that centre downstream.
+        pad = int(max(0, half - min(cx, cy, W - cx, H - cy)) + 1)
+        padded = np.pad(img_rgb, ((pad, pad), (pad, pad), (0, 0)), mode="edge")
+        px, py = cx + pad, cy + pad
+        a, b = int(round(px - half)), int(round(py - half))
+        crop = padded[b:b + int(round(side)), a:a + int(round(side))]
+        crop = cv2.resize(crop, (self.res, self.res), interpolation=cv2.INTER_LINEAR)
+        if flip:
+            crop = crop[:, ::-1]
+        x = (crop.astype(np.float32) - self.mean) / self.std
+        return torch.from_numpy(np.ascontiguousarray(x.transpose(2, 0, 1)))[None]
+
+    def predict(self, img_rgb, box_px, is_right):
+        """img_rgb HWC uint8; box_px [x1,y1,x2,y2]. Returns (kp3d[21,3] root-rel m, pred_cam[3])."""
+        flip = not bool(is_right)
+        x = self._crop(img_rgb, box_px, flip).to(self.device)
+        with torch.no_grad():
+            out = self.model({"img": x,
+                              "right": torch.ones(1, device=self.device) if not flip
+                                       else torch.zeros(1, device=self.device)})
+        kp = out["pred_keypoints_3d"][0].float().cpu().numpy()
+        cam = out["pred_cam"][0].float().cpu().numpy()
+        if flip:
+            # Undo the mirror on both the joints and the crop-space x translation.
+            kp = kp.copy(); kp[:, 0] *= -1.0
+            cam = cam.copy(); cam[1] *= -1.0
+        if kp.shape != (21, 3):
+            raise RuntimeError(
+                f"HaMeR returned {kp.shape} keypoints, not (21,3); MANO21_TO_16 assumes the "
+                f"OpenPose-21 layout WiLoR also returns, so the remap would be silently wrong.")
+        return kp - kp[:1], cam
+
+
 def build_runner(method: str, device: str):
     if method == "wilor":
         return WiLoRRunner(device)
-    raise NotImplementedError(
-        f"method={method}: only 'wilor' is implemented here. HaMeR uses its own package "
-        f"(hamer.utils.geometry.cam_crop_to_full); build a HaMeRRunner with the same "
-        f"predict(img,box)->(kp3d21,pred_cam) contract once its API is confirmed.")
+    if method == "hamer":
+        return HaMeRRunner(device)
+    raise NotImplementedError(f"method={method}: implemented are 'wilor' and 'hamer'.")
 
 
 def build_seq(seq_dir, seq, runner, box_dir, focal_axis="x"):

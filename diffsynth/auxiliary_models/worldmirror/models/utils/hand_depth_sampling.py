@@ -155,6 +155,10 @@ def project_joints_to_norm_pixels(
             "frame centre."
         )
 
+    # `col`/`row` come out in the intrinsics' own pixel frame and are normalised by W, so the
+    # caller must pass intrinsics already carried onto the render frame. Both callers do that
+    # through `_intr_to_render_frame`; a store whose cache is still at source resolution projects
+    # every joint outside the frame and empties the scene-scale population silently.
     x = pred_joints[..., 0]
     y = pred_joints[..., 1]
     z = pred_joints[..., 2].clamp_min(Z_MIN)

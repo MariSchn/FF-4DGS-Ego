@@ -81,7 +81,9 @@ def calculate_in_frustum_mask(depth_1, intrinsics_1, c2w_1, depth_2, intrinsics_
                 depth = einops.rearrange(depth_2[b, j], 'h w -> 1 1 h w')
                 coords = einops.rearrange(points_2d[b, i, j], 'h w c -> 1 h w c')
                 sampled_depths = torch.nn.functional.grid_sample(depth, coords, align_corners=False)[0, 0]
-                matching_depth[b, i, j] = torch.isclose(rendered_depth[b, i, j], sampled_depths, atol=1e-1)
+                # Under bf16 autocast these two arrive in different dtypes and isclose raises.
+                matching_depth[b, i, j] = torch.isclose(
+                    rendered_depth[b, i, j].float(), sampled_depths.float(), atol=1e-1)
 
     matching_depth = matching_depth.any(dim=-3)  # (..., v1, h, w)
 

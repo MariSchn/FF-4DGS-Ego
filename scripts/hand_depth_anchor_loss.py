@@ -18,6 +18,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+_LOG_EPS = 1e-6   # metres; the log branch's floor on a depth that passed the gate but is tiny
+
 from diffsynth.auxiliary_models.worldmirror.models.utils.hand_depth_sampling import (
     project_joints_to_norm_pixels,
     sample_depth_at_joints,
@@ -35,6 +37,7 @@ def hand_depth_anchor_loss(
     gs_depth_conf: torch.Tensor | None = None,
     conf_thresh: float = 0.0,
     direction: str = "scene_follows_hand",
+    space: str = "linear",
 ) -> tuple[torch.Tensor, dict]:
     """Smooth-L1 anchor between sampled scene depth and metric hand depth.
 
@@ -61,6 +64,12 @@ def hand_depth_anchor_loss(
         gs_depth_conf: optional [B, S, 1, Hd, Wd] confidence; gates samples.
         conf_thresh: keep a sample only if its sampled confidence > this value.
         direction:   one of {scene_follows_hand, hand_follows_scene, bidirectional}.
+        space:       "linear" compares metres, "log" compares log-depths. In linear space the
+                     smooth-L1 saturates above ``margin``, so a depth that has escaped by orders of
+                     magnitude pulls back no harder than one that is 3 cm off, and a run whose depth
+                     diverged reached exp(20) with the anchor active. Log space penalises the RATIO,
+                     which is what a scale error is, so the restoring force grows with the number of
+                     decades. ``margin`` is then read in log units.
 
     Returns:
         loss_scalar: scalar tensor (0 when no valid joints; never NaN).
@@ -97,6 +106,11 @@ def hand_depth_anchor_loss(
         _, z_grad = project_joints_to_norm_pixels(pred_joints, cam_intr)
         src, tgt = sampled, z_grad                     # grad -> both
 
+    if space not in ("linear", "log"):
+        raise ValueError(f"unknown anchor space: {space!r}")
+    if space == "log":
+        # clamp_min guards the log against a non-positive sample that slipped the depth_min gate
+        src, tgt = src.clamp_min(_LOG_EPS).log(), tgt.clamp_min(_LOG_EPS).log()
     per_joint = F.smooth_l1_loss(src, tgt, beta=margin, reduction="none")
     valid_f = valid.to(per_joint.dtype)
     loss = (per_joint * valid_f).sum() / valid_f.sum()

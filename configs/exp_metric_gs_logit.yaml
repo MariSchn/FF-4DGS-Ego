@@ -1,0 +1,130 @@
+# ==================================================================
+# METRIC-GS-LOGIT: the two corrections the degenerate Gaussian head needs.
+# ------------------------------------------------------------------
+# The trained head collapsed: gs_depth hit exp(20) in 100% of pixels and the
+# splat scales fell to 1e-8, six dB below the untouched head. Two causes, one
+# fix each, and this config is exp_p3_gtdepth_unfreeze with exactly those two
+# changed so the comparison stays readable.
+#
+# (1) Depth was unobservable. The photometric term re-rendered the SOURCE views
+#     from Gaussians unprojected from those same views under identity cameras,
+#     so moving the whole cloud along z costs nothing. gs_camera_mode
+#     metric_context_target supplies real intrinsics and real poses and holds
+#     frames out as targets, which makes depth carry parallax and therefore cost.
+#
+# (2) The supervision could not reach a saturated unit. obj_depth compares the
+#     ACTIVATED depth exp(clamp(z, max=20)), whose clamp has zero gradient above
+#     its maximum, so a head already at exp(20) cannot be pulled back. The same
+#     supervision is moved onto the pre-clamp logit instead. The target is a frozen
+#     copy of the upstream Gaussian head: posed object meshes would be the stronger
+#     target but the HOT3D object library is not on this cluster, so the teacher is
+#     what is actually obtainable. It is a leash against collapse, not a metric signal.
+# ==================================================================
+# ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# ------------------------------------------------------------------
+data:
+  data_root: /cluster/scratch/dmonopoli/hot3d_pinhole_f609
+  num_frames: 16
+  resolution:
+  - 224
+  - 224
+  clip_stride: 16
+  val_split: 0.01
+  num_workers: 4
+model:
+  checkpoint: models/NeoVerse/reconstructor.ckpt
+  warm_start_hand_head: null
+  freeze_backbone: true
+  enable_hand: true
+  hand_head_type: hamer
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: true
+  hand_to_gs_injection:
+    enabled: true
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+loss_weights:
+  kp3d: 0.05
+  kp3d_abs: 0.05
+  kp2d: 0.0
+  global_orient: 0.01
+  hand_pose: 0.01
+  betas: 0.01
+  transl: 0.1
+  gs_l1: 0.5
+  gs_lpips: 0.5
+  hand_depth_anchor: 0.1
+  obj_depth: 0.0
+  gs_depth_logit: 0.5
+gs_depth_logit:
+  beta: 0.1
+hand_depth_anchor:
+  margin: 0.02
+  warmup_steps: 800
+  depth_min: 0.01
+  conf_thresh: 0.0
+  direction: scene_follows_hand
+obj_depth:
+  objects_dir: null
+  render_res: 224
+  margin: 0.05
+  depth_min: 0.01
+  depth_max: 50.0
+  warmup_steps: 400
+metric_scale:
+  enable: true
+  clamp:
+  - 0.1
+  - 10.0
+training:
+  lr: 5e-6
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 4
+  grad_accum_steps: 8
+  use_amp: true
+  log_every: 25
+  val_every: 50
+  val_max_batches: 12
+  save_every: 100
+  grad_clip_norm: 5.0
+  kp3d_abs_warmup_steps: 200
+  unfreeze_last_n_blocks: 0
+  keep_last_checkpoints: 0
+  seed: 42
+  gs_camera_mode: metric_context_target
+  gs_depth_target: frozen_teacher
+  gs_n_targets: 2
+  output_dir: /cluster/scratch/dmonopoli/checkpoints/metric_gs_logit
+visualization:
+  mano_model_folder: models/MANO
+  num_vis_frames: 4
+hand_crop:
+  rescale_factor: 1.5
+debug:
+  enabled: false
+  max_sequences: 5
+  single_frame: false
+wandb:
+  enabled: false
+  project: hand-head-training
+  entity: 3DV-Project
+  run_name: metric cameras + logit-space object depth
+  tags: []
+  notes: null

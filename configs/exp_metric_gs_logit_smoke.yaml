@@ -1,0 +1,105 @@
+# Smoke for exp_metric_gs_logit: four sequences, so a crash in the metric camera path,
+# the teacher construction or the first optimizer step surfaces in minutes and not at 03:00.
+data:
+  data_root: /cluster/scratch/dmonopoli/hot3d_pinhole_f609
+  num_frames: 16
+  resolution:
+  - 224
+  - 224
+  clip_stride: 16
+  val_split: 0.01
+  num_workers: 4
+model:
+  checkpoint: models/NeoVerse/reconstructor.ckpt
+  warm_start_hand_head: null
+  freeze_backbone: true
+  enable_hand: true
+  hand_head_type: hamer
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: true
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: true
+  hand_to_gs_injection:
+    enabled: true
+    use_hand_valid_mask: true
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+loss_weights:
+  kp3d: 0.05
+  kp3d_abs: 0.05
+  kp2d: 0.0
+  global_orient: 0.01
+  hand_pose: 0.01
+  betas: 0.01
+  transl: 0.1
+  gs_l1: 0.5
+  gs_lpips: 0.5
+  hand_depth_anchor: 0.1
+  obj_depth: 0.0
+  gs_depth_logit: 0.5
+gs_depth_logit:
+  beta: 0.1
+hand_depth_anchor:
+  margin: 0.02
+  warmup_steps: 800
+  depth_min: 0.01
+  conf_thresh: 0.0
+  direction: scene_follows_hand
+obj_depth:
+  objects_dir: null
+  render_res: 224
+  margin: 0.05
+  depth_min: 0.01
+  depth_max: 50.0
+  warmup_steps: 400
+metric_scale:
+  enable: true
+  clamp:
+  - 0.1
+  - 10.0
+training:
+  lr: 5e-6
+  min_lr: 1e-7
+  epochs: 1
+  batch_size: 4
+  grad_accum_steps: 8
+  use_amp: true
+  log_every: 1
+  val_every: 10000
+  val_max_batches: 12
+  save_every: 10000
+  grad_clip_norm: 5.0
+  kp3d_abs_warmup_steps: 200
+  unfreeze_last_n_blocks: 0
+  keep_last_checkpoints: 0
+  seed: 42
+  gs_camera_mode: metric_context_target
+  gs_depth_target: frozen_teacher
+  gs_n_targets: 2
+  output_dir: /cluster/scratch/dmonopoli/checkpoints/metric_gs_logit_smoke
+visualization:
+  mano_model_folder: models/MANO
+  num_vis_frames: 4
+hand_crop:
+  rescale_factor: 1.5
+debug:
+  enabled: true
+  max_sequences: 4
+  single_frame: false
+wandb:
+  enabled: false
+  project: hand-head-training
+  entity: 3DV-Project
+  run_name: metric cameras + logit-space object depth
+  tags: []
+  notes: null

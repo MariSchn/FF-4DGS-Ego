@@ -485,6 +485,32 @@ class WorldMirror(nn.Module, PyTorchModelHubMixin):
             preds["gs_depth"] = gs_depth
             preds["gs_depth_conf"] = gs_depth_conf
 
+            # Optional frozen teacher: the SAME tokens through an untouched copy of the Gaussian
+            # head with the injection hook OFF, so it reports what this backbone would have
+            # produced before we started training the head. Held in a list so nn.Module does not
+            # register it: that keeps it out of state_dict, out of parameters() and therefore out
+            # of the optimizer, and out of reach of model.train(). This is equivalent to running a
+            # whole frozen model ONLY while the backbone is frozen and deterministic, which the
+            # trainer asserts before enabling it.
+            _t = getattr(self, "_teacher_gs_head", None)
+            if _t:
+                th = _t[0]
+                th.eval()
+                with torch.no_grad():
+                    th(context_preds.get("token_list", token_list),
+                       images=context_preds.get("imgs", imgs),
+                       patch_start_idx=patch_start_idx,
+                       feature_hook=None)
+                    _traw = getattr(th, "_last_raw_attr", None)
+                    if _traw is not None:
+                        preds["gs_depth_teacher_logit"] = _traw[..., 0]
+            # The pre-activation depth, stashed by DPTHead.activate_head. gs_depth is
+            # exp(clamp(this, max=20)), so once a unit saturates the activated value carries no
+            # gradient and only this one can still be supervised.
+            _raw = getattr(self.gs_head, "_last_raw_attr", None)
+            if _raw is not None:
+                preds["gs_depth_logit"] = _raw[..., 0]
+
             # Fast path for the L1 metric anchor / L2 scale eval and the G1 dense-link world eval:
             # gs_depth (above) is all these consumers need, so skip the expensive splat build +
             # voxel prune + rasterization at the end of this block. That render needs gsplat /

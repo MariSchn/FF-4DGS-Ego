@@ -8,7 +8,16 @@ from torch import Tensor
 try:
     from torch_scatter import scatter_sum
 except (ImportError, ModuleNotFoundError):
-    scatter_sum = None  # compiled ext; only used by GS rendering (enable_gs). Optional otherwise.
+    def scatter_sum(src, index, dim=0):
+        """`torch_scatter.scatter_sum` in plain torch, for envs without the compiled extension.
+
+        Skipping the voxel merge instead is not an option on the static path: it fuses the whole
+        clip into one set, and an unpruned clip left training at iteration 0 after 13 minutes.
+        """
+        size = int(index.max()) + 1 if index.numel() else 0
+        shape = list(src.shape)
+        shape[dim] = size
+        return src.new_zeros(shape).index_add_(dim, index, src)
 from einops import rearrange
 
 try:
@@ -702,6 +711,13 @@ class GaussianSplatRenderer(nn.Module):
         splats["quats"] = act_gs.reg_dense_rotation(quats.reshape(B, S, H * W, 4))
         splats["scales"] = act_gs.reg_dense_scales(scales.reshape(B, S, H * W, 3)).clamp_max(0.3)
         splats["opacities"] = act_gs.reg_dense_opacities(opacities.reshape(B, S, H * W))
+        # Ownership: a caller may declare that some source pixels must not spawn scene Gaussians,
+        # e.g. pixels under a predicted hand silhouette, whose unprojection would bake a dynamic
+        # occluder into the static scene. Applied here because after voxel fusion the per-pixel
+        # provenance no longer exists. Absent key = exact previous behaviour.
+        if "scene_opacity_mask" in views:
+            _om = views["scene_opacity_mask"][:, :S].reshape(B, S, H * W)
+            splats["opacities"] = splats["opacities"] * _om.to(splats["opacities"].dtype)
 
         # Handle spherical harmonics (SH) coefficients
         residual_sh = act_gs.reg_dense_sh(residual_sh.reshape(B, S, H * W, self.nums_sh * 3))

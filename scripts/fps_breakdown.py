@@ -123,9 +123,11 @@ def _flop_split(model, clip, clip_len, enable_gs, device):
 
     counter = FlopCounterMode(display=False, depth=1)
     try:
+        # Grad stays ENABLED here. Under no_grad the counter asserts "Expected gradient function to
+        # be set", so the FLOP pass is the one place this script builds a graph. It is one forward
+        # at the timed clip length, never a backward, and it runs outside the timed region.
         with counter:
-            with torch.no_grad():
-                _forward_once(model, clip, clip_len, device)
+            _forward_once(model, clip, clip_len, device)
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
 
@@ -187,6 +189,10 @@ def _time_config(cfg, enable_gs, clips, clip_len, warmup, iters, device, mano_mo
     cfg = copy.deepcopy(cfg)
     cfg["model"]["enable_gs"] = bool(enable_gs)
     cfg["model"]["enable_hand"] = bool(enable_hand)
+    # build_model warm-starts the hand head unconditionally, so it reaches for an attribute the
+    # backbone-only arm never builds.
+    if not enable_hand:
+        cfg["model"].pop("warm_start_hand_head", None)
     model = build_model(cfg, device)
     if gs_anchor_only:
         model.gs_anchor_only = True

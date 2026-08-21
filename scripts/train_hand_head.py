@@ -37,6 +37,9 @@ from scripts.hand_depth_anchor_loss import hand_depth_anchor_loss
 from scripts.object_depth_loss import object_depth_loss
 from scripts.scale_head_loss import (scale_head_loss, scale_head_gt_loss,
                                      gt_camera_scales)
+from scripts.gs_depth_logit_loss import gs_depth_logit_loss
+from scripts.hand_gaussian_chamfer_loss import hand_gaussian_chamfer_loss
+from scripts.metric_views import build_views_metric
 from scripts.hand_scene_registration_loss import hand_scene_registration_loss
 from scripts.hand_metrics import metric_chunks_from_batch, metrics_from_chunks
 from scripts.gs_metrics import (
@@ -229,7 +232,7 @@ class HOT3DHandDataset(Dataset):
                  objects_dir=None, render_obj_depth=False, obj_render_res=224,
                  da3_wrist_cache_dir=None, contact_cache_dir=None,
                  feature_cache_dir=None, emit_cache_key=False, bbox_perturb=None,
-                 min_labelled_frames=0):
+                 min_labelled_frames=0, cache_gt_is_mano=False):
         # LABEL-AWARE CLIP SAMPLING. Sparsely-annotated stores (Ego-Exo4D labels ~2.3% of
         # frames) otherwise yield clips that contain NO supervised frame at all: they consume
         # sampler weight and compute while producing zero gradient. Requiring >= N labelled
@@ -239,6 +242,7 @@ class HOT3DHandDataset(Dataset):
         # are visible and active, so this selects that regime and the store cannot teach
         # "no hand here". Our dense roots cover that case.
         self.min_labelled_frames = int(min_labelled_frames)
+        self.cache_gt_is_mano = bool(cache_gt_is_mano)
         self._clip_retention = {}
         self.num_frames = num_frames
         self.mano_model = mano_model
@@ -428,6 +432,10 @@ class HOT3DHandDataset(Dataset):
                 seq_cam_intrinsics = torch.load(cam_intr_cache_path, weights_only=True)
                 print(f"Loaded cam_intrinsics (no 2D/extrinsics cache) for {seq_path}.")
 
+            if seq_cam_intrinsics is not None:
+                seq_cam_intrinsics = _intr_to_render_frame(
+                    seq_cam_intrinsics, _video_wh(video_path), self.res)
+
             # contact_cache (Phase-2 anchor gate): per-frame, per-hand bool from
             # scripts.build_contact_cache (GT wrist on the GT surface). Loaded
             # independently like cam_intrinsics; absent -> None -> the anchor falls
@@ -466,6 +474,13 @@ class HOT3DHandDataset(Dataset):
                     # the model to predict zero MANO, silently and with a healthy-looking curve.
                     if "gt" in cached:
                         gt_per_frame[:] = list(cached["gt"])
+                        # The cache's 'gt' is real MANO written by the cache builder, so the
+                        # placeholder flag set on the no-jsonl branch must be restored, or every
+                        # param loss is masked to zero on this store. Measured on HOT3D: the flag
+                        # stayed False with gt.abs().sum()=796, so transl/orient/pose/betas never
+                        # trained there in any cached-crop run, mix5 included.
+                        if self.cache_gt_is_mano:
+                            seq_has_mano = bool(cached["gt"].abs().sum() > 1e-3)
                     else:
                         seq_has_mano = False
                         print(f"{seq_path}: box cache has no 'gt' -> JOINTS-ONLY sequence, "
@@ -1210,6 +1225,29 @@ class MixedHandDataset(Dataset):
                                self.weights or [None] * len(self.parts)))
 
 
+def _video_wh(video_path):
+    """(width, height) of a store's source frames."""
+    return tuple(reversed(VideoReader(video_path)[0].shape[:2]))
+
+
+def _intr_to_render_frame(intr, src_wh, res):
+    """Carry native (f, cx, cy) onto the square frame the model actually sees.
+
+    Every frame is scaled to cover and then centre-cropped (`auxiliary.py:126-142`), while the
+    preprocessors cache intrinsics at the source resolution. Consumers that normalise by the
+    declared width therefore read a principal point that does not match the pixels: on arctic the
+    source is 2800x2000 against a 224 render, and every projected joint lands outside the frame.
+    Identity on HOI4D, whose video is already 224x224, so its published numbers do not move.
+    """
+    W, H = src_wh
+    rw, rh = int(res[0]), int(res[1])
+    k = max(rw / W, rh / H)
+    f, cx, cy = (float(intr[0]), float(intr[1]), float(intr[2]))
+    return torch.tensor([f * k,
+                         cx * k - (W * k - rw) / 2.0,
+                         cy * k - (H * k - rh) / 2.0], dtype=torch.float32)
+
+
 def discover_sequences(data_root):
     seqs = []
     for name in sorted(os.listdir(data_root)):
@@ -1369,7 +1407,7 @@ def render_vis_list(vis_items, gt_pred_pairs, render_fn):
 # Validation
 # ------------------------------------------------------------------
 
-def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None, lpips_scorer=None, max_batches=None, scale_target="hand"):
+def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, loss_weights, vis_clip_indices=None, lpips_scorer=None, max_batches=None, scale_target="hand", gs_camera_mode="identity_source", gs_n_targets=2, frame_width=224.0):
     """Run validation and optionally capture gt/pred at specific clip indices.
 
     Returns (val_loss, val_terms, captured, hand_metrics, gs_metrics) where
@@ -1413,6 +1451,19 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             hv = vbatch["hand_valid"].to(device)  if "hand_valid"  in vbatch else None
             if "cached_tokens" in vbatch:
                 preds = forward_hand_cached(model, vbatch["cached_tokens"], imgs, hb, hv)
+            elif gs_camera_mode == "metric_context_target":
+                # Same dispatch as the training loop. Validating on the identity path while
+                # training on this one reports the per-frame near-copy score, which reads about
+                # 13 dB better than what the objective is actually optimising.
+                if "cam_extrinsics" not in vbatch or "cam_intrinsics" not in vbatch:
+                    raise SystemExit("validation under metric_context_target needs cam_extrinsics "
+                                     "and cam_intrinsics in the batch; this store has neither")
+                views = build_views_metric(
+                    imgs, imgs.shape[1], device,
+                    vbatch["cam_extrinsics"], vbatch["cam_intrinsics"], frame_width,
+                    hand_bboxes=hb, hand_valid=hv, n_targets=gs_n_targets,
+                    frame_index=vbatch.get("frame_index"))
+                preds = model(views, is_inference=False, use_motion=False)
             else:
                 views = build_views(imgs, num_frames, device, hb, hv)
                 preds = model(views, is_inference=False, use_motion=False)
@@ -1532,8 +1583,12 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             anchor_residual_m = 0.0
             gs_depth_pred = preds.get("gs_depth")
             if gs_depth_pred is not None and "cam_intrinsics" in vbatch:
+                # Same cut as the train loop: with targets held out gs_depth covers the context
+                # frames only, and context is the leading block.
+                _sc = gs_depth_pred.shape[1]
                 loss_hand_anchor, _anchor_info = hand_depth_anchor_loss(
-                    pred_joints, gs_depth_pred, has_hand, vbatch["cam_intrinsics"].to(device),
+                    pred_joints[:, :_sc], gs_depth_pred, has_hand[:, :_sc],
+                    vbatch["cam_intrinsics"].to(device),
                 )
                 anchor_residual_m = _anchor_info["hand_depth_residual_m"]
 
@@ -1567,8 +1622,9 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
                         scale_s_pred_sum = _sh_info["s_pred_mean"] * scale_n_clips
                         scale_s_gt_sum = _sh_info["s_gt_mean"] * scale_n_clips
                 elif gs_depth_pred is not None and "cam_intrinsics" in vbatch:
+                    _sc = gs_depth_pred.shape[1]
                     loss_scale_head, _sh_info = scale_head_loss(
-                        pred_scale, pred_joints, gs_depth_pred, has_hand,
+                        pred_scale, pred_joints[:, :_sc], gs_depth_pred, has_hand[:, :_sc],
                         vbatch["cam_intrinsics"].to(device),
                     )
                     scale_residual_m = _sh_info["scale_residual_m"]
@@ -1578,8 +1634,10 @@ def run_validation(model, val_loader, num_frames, device, criterion_kp3d, criter
             reg_residual_m = 0.0
             if (gs_depth_pred is not None and "cam_intrinsics" in vbatch):
                 pred_verts = compute_vertices_from_batch(pred_params, mano_model, device)
+                _sc = gs_depth_pred.shape[1]
                 loss_hand_scene_reg, _reg_info = hand_scene_registration_loss(
-                    pred_verts, gs_depth_pred, has_hand, vbatch["cam_intrinsics"].to(device),
+                    pred_verts[:, :_sc], gs_depth_pred, has_hand[:, :_sc],
+                    vbatch["cam_intrinsics"].to(device),
                     pred_scale=pred_scale,
                 )
                 reg_residual_m = _reg_info["registration_residual_m"]
@@ -1806,7 +1864,7 @@ def _dump_scale_targets(model, val_loader, num_frames, device, out_path, *, min_
     scales = []
     with torch.no_grad():
         for vbatch in tqdm(val_loader, desc="scale targets", leave=False):
-            imgs = vbatch["images"].to(device)
+            imgs = vbatch["img"].to(device)
             hb = vbatch["hand_bboxes"].to(device) if "hand_bboxes" in vbatch else None
             hv = vbatch["hand_valid"].to(device)  if "hand_valid"  in vbatch else None
             preds = model(build_views(imgs, num_frames, device, hb, hv),
@@ -2157,6 +2215,21 @@ def train():
         seqs = discover_sequences(spec["root"])
         if not seqs:
             raise RuntimeError(f"No sequences found in {spec['root']}")
+        # metric_context_target renders held-out views, so a sequence with no camera
+        # trajectory cannot be used at all. Drop those here rather than at the first
+        # batch that happens to sample one, and say how many the pool loses.
+        if cfg.get("training", {}).get("gs_camera_mode") == "metric_context_target":
+            with_extr = [q for q in seqs if os.path.exists(
+                os.path.join(q, "hand_data/cam_extrinsics_cache.pt"))]
+            if len(with_extr) != len(seqs):
+                print(f"[data] {spec['name']}: {len(seqs) - len(with_extr)} of {len(seqs)} "
+                      f"sequences have no cam_extrinsics_cache.pt and are dropped, "
+                      f"leaving {len(with_extr)}")
+            if not with_extr:
+                raise RuntimeError(
+                    f"gs_camera_mode metric_context_target, but no sequence in {spec['root']} "
+                    "carries cam_extrinsics_cache.pt")
+            seqs = with_extr
         if debug_cfg.get("enabled", False):
             seqs = seqs[: debug_cfg.get("max_sequences", 5)]
             print(f"[DEBUG] {spec['name']}: limited to {len(seqs)} sequences")
@@ -2197,6 +2270,93 @@ def train():
     anchor_conf_thresh = anchor_cfg.get("conf_thresh", 0.0)
     anchor_warmup_steps = int(anchor_cfg.get("warmup_steps", 800))
     anchor_direction = anchor_cfg.get("direction", "scene_follows_hand")
+    # "log" compares depth RATIOS. In linear space the smooth-L1 saturates above `margin`, so once
+    # the depth escapes it pulls back no harder than a 3 cm error: run 11176291 held for 100 steps
+    # and then reached 1.3e7 m with the anchor at weight 1.0.
+    anchor_space = anchor_cfg.get("space", "linear")
+
+    # Chamfer from the hand-region Gaussians to the MANO surface. Unlike the depth anchor this
+    # reads nothing from the model's own depth at the hand, so there is no background to
+    # contaminate the target, and it is a 3D distance rather than a ratio, so a cloud that has run
+    # away in scale is penalised in proportion instead of saturating.
+    cham_cfg = cfg.get("hand_gaussian_chamfer", {})
+    w_cham = cfg["loss_weights"].get("hand_gaussian_chamfer", 0.0)
+    cham_keep_frac = float(cham_cfg.get("keep_frac", 0.8))
+    cham_warmup_steps = int(cham_cfg.get("warmup_steps", 0))
+
+    # How the Gaussian branch sees its cameras.
+    #   identity_source      the existing path: identity poses and intrinsics, and the photometric
+    #                        loss re-renders the input views from Gaussians unprojected from those
+    #                        same views. Depth is unobservable under it.
+    #   metric_context_target  real intrinsics and real poses, with held-out target frames, so
+    #                        parallax makes depth observable. Dispatched to a separate builder so
+    #                        the legacy path stays bit-identical.
+    gs_camera_mode = training_cfg.get("gs_camera_mode", "identity_source")
+    if gs_camera_mode not in ("identity_source", "metric_context_target"):
+        raise SystemExit(f"unknown gs_camera_mode: {gs_camera_mode!r}")
+    gs_n_targets = int(training_cfg.get("gs_n_targets", 2))
+    # Anti-collapse belt: supervise the PRE-clamp depth logit toward a target. "frozen_teacher"
+    # uses the untouched head's own depth, which needs no new data but by construction cannot make
+    # the head better than its starting point, only stop it collapsing. "sensor" is the real fix
+    # and waits on dense depth that is not currently on disk.
+    gs_depth_target = training_cfg.get("gs_depth_target", "none")
+    if gs_depth_target not in ("none", "frozen_teacher", "object", "depth_head"):
+        raise SystemExit(f"unknown gs_depth_target: {gs_depth_target!r}")
+    w_logit = cfg["loss_weights"].get("gs_depth_logit", 0.0)
+    logit_beta = float(cfg.get("gs_depth_logit", {}).get("beta", 0.1))
+
+    if gs_depth_target == "depth_head":
+        # Cyrus's anchor: the dedicated depth head, trained upstream on GT depth, as the target
+        # for the pre-clamp gs_depth logit. A teacher that moves teaches nothing, so it is frozen.
+        if not getattr(model, "enable_depth", False) or not hasattr(model, "depth_head"):
+            raise SystemExit("gs_depth_target: depth_head needs model.enable_depth: true")
+        if w_logit <= 0.0:
+            raise SystemExit("gs_depth_target: depth_head with loss_weights.gs_depth_logit at 0.0 "
+                             "runs a depth head nothing reads")
+        for _p in model.depth_head.parameters():
+            _p.requires_grad = False
+        print("[gs_depth_target] depth_head: frozen, used as the logit target")
+
+    if gs_depth_target == "frozen_teacher":
+        if w_logit <= 0.0:
+            raise SystemExit("gs_depth_target: frozen_teacher with loss_weights.gs_depth_logit at "
+                             "0.0 builds a teacher nothing reads")
+        # The shared-token teacher equals a whole frozen model ONLY if the trunk cannot move. If
+        # any of it is trainable the target drifts with the student and the term teaches nothing.
+        # What the teacher reads is `token_list`, so the trunk that produces it is the only thing
+        # that can make the target drift with the student. Heads are irrelevant however many of
+        # them exist: naming them one by one cost two failed submissions, once for cam_head and
+        # once for the renderer's own gs_head.
+        _moving = [n for n, p_ in model.named_parameters()
+                   if p_.requires_grad and n.startswith("visual_geometry_transformer")]
+        if _moving:
+            raise SystemExit(
+                "gs_depth_target: frozen_teacher needs a frozen token trunk, but these "
+                f"visual_geometry_transformer parameters are trainable: {_moving[:5]}"
+                f"{'...' if len(_moving) > 5 else ''}. Use a full frozen teacher model instead, "
+                "or the target moves with the student.")
+        import copy as _copy
+        _teacher = _copy.deepcopy(model.gs_head).to(device).eval()
+        # Reload from the declared upstream checkpoint rather than trusting the live head, which
+        # after a resume is the student mid-training and would make the teacher a copy of it.
+        _base = torch.load(cfg["model"]["checkpoint"], map_location=device)
+        _base = _base.get("state_dict", _base.get("reconstructor", _base))
+        _pre = {k[len("gs_head."):]: v for k, v in _base.items() if k.startswith("gs_head.")}
+        if not _pre:
+            raise SystemExit("the base checkpoint holds no gs_head weights, so there is no "
+                             "untouched teacher to load")
+        _teacher.load_state_dict(_pre, strict=False)
+        for p_ in _teacher.parameters():
+            p_.requires_grad_(False)
+        # A list, so nn.Module does not register it: kept out of state_dict, parameters() and train().
+        model._teacher_gs_head = [_teacher]
+        print(f"[gs teacher] frozen gs_head loaded from {cfg['model']['checkpoint']} "
+              f"({sum(p_.numel() for p_ in _teacher.parameters()) / 1e6:.1f}M params, not trained, "
+              f"not saved)", flush=True)
+    _r = data_cfg.get("resolution")
+    _cham_frame_w = float(_r[0] if isinstance(_r, (list, tuple)) else _r) if _r else None
+    if w_cham > 0.0 and not _cham_frame_w:
+        raise SystemExit("hand_gaussian_chamfer needs data.resolution to unproject the depth")
     grad_clip_norm = float(training_cfg.get("grad_clip_norm", 10.0))
     kp3d_abs_warmup_steps = int(training_cfg.get("kp3d_abs_warmup_steps", 0))
     max_steps = int(training_cfg.get("max_steps", 0))  # >0: stop after N optimizer steps (bounded probe; final head still saved)
@@ -2217,7 +2377,9 @@ def train():
     obj_warmup_steps = int(obj_cfg.get("warmup_steps", 0))
     obj_render_res = int(obj_cfg.get("render_res", 224))
     objects_dir = obj_cfg.get("objects_dir")
-    render_obj_depth = w_obj_depth > 0.0 and objects_dir is not None
+    # The logit-space term consumes the same rendered maps, so it must open this gate too.
+    _wants_obj_maps = w_obj_depth > 0.0 or (w_logit > 0.0 and gs_depth_target == "object")
+    render_obj_depth = _wants_obj_maps and objects_dir is not None
 
     # Scale-head supervision config (direction b: feedforward global metric scale).
     scale_cfg = cfg.get("scale_head", {})
@@ -2255,6 +2417,12 @@ def train():
         # Sparsely-annotated roots (Ego-Exo4D labels ~2.3% of frames) otherwise yield clips
         # with no supervised frame at all. No-op on dense roots, which keep 100% of clips.
         min_labelled_frames=data_cfg.get("min_labelled_frames", 0),
+        # Defect 12: the bbox cache's 'gt' is real MANO but the no-jsonl branch leaves has_mano
+        # False, so param losses are silently masked on such stores (HOT3D in every cached-crop
+        # run, mix5 included). The FIX is gated and DEFAULT OFF because turning it on changes what
+        # trains: enabling it for one arm of an existing pair (abl_fusion ON is already trained
+        # without it) would break that pair's parity.
+        cache_gt_is_mano=bool(data_cfg.get("cache_gt_is_mano", False)),
     )
 
     if debug_cfg.get("single_frame", False):
@@ -2678,8 +2846,7 @@ def train():
             "scale_head": 0.0, "scale_residual_m": 0.0,
             "scale_s_pred": 0.0, "scale_s_gt": 0.0, "scale_n_clips": 0.0,
             "hand_scene_registration": 0.0, "registration_residual_m": 0.0,
-            "root_anchor": 0.0,
-        }
+            "root_anchor": 0.0, "gs_depth_logit": 0.0}
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Train {epoch}", leave=False)):
             if epoch == start_epoch and batch_idx < (global_step % steps_per_epoch) * grad_accum_steps:
@@ -2705,8 +2872,18 @@ def train():
             # imgs.shape[1] (not the config num_frames) is the batch's real length under
             # data.random_frames; "frame_index" is absent on the fixed-length path, where this
             # call is identical to the previous build_views(imgs, num_frames, ...).
-            views_train = build_views(imgs, imgs.shape[1], device, hb, hv,
-                                      frame_index=batch.get("frame_index"))
+            if gs_camera_mode == "metric_context_target":
+                if "cam_extrinsics" not in batch or "cam_intrinsics" not in batch:
+                    raise SystemExit("gs_camera_mode: metric_context_target needs cam_extrinsics "
+                                     "and cam_intrinsics in the batch; this store has neither")
+                views_train = build_views_metric(
+                    imgs, imgs.shape[1], device,
+                    batch["cam_extrinsics"], batch["cam_intrinsics"], _cham_frame_w,
+                    hand_bboxes=hb, hand_valid=hv, n_targets=gs_n_targets,
+                    frame_index=batch.get("frame_index"))
+            else:
+                views_train = build_views(imgs, imgs.shape[1], device, hb, hv,
+                                          frame_index=batch.get("frame_index"))
 
             # PROFILE_TORCH=1 (with PROFILE_STEPS>0): op-level breakdown of ONE
             # forward to find what the flat-under-bf16 20s actually is. Prints
@@ -2896,11 +3073,15 @@ def train():
             anchor_residual_m = 0.0
             gs_depth_pred = preds.get("gs_depth")
             if w_anchor > 0.0 and gs_depth_pred is not None and "cam_intrinsics" in batch:
+                # With targets held out gs_depth covers the context frames only, and context is
+                # the leading block, so the hand tensors are cut to the same span.
+                _sc = gs_depth_pred.shape[1]
                 loss_hand_anchor, _anchor_info = hand_depth_anchor_loss(
-                    pred_joints, gs_depth_pred, has_hand, batch["cam_intrinsics"].to(device),
+                    pred_joints[:, :_sc], gs_depth_pred, has_hand[:, :_sc],
+                    batch["cam_intrinsics"].to(device),
                     margin=anchor_margin, depth_min=anchor_depth_min,
                     gs_depth_conf=preds.get("gs_depth_conf"), conf_thresh=anchor_conf_thresh,
-                    direction=anchor_direction,
+                    direction=anchor_direction, space=anchor_space,
                 )
                 anchor_residual_m = _anchor_info["hand_depth_residual_m"]
             # GT object-depth supervision: pull gs_depth toward the metric object
@@ -2944,20 +3125,76 @@ def train():
                     scale_s_pred_sum = _sh_info["s_pred_mean"] * scale_n_clips
                     scale_s_gt_sum = _sh_info["s_gt_mean"] * scale_n_clips
                 elif gs_depth_pred is not None and "cam_intrinsics" in batch:
+                    _sc = gs_depth_pred.shape[1]
                     loss_scale_head, _sh_info = scale_head_loss(
-                        pred_scale, pred_joints, gs_depth_pred, has_hand,
+                        pred_scale, pred_joints[:, :_sc], gs_depth_pred, has_hand[:, :_sc],
                         batch["cam_intrinsics"].to(device),
                         margin=scale_margin, depth_min=scale_depth_min,
                     )
                     scale_residual_m = _sh_info["scale_residual_m"]
+
+            # Raw-logit depth supervision. gs_depth is exp(clamp(z, max=20)) and the clamp has no
+            # gradient above its maximum, so this is applied to z and not to the activated depth.
+            loss_gs_logit = torch.zeros((), device=device)
+            logit_info = {}
+            if w_logit > 0.0 and "gs_depth_logit" in preds:
+                _tgt = None
+                _valid = None
+                if gs_depth_target == "frozen_teacher" and "gs_depth_teacher_logit" in preds:
+                    _tgt = preds["gs_depth_teacher_logit"].detach().clamp(max=19.0).exp()
+                elif gs_depth_target == "depth_head" and "depth" in preds:
+                    _tgt = preds["depth"].detach().float()
+                    if _tgt.dim() == 5 and _tgt.shape[-1] == 1:
+                        _tgt = _tgt[..., 0]
+                    _tgt = _tgt[:, : preds["gs_depth_logit"].shape[1]]
+                elif gs_depth_target == "object" and "gt_obj_depth" in batch:
+                    # The store carries object depth on the interaction region, zero elsewhere,
+                    # so the mask is what separates a surface from an unlabelled pixel.
+                    _tgt = batch["gt_obj_depth"].to(device).float()
+                    _msk = batch["gt_obj_mask"].to(device).bool()
+                    _hw = preds["gs_depth_logit"].shape[-2:]
+                    if _tgt.shape[-2:] != _hw:
+                        _b, _s = _tgt.shape[:2]
+                        _tgt = F.interpolate(_tgt.reshape(_b * _s, 1, *_tgt.shape[-2:]),
+                                             size=_hw, mode="nearest").reshape(_b, _s, *_hw)
+                        _msk = F.interpolate(_msk.reshape(_b * _s, 1, *_msk.shape[-2:]).float(),
+                                             size=_hw, mode="nearest").reshape(_b, _s, *_hw) > 0.5
+                    _valid = _msk
+                if _tgt is None:
+                    raise SystemExit(
+                        f"loss_weights.gs_depth_logit is {w_logit} but the "
+                        f"{gs_depth_target!r} target is unavailable: "
+                        f"batch keys {sorted(batch.keys())}, pred keys {sorted(preds.keys())}")
+                loss_gs_logit, logit_info = gs_depth_logit_loss(
+                    preds["gs_depth_logit"], _tgt, beta=logit_beta, valid=_valid)
+
+            # Hand-Gaussian Chamfer: the Gaussians in the hand box must lie on the MANO surface.
+            loss_hand_cham = torch.zeros((), device=device)
+            cham_m = 0.0
+            # `hb`, not `views`: the training loop keeps the boxes in a local and builds
+            # `views_train` from them, so `views` is not bound here.
+            if (w_cham > 0.0 and gs_depth_pred is not None and "cam_intrinsics" in batch
+                    and hb is not None):
+                _cv = compute_vertices_from_batch(pred_params, mano_model, device)
+                loss_hand_cham, _cham_info = hand_gaussian_chamfer_loss(
+                    gs_depth_pred, _cv, hb, has_hand,
+                    # NOT `res`: line 2610 rebinds that name to a load_state_dict result. Read
+                    # the resolution from the config, which is also what set_default_frame_width
+                    # declares as the frame the intrinsics refer to.
+                    batch["cam_intrinsics"].to(device), _cham_frame_w,
+                    keep_frac=cham_keep_frac,
+                )
+                cham_m = _cham_info["chamfer_m"]
 
             # Hand-scene registration loss (dense surface-level metric coupling).
             loss_hand_scene_reg = torch.zeros((), device=device)
             reg_residual_m = 0.0
             if (w_reg > 0.0 and gs_depth_pred is not None and "cam_intrinsics" in batch):
                 pred_verts = compute_vertices_from_batch(pred_params, mano_model, device)
+                _sc = gs_depth_pred.shape[1]
                 loss_hand_scene_reg, _reg_info = hand_scene_registration_loss(
-                    pred_verts, gs_depth_pred, has_hand, batch["cam_intrinsics"].to(device),
+                    pred_verts[:, :_sc], gs_depth_pred, has_hand[:, :_sc],
+                    batch["cam_intrinsics"].to(device),
                     pred_scale=pred_scale,
                     margin=reg_margin, depth_min=reg_depth_min,
                     gs_depth_conf=preds.get("gs_depth_conf"), conf_thresh=reg_conf_thresh,
@@ -2971,6 +3208,7 @@ def train():
             scale_ramp = min(1.0, global_step / scale_warmup_steps) if scale_warmup_steps > 0 else 1.0
             root_anchor_ramp = min(1.0, global_step / root_anchor_warmup_steps) if root_anchor_warmup_steps > 0 else 1.0
             reg_ramp = min(1.0, global_step / reg_warmup_steps) if reg_warmup_steps > 0 else 1.0
+            cham_ramp = min(1.0, global_step / cham_warmup_steps) if cham_warmup_steps > 0 else 1.0
 
             w = cfg["loss_weights"]
             loss = (
@@ -2988,6 +3226,8 @@ def train():
                 + w.get("scale_head", 0.0) * scale_ramp * loss_scale_head
                 + w.get("root_anchor", 0.0) * root_anchor_ramp * loss_root_anchor
                 + w.get("hand_scene_registration", 0.0) * reg_ramp * loss_hand_scene_reg
+                + w.get("hand_gaussian_chamfer", 0.0) * cham_ramp * loss_hand_cham
+                + w.get("gs_depth_logit", 0.0) * loss_gs_logit
             )
 
             # Isolation mode: backward each weighted term alone on this batch,
@@ -3031,6 +3271,32 @@ def train():
                 continue  # skip the normal accum path while isolating
 
             _t_loss = _lap()
+            # One-time probe: whether the teacher term or the photometric term owns the depth
+            # logit's gradient. Equal weights mean nothing when the two reductions differ, and a
+            # dominant teacher would pin the geometry to the pretrained head, which is exactly the
+            # quantity the injection A/B is supposed to move.
+            if global_step == 0 and batch_idx == 0 and w_logit > 0.0 and "gs_depth_logit" in preds:
+                _gs_p = [q for q in model.gs_head.parameters() if q.requires_grad]
+                if _gs_p:
+                    _gt = torch.autograd.grad(w_logit * loss_gs_logit, _gs_p,
+                                              retain_graph=True, allow_unused=True)
+                    _gp = torch.autograd.grad(
+                        w.get("gs_l1", 0.0) * loss_gs_l1 + w.get("gs_lpips", 0.0) * loss_gs_lpips,
+                        _gs_p, retain_graph=True, allow_unused=True)
+                    _nt = sum(float(g.norm()) ** 2 for g in _gt if g is not None) ** 0.5
+                    _np = sum(float(g.norm()) ** 2 for g in _gp if g is not None) ** 0.5
+                    tqdm.write(f"[grad-probe] gs_head grad norms at step 0: "
+                               f"teacher(w={w_logit})={_nt:.4g}  photometric={_np:.4g}  "
+                               f"ratio teacher/photo={_nt / max(_np, 1e-12):.3f}")
+                    # A nonzero loss does not prove the injection path carries gradient; this does.
+                    _inj_p = [q for n_, q in model.named_parameters()
+                              if q.requires_grad and "hand_to_gs_injection" in n_]
+                    if _inj_p:
+                        _gi = torch.autograd.grad(
+                            w.get("gs_l1", 0.0) * loss_gs_l1 + w.get("gs_lpips", 0.0) * loss_gs_lpips,
+                            _inj_p, retain_graph=True, allow_unused=True)
+                        _ni = sum(float(g.norm()) ** 2 for g in _gi if g is not None) ** 0.5
+                        tqdm.write(f"[grad-probe] photometric grad norm on the injection: {_ni:.4g}")
             (loss / grad_accum_steps).backward()
             _t_bwd = _lap()
             if _prof:
@@ -3060,6 +3326,7 @@ def train():
             accum_terms["gs_l1"]    += loss_gs_l1.item()
             accum_terms["gs_lpips"] += loss_gs_lpips.item()
             accum_terms["hand_depth_anchor"]    += loss_hand_anchor.item()
+            accum_terms["gs_depth_logit"]       += loss_gs_logit.item()
             accum_terms["hand_depth_residual_m"] += anchor_residual_m
             accum_terms["obj_depth"]    += loss_obj_depth.item()
             accum_terms["obj_depth_residual_m"] += obj_depth_residual_m
@@ -3094,6 +3361,7 @@ def train():
                 avg_terms = {k: v / grad_accum_steps for k, v in accum_terms.items()}
                 accum_loss = 0.0
                 accum_terms = {
+                    "gs_depth_logit": 0.0,
                     "transl": 0.0, "global_orient": 0.0, "hand_pose": 0.0, "betas": 0.0,
                     "kp3d": 0.0, "kp3d_abs": 0.0, "kp2d": 0.0,
                     "gs_l1": 0.0, "gs_lpips": 0.0,
@@ -3140,6 +3408,24 @@ def train():
 
                 if global_step % log_every == 0 or global_step == 1:
                     lr = scheduler.get_last_lr()[0]
+                    # The depth activation is exp(x.clamp(max=20)) (dense_head.py:354), and clamp
+                    # has no gradient above its maximum. A head that reaches it is dead and no
+                    # later loss can move it. gsinj2_on ran to completion with every pixel at the
+                    # clamp and nothing in the log said so, because no run has ever reported the
+                    # depth magnitude. Report it, so a collapse is visible while it is happening.
+                    if gs_depth_pred is not None:
+                        with torch.no_grad():
+                            _d = gs_depth_pred.detach().float()
+                            _frac = float((_d >= 4.8516e8).float().mean())
+                            _med = float(_d.median())
+                        if _frac > 0.5:
+                            tqdm.write(f"  !! gs_depth is {100 * _frac:.0f}% at the exp() clamp: "
+                                       f"the depth head is saturated and cannot recover")
+                        tqdm.write(f"  gs_depth median={_med:.4g} m  at_clamp={_frac:.3f}"
+                                   + (f"  chamfer={cham_m*1000:.1f} mm" if w_cham > 0.0 else "")
+                                   + (f"  logit_res={logit_info.get('logit_residual', 0):.3f}"
+                                      f" med={logit_info.get('logit_median', 0):.2f}"
+                                      if w_logit > 0.0 else ""))
                     tqdm.write(
                         f"  step {global_step} | train_loss={avg_loss:.4f} "
                         f"(t={avg_terms['transl']:.4f} o={avg_terms['global_orient']:.4f} "
@@ -3163,7 +3449,9 @@ def train():
 
                 # --- Validation ---
                 if val_loader and (global_step % val_every == 0 or global_step == 1):
-                    val_loss, val_terms, captured, hand_metrics, gs_metrics, gs_captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], capture_clip_indices, lpips_scorer=lpips_scorer, max_batches=val_max_batches, scale_target=scale_target)
+                    val_loss, val_terms, captured, hand_metrics, gs_metrics, gs_captured = run_validation(model, val_loader, num_frames, device, criterion_kp3d, criterion_kp2d, criterion_param, mano_model, cfg["loss_weights"], capture_clip_indices, lpips_scorer=lpips_scorer, max_batches=val_max_batches, scale_target=scale_target,
+                        gs_camera_mode=gs_camera_mode, gs_n_targets=gs_n_targets,
+                        frame_width=_cham_frame_w)
                     tqdm.write(
                         f"  step {global_step} | val_loss={val_loss:.4f} "
                         f"(t={val_terms['transl']:.4f} o={val_terms['global_orient']:.4f} "

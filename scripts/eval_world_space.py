@@ -258,9 +258,18 @@ def predict_clip(preds, mano_model, device, cam_intr, model=None, anchor_log=Non
     if depth_out is not None:
         d32 = None
         if gs_depth is not None:
+            # Drop the singleton channel from whichever side carries it. gs_depth comes out
+            # channel-last, [S,Hd,Wd,1], and `while d.dim()>3: d=d.squeeze(1)` never terminates
+            # on that layout: squeeze(1) is a no-op when dim 1 is not size 1. It does not raise
+            # and it does not log, so the job spins until SLURM kills it at the walltime, which
+            # reads as "the eval is slow". Same fix as _dense_scene_points below.
             d = gs_depth[0].float()
-            while d.dim() > 3:
-                d = d.squeeze(1)
+            if d.dim() == 4 and d.shape[1] == 1:
+                d = d[:, 0]
+            elif d.dim() == 4 and d.shape[-1] == 1:
+                d = d[..., 0]
+            if d.dim() != 3:
+                raise ValueError(f"depth dump: expected gs_depth[0] -> [S,Hd,Wd], got {tuple(d.shape)}")
             d32 = torch.nn.functional.interpolate(
                 d.unsqueeze(1), size=(32, 32), mode="nearest-exact").squeeze(1).half().cpu()
         depth_out.append(d32)
@@ -482,7 +491,8 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
     drift-vs-bias diagnostic. ``dump_list``: if given, append the raw per-segment pooled trajectory
     (pred/GT world joints + valid mask) so the smoothing sweep can be iterated offline on CPU.
     """
-    from scripts.train_hand_head import HOT3DHandDataset, build_views
+    from scripts.train_hand_head import (HOT3DHandDataset, build_views,
+                                         _intr_to_render_frame, _video_wh)
 
     mcfg = cfg["model"]
     ds = HOT3DHandDataset([seq_dir], mano_model, num_frames=clip_len, clip_stride=stride,
@@ -493,7 +503,13 @@ def eval_sequence(model, mano_model, device, seq_dir, cfg, segment_len, clip_len
     hd = os.path.join(seq_dir, "hand_data")
     gt_world = torch.load(os.path.join(hd, "gt_joints_cache_world.pt"), map_location="cpu").float()  # [N,2,16,3]
     gt_cam = torch.load(os.path.join(hd, "gt_joints_cache_cam_v2.pt"), map_location="cpu").float()    # [N,2,16,3]
+    # Loaded straight off disk, so it carries the SOURCE resolution while every frame the
+    # model sees has been scaled to cover and centre-cropped. Same mapping the dataset
+    # applies, or the projected joints land outside the frame on every non-224 store.
     cam_intr = torch.load(os.path.join(hd, "cam_intrinsics.pt"), map_location="cpu").float().view(1, 3)
+    cam_intr = _intr_to_render_frame(
+        cam_intr.view(3), _video_wh(os.path.join(seq_dir, "video_main_rgb.mp4")),
+        ds.res).view(1, 3)
     bb = torch.load(os.path.join(hd, "hand_bboxes_v2_rf1.5_res224x224.pt"), map_location="cpu")
     gt_valid = bb["valid"].bool()                           # [N,2]
     # C1 anchor references, keyed by seq basename, from /home (scratch is write-locked).

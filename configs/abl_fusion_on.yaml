@@ -1,0 +1,123 @@
+# FIVE-DATASET SCALE-UP: ARCTIC + DexYCB + HOT3D + OakInk2 + TACO.
+#
+# HOI4D and H2O are the HELD-OUT evaluation sets and appear in neither the roots nor the caches.
+# That is the whole point of the scale-up: the final tables report zero-shot transfer onto two
+# datasets the model never trained on, which is the strongest result this project has
+# (H2O C_abs 184.8 -> 66.2 under depth-diverse mixing).
+#
+# WHAT CHANGED, 2026-08-13. The previous version of this file listed HOI4D + OakInk2 + ARCTIC +
+# HOT3D + Ego-Exo4D and was unrunnable on two counts:
+#   * HOI4D was in data_roots while also being the evaluation set, i.e. train-on-test.
+#   * Ego-Exo4D ships 3D keypoints and never MANO, and its store is EMPTY (0 sequences); it was
+#     dropped rather than masked. See the egoexo4d-has-no-mano note.
+# DexYCB and TACO replace them. DexYCB is the deepest root at 0.875 m and TACO sits at 0.577 m
+# between H2O 0.503 and HOI4D 0.677, so the pool now BRACKETS both held-out sets in depth, which
+# is what makes the transfer claim work rather than a coincidence.
+#
+# CAMERA TYPE. Cyrus's rule is pinhole only, no mixing across camera models. HOT3D is fisheye and
+# is therefore UNDISTORTED to pinhole at f=609.78 by preprocess_undistort.py (the validated
+# pinhole_f609 recipe, 50.08 mm MPJPE). Every other root is natively pinhole with no distortion.
+#
+# FEATURE CACHES. Four of the five are built under featcache32/ (arctic, dexycb, hot3d, oakink2,
+# ~37.6k clips, 1.2 TB). TACO's is NOT, and until it exists this config trains UNCACHED, which is
+# hours per epoch rather than minutes. Build it before any long run.
+
+data:
+  data_roots:
+  # THE FIVE. HOI4D and H2O are the held-out evaluation sets and appear in NEITHER list.
+  - root: /cluster/scratch/dmonopoli/arctic_ours
+    name: arctic
+    weight: 1.0
+    feature_cache_dir: /cluster/scratch/dmonopoli/featcache32/arctic
+  - root: /cluster/scratch/dmonopoli/dexycb/store
+    name: dexycb
+    weight: 1.0
+    feature_cache_dir: /cluster/scratch/dmonopoli/featcache32/dexycb
+  - root: /cluster/scratch/dmonopoli/hot3d_pinhole_f609
+    name: hot3d
+    weight: 1.0
+    feature_cache_dir: /cluster/scratch/dmonopoli/featcache32/hot3d
+  - root: /cluster/scratch/dmonopoli/oakink2_ours
+    name: oakink2
+    weight: 1.0
+    feature_cache_dir: /cluster/scratch/dmonopoli/featcache32/oakink2
+  - root: /cluster/scratch/dmonopoli/taco_ours
+    name: taco
+    weight: 1.0
+    feature_cache_dir: /cluster/scratch/dmonopoli/featcache32/taco
+  num_frames: 32
+  resolution:
+  - 224
+  - 224
+  clip_stride: 16
+  val_split: 0.02
+  num_workers: 1
+  min_labelled_frames: 4
+model:
+  checkpoint: models/NeoVerse/reconstructor.ckpt
+  freeze_backbone: true
+  enable_hand: true
+  hand_head_type: hamer
+  use_hand_crop: true
+  hand_crop_size: 8
+  enable_cam: false
+  enable_pts: false
+  enable_depth: false
+  enable_norm: false
+  enable_motion: false
+  enable_gs: false
+  hamer_head_kwargs:
+    dim: 1024
+    depth: 6
+    heads: 8
+    dim_head: 64
+    mlp_dim: 1024
+    dropout: 0.0
+    crop_global_depth: 1
+loss_weights:
+  betas: 0.01
+  global_orient: 0.01
+  hand_pose: 0.01
+  kp2d: 0.0    # DISABLED 2026-08-06: Aria-hardcoded (1408 px + 90deg rotation) vs unrotated res-pixel GT; see task #62
+  kp3d: 0.05
+  kp3d_abs: 1.0
+  transl: 1.0
+  hand_depth_anchor: 0.0
+  root_anchor: 0.0
+  gs_l1: 0.0
+  gs_lpips: 0.0
+metric_scale:
+  enable: true
+  clamp:
+  - 0.1
+  - 10.0
+training:
+  lr: 1e-4
+  min_lr: 1e-7
+  epochs: 3
+  batch_size: 16
+  grad_accum_steps: 2
+  log_every: 100
+  val_every: 3000
+  save_every: 2000
+  seed: 42
+  output_dir: /cluster/scratch/dmonopoli/checkpoints/abl_fusion_on
+visualization:
+  mano_model_folder: models/MANO
+  num_vis_frames: 0
+hand_crop:
+  rescale_factor: 1.5
+debug:
+  enabled: false
+  max_sequences: 5
+  single_frame: false
+wandb:
+  enabled: true
+  project: hand-head-training
+  entity: 3DV-Project
+  run_name: mix5 ARCTIC+DexYCB+HOT3D+OakInk2+TACO (HOI4D and H2O held out)
+  tags:
+  - mixed
+  - 5dataset
+  - scale-up
+  notes: Five-dataset scale-up. Ego-Exo4D is joints-only (param losses masked).

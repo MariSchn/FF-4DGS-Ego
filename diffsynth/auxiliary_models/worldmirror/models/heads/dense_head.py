@@ -146,7 +146,9 @@ class DPTHead(nn.Module):
 
         # Process all frames together if chunk size not specified or large enough
         if frames_chunk_size is None or frames_chunk_size >= S:
-            return self._forward_impl(token_list, images, patch_start_idx, feature_hook=feature_hook)
+            out = self._forward_impl(token_list, images, patch_start_idx, feature_hook=feature_hook)
+            self._reshape_raw_attr(B)
+            return out
 
         assert frames_chunk_size > 0
 
@@ -154,6 +156,7 @@ class DPTHead(nn.Module):
         preds_chunks = []
         conf_chunks = []
         gs_chunks = []
+        raw_chunks = []
 
         for frame_start in range(0, S, frames_chunk_size):
             frame_end = min(frame_start + frames_chunk_size, S)
@@ -173,6 +176,14 @@ class DPTHead(nn.Module):
                 )
                 preds_chunks.append(preds)
                 conf_chunks.append(conf)
+            # activate_head stashes only the chunk it just saw; without collecting here the
+            # published logit would silently cover the LAST chunk's frames alone.
+            raw = getattr(self, "_last_raw_attr", None)
+            if raw is not None:
+                raw_chunks.append(raw.reshape(B, frame_end - frame_start, *raw.shape[1:]))
+
+        if raw_chunks:
+            self._last_raw_attr = torch.cat(raw_chunks, dim=1)
 
         # Concatenate chunks along frame dimension
         if self.is_gsdpt:
@@ -281,6 +292,11 @@ class DPTHead(nn.Module):
             conf = conf.reshape(B, S, *conf.shape[1:])
             return preds, conf
 
+    def _reshape_raw_attr(self, B: int) -> None:
+        raw = getattr(self, "_last_raw_attr", None)
+        if raw is not None and raw.shape[0] != B:
+            self._last_raw_attr = raw.reshape(B, -1, *raw.shape[1:])
+
     def _apply_pos_embed(self, x: torch.Tensor, W: int, H: int, ratio: float = 0.1) -> torch.Tensor:
         """
         Apply positional embedding to tensor x.
@@ -346,6 +362,15 @@ class DPTHead(nn.Module):
             conf = torch.ones_like(feat[..., :1])
         else:
             attr, conf = feat[..., :-1], feat[..., -1]
+
+        # Keep the pre-activation attribute reachable. `exp` below is
+        # `exp(x.clamp(max=_EXP_ACT_MAX))`, and the clamp has zero gradient above its maximum, so a
+        # depth loss applied to the activated output cannot move a unit that has already saturated.
+        # Supervising this raw value instead keeps a gradient in that regime. Stashing rather than
+        # returning it keeps the signature, and therefore every existing caller, unchanged.
+        # Here it is [B*S_chunk, H, W, C]; forward() reassembles it to [B, S, H, W, C], the layout
+        # consumers may rely on.
+        self._last_raw_attr = attr
 
         # Map point activations to lambdas for clarity and conciseness
         attr_activations = {

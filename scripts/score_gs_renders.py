@@ -94,7 +94,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--renders", required=True, help="<root>/<seq>/renders/*.png")
     ap.add_argument("--gt_root", required=True, help="<root>/<seq>/images/*.png")
-    ap.add_argument("--store", required=True, help="our store, for the detbox v3 boxes")
+    ap.add_argument("--store", required=True,
+                    help="our store; the hand region comes from its hand_data/"
+                         "hand_bboxes_v2_rf1.5_res224x224.pt, NOT from hoi4d_detboxes_v3")
     ap.add_argument("--method", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
